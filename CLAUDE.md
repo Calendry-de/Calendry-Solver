@@ -347,6 +347,64 @@ grpcurl -plaintext -import-path vendor/calendry-proto/proto \
   < examples/forced_unique.json
 ```
 
+### TRACKED CROSS-REPO FOLLOW-UP — schema distribution to the Nuxt app
+**Read the split below carefully: one half is real and verified, the other half
+is designed but does not exist.** Do not let this round up to "publishing is set
+up" — nothing has ever been published.
+
+**DONE, and verified end-to-end (2026-08-14):**
+- `calendry-proto` holds the three `.proto` files at commit `755aa5d`, pushed to
+  `github.com/MindCollaps/calendry-proto`.
+- Annotated tag `v0.1.0` (`cb2247c` → `755aa5d`) is pushed.
+- This repo consumes them as a submodule at `vendor/calendry-proto`, pinned to
+  `755aa5d`, with no sibling-checkout fallback.
+- Verified by `git clone --recurse-submodules` into a clean directory with
+  `CALENDRY_PROTO_DIR` unset and no sibling checkout present: the submodule
+  resolved to `755aa5d`, `git describe` read `v0.1.0`, and the full suite passed
+  (26 tests) building only from the recorded pins.
+
+**NOT DONE — designed and approved, but no file exists yet.** `calendry-proto`
+currently contains *nothing but* the three `.proto` files and the tag. There is
+no CI, no `buf.yaml`, no `packages/ts/`, no `package.json`, and
+**`@mindcollaps/calendry-proto` is not an installable package anywhere.** The
+approved design, recorded so it is not re-litigated:
+- `validate.yml` on push/PR to `main`: `protoc` compile + `buf lint` +
+  `buf breaking` against `main`. Tag-only publishing would otherwise leave the
+  schema unchecked until release day.
+- `publish.yml` on `v*.*.*` tags only, plus `workflow_dispatch`. Not per-commit:
+  published versions are effectively immutable, so per-commit publishing burns
+  version numbers permanently and makes half-finished schema installable.
+- Package at `packages/ts/` — *not* the repo root, which would quietly make a
+  language-neutral repo into "a TS repo that also has protos". Generated TS is a
+  build artifact and is **not** committed.
+- Name `@mindcollaps/calendry-proto` (scope must match the owner, lowercase),
+  ESM-first (`calendry` is `"type": "module"`), published to **GitHub Packages**
+  (`https://npm.pkg.github.com`) using the workflow's built-in `GITHUB_TOKEN`
+  with `packages: write` — no separate secret, no npmjs.org account.
+- Version comes from the git tag alone (`npm version --no-git-tag-version
+  ${TAG#v}`); the in-repo `package.json` carries a `0.0.0-dev` placeholder so
+  there is no second place to forget to update.
+- ts-proto options: `esModuleInterop=true`, `outputServices=grpc-js`,
+  `useOptionals=messages`, `outputJsonMethods=true`, and **`forceLong=string`**.
+  That last one is a correctness requirement, not style: ts-proto defaults to
+  `forceLong=number`, which silently loses precision above 2^53, and `seed` is a
+  full-range `uint64` whose corruption would break the reproducibility contract
+  `StartRunResponse` exists to provide. `max_moves` and `moves_evaluated` are the
+  same shape. Proto3 JSON already encodes these as strings.
+
+**NOT STARTED — belongs to a separate session against the `calendry` (Nuxt)
+repo, which is not checked out here:**
+- Add `calendry-proto` as a submodule there too.
+- Import `@mindcollaps/calendry-proto` and wire up the gRPC client.
+- **Add an `.npmrc` with a GitHub Packages token.** GitHub Packages' npm registry
+  requires authentication to *install*, even for public packages — this hits
+  local dev, the docker-compose build, and CI. `calendry` has no `.npmrc` today.
+
+The tag is the pivot that keeps the two consumers honest: this repo pinned at the
+commit tagged `v0.1.0`, and the Nuxt app installing
+`@mindcollaps/calendry-proto@0.1.0` built from that same tag, means "which schema
+is each side on" has exactly one answer.
+
 ### Implementation status
 **Slice 1 complete.** Implemented: `StartRun`/`GetStatus`/`CancelRun`, in-memory
 run registry, both budgets, seeded determinism, past/locked/out-of-scope
