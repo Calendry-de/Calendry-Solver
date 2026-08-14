@@ -6,15 +6,15 @@
 //! scoring thousands of LNS candidate moves per dispatch. Keeping the batch in
 //! the signature means a future backend plugs in without the search changing.
 //!
-//! v1 ships only [`CpuEvaluator`]. No metaheuristic drives this yet — the v1
-//! slice uses the constructive heuristic alone — but the boundary exists and is
+//! v1 ships only [`CpuEvaluator`]. No metaheuristic drives this yet — the
+//! constructive heuristic places greedily — but the boundary exists and is
 //! exercised, rather than being an empty promise.
 
 use rayon::prelude::*;
 
 use crate::ids::PlacementIdx;
 use crate::problem::Problem;
-use crate::solution::{Placement, RoomOccupancy, Solution};
+use crate::solution::{Occupancy, Occupant, Placement, Solution};
 
 /// A candidate relocation of one placement.
 #[derive(Copy, Clone, Debug)]
@@ -23,7 +23,7 @@ pub struct Move {
     pub to: Placement,
 }
 
-/// Lower is better. Currently counts hard-constraint violations the move would
+/// Lower is better. Currently counts hard-constraint clashes the move would
 /// introduce; the weighted soft objective joins this in a later slice.
 #[derive(Copy, Clone, Debug, PartialEq, PartialOrd, Default)]
 pub struct Score(pub f64);
@@ -33,7 +33,7 @@ pub trait MoveEvaluator: Send + Sync {
         &self,
         problem: &Problem,
         solution: &Solution,
-        occupancy: &RoomOccupancy,
+        occupancy: &Occupancy,
         moves: &[Move],
         out: &mut [Score],
     );
@@ -47,7 +47,7 @@ impl MoveEvaluator for CpuEvaluator {
         &self,
         problem: &Problem,
         solution: &Solution,
-        occupancy: &RoomOccupancy,
+        occupancy: &Occupancy,
         moves: &[Move],
         out: &mut [Score],
     ) {
@@ -64,7 +64,7 @@ impl MoveEvaluator for CpuEvaluator {
 fn score_one(
     problem: &Problem,
     solution: &Solution,
-    occupancy: &RoomOccupancy,
+    occupancy: &Occupancy,
     mv: &Move,
 ) -> Score {
     let offering = problem.offering_of(mv.placement);
@@ -73,38 +73,32 @@ fn score_one(
         // Would spill past the end of its day: not representable.
         return Score(f64::INFINITY);
     };
-
     if !offering.eligible_rooms.contains(&mv.to.room) {
         return Score(f64::INFINITY);
     }
 
-    // Count room conflicts the move would introduce, discounting the placement's
-    // own current occupancy since moving it vacates that.
-    let current = solution.get(mv.placement);
-    let mut conflicts = 0u32;
+    let candidate = Occupant::of_offering(offering).with_room(mv.to.room);
 
-    for &s in &span {
-        if !occupancy.is_busy(mv.to.room, s) {
-            continue;
+    // Moving vacates the placement's current slots, so evaluate against an
+    // occupancy that no longer contains it.
+    let free = match solution.get(mv.placement) {
+        Some(current) => {
+            let mut without = occupancy.clone();
+            if let Some(own) = problem.slots.span(current.start, offering.duration_blocks) {
+                without.unmark(&candidate.with_room(current.room), &own);
+            }
+            without.is_free(&candidate, &span)
         }
-        let self_occupied = current.is_some_and(|c| {
-            c.room == mv.to.room
-                && problem
-                    .slots
-                    .span(c.start, offering.duration_blocks)
-                    .is_some_and(|own| own.contains(&s))
-        });
-        if !self_occupied {
-            conflicts += 1;
-        }
-    }
+        None => occupancy.is_free(&candidate, &span),
+    };
 
-    Score(conflicts as f64)
+    Score(if free { 0.0 } else { 1.0 })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ids::RoomIdx;
     use crate::testing;
 
     #[test]
@@ -112,19 +106,21 @@ mod tests {
         // 1 offering x 1 session, 2 rooms, 1 slot; room 0 already taken.
         let problem = testing::tiny_problem();
         let solution = Solution::empty(&problem);
-        let mut occ = RoomOccupancy::from_fixed(&problem);
+        let mut occ = Occupancy::from_fixed(&problem);
         let slot = problem.slots.resolve(0, 1, 0).unwrap();
-        occ.occupy(crate::ids::RoomIdx(0), slot);
+
+        let blocker = Occupant::of_offering(&problem.offerings[0]).with_room(RoomIdx(0));
+        occ.mark(&blocker, &[slot]);
 
         let moves = vec![
-            Move { placement: PlacementIdx(0), to: Placement { start: slot, room: crate::ids::RoomIdx(0) } },
-            Move { placement: PlacementIdx(0), to: Placement { start: slot, room: crate::ids::RoomIdx(1) } },
+            Move { placement: PlacementIdx(0), to: Placement { start: slot, room: RoomIdx(0) } },
+            Move { placement: PlacementIdx(0), to: Placement { start: slot, room: RoomIdx(1) } },
         ];
         let mut out = vec![Score::default(); moves.len()];
 
         CpuEvaluator.score_batch(&problem, &solution, &occ, &moves, &mut out);
 
-        assert_eq!(out[0], Score(1.0), "occupied room should score a conflict");
+        assert_eq!(out[0], Score(1.0), "occupied room should score a clash");
         assert_eq!(out[1], Score(0.0), "free room should score clean");
     }
 }

@@ -14,8 +14,8 @@ use std::collections::{HashMap, HashSet};
 
 use calendry_solver_core::ids::{GroupIdx, OfferingIdx, PersonIdx, RoomIdx, SlotIdx};
 use calendry_solver_core::problem::{
-    ConstraintSet, FixedOccupancy, Immovable, Offering, PlacementVar, Problem, classify_immovable,
-    resolve_group_parents,
+    ConstraintInstance, ConstraintSet, FixedSpec, Immovable, OfferingSpec, PlacementVar, Problem,
+    classify_immovable,
 };
 use calendry_solver_core::slots::{SlotTable, WeekKind, WeekSpec};
 use calendry_solver_proto::v1 as pb;
@@ -55,16 +55,11 @@ pub fn convert(input: &pb::SolverInput, scope: &pb::SolveScope) -> Result<Proble
 
     let constraints = build_constraints(input)?;
 
-    Ok(Problem {
-        slots,
-        rooms,
-        groups,
-        persons,
-        offerings,
-        placements,
-        fixed,
-        constraints,
-    })
+    // One derivation path, shared with the hand-written fixtures: group
+    // closures and attendee sets are computed inside `Problem::build` so the two
+    // callers cannot drift on closure semantics.
+    Problem::build(slots, rooms, groups, persons, offerings, placements, fixed, constraints)
+        .map_err(|c| Status::invalid_argument(c.to_string()))
 }
 
 // ---------------------------------------------------------------------------
@@ -204,11 +199,9 @@ fn build_groups(input: &pb::SolverInput) -> Result<GroupBuild, Status> {
         parent_of.push(parent);
     }
 
-    // The closure is derived here, never transmitted. Cycle detection matters
-    // even though the v1 slice does not yet walk the tree: a cycle would hang
-    // the walk the moment group double-booking lands.
-    resolve_group_parents(&parent_of)
-        .map_err(|c| Status::invalid_argument(format!("group hierarchy contains a cycle: {c:?}")))?;
+    // The closure itself is derived in `Problem::build` — never transmitted —
+    // because shipping the app's closure table would create a second source of
+    // truth the solver has no way to check.
 
     let groups = input
         .groups
@@ -252,7 +245,7 @@ fn build_offerings(
     room_index: &HashMap<String, u32>,
     group_index: &HashMap<String, u32>,
     person_index: &HashMap<String, u32>,
-) -> Result<Vec<Offering>, Status> {
+) -> Result<Vec<OfferingSpec>, Status> {
     let mut out = Vec::with_capacity(input.offerings.len());
 
     for o in &input.offerings {
@@ -297,7 +290,7 @@ fn build_offerings(
             .map(|(i, _)| RoomIdx(i as u32))
             .collect();
 
-        out.push(Offering {
+        out.push(OfferingSpec {
             id: o.id.clone(),
             kind: o.kind.clone(),
             required_session_count: o.required_session_count,
@@ -331,10 +324,10 @@ fn partition_sessions(
     group_index: &HashMap<String, u32>,
     person_index: &HashMap<String, u32>,
     offering_index: &HashMap<String, u32>,
-    offerings: &[Offering],
+    offerings: &[OfferingSpec],
     scope_offerings: &HashSet<String>,
     reference: Option<SlotIdx>,
-) -> Result<(Vec<PlacementVar>, Vec<FixedOccupancy>), Status> {
+) -> Result<(Vec<PlacementVar>, Vec<FixedSpec>), Status> {
     let mut fixed = Vec::new();
     // Existing in-scope Sessions, per Offering, so a re-solve preserves Session
     // ids instead of churning them downstream.
@@ -357,13 +350,15 @@ fn partition_sessions(
         let in_scope = !s.offering_id.is_empty() && scope_offerings.contains(&s.offering_id);
 
         match classify_immovable(start, reference, s.is_locked, in_scope) {
-            Some(reason) => fixed.push(FixedOccupancy {
+            Some(reason) => fixed.push(FixedSpec {
                 session_id: s.id.clone(),
+                kind: s.kind.clone(),
                 room: room_index.get(&s.room_id).map(|&i| RoomIdx(i)),
                 start,
                 duration_blocks: s.duration_blocks.max(1),
                 lecturers: resolve_all(&s.lecturer_ids, person_index, PersonIdx),
                 groups: resolve_all(&s.group_ids, group_index, GroupIdx),
+                persons: resolve_all(&s.person_ids, person_index, PersonIdx),
                 reason,
             }),
             None => reusable
@@ -403,7 +398,7 @@ fn build_external_occupancy(
     slots: &SlotTable,
     room_index: &HashMap<String, u32>,
     rooms: &[calendry_solver_core::problem::Room],
-) -> Result<Vec<FixedOccupancy>, Status> {
+) -> Result<Vec<FixedSpec>, Status> {
     let mut out = Vec::new();
 
     for e in &input.external_occupancy {
@@ -431,17 +426,19 @@ fn build_external_occupancy(
             continue;
         };
 
-        out.push(FixedOccupancy {
+        out.push(FixedSpec {
             session_id: if e.source_ref.is_empty() {
                 format!("external:{}", e.room_id)
             } else {
                 format!("external:{}", e.source_ref)
             },
+            kind: String::new(),
             room: Some(RoomIdx(room)),
             start,
             duration_blocks: e.duration_blocks.max(1),
             lecturers: Vec::new(),
             groups: Vec::new(),
+            persons: Vec::new(),
             reason: Immovable::External,
         });
     }
@@ -463,16 +460,21 @@ fn build_constraints(input: &pb::SolverInput) -> Result<ConstraintSet, Status> {
         if !c.enabled {
             continue;
         }
+
+        // `applies_to_kinds` empty means "all kinds". A type may be configured
+        // more than once with different kind scopes, which is why each is a list.
+        let instance = ConstraintInstance {
+            id: c.id.clone(),
+            kinds: c.applies_to_kinds.clone(),
+        };
+
         match &c.params {
-            Some(Params::RoomDoubleBooking(_)) => {
-                set.room_double_booking = Some(c.id.clone());
-            }
-            Some(Params::ExactFrequency(_)) => {
-                set.exact_frequency = Some(c.id.clone());
-            }
-            Some(Params::LecturerDoubleBooking(_)) => unsupported.push("LecturerDoubleBooking"),
-            Some(Params::GroupDoubleBooking(_)) => unsupported.push("GroupDoubleBooking"),
-            Some(Params::PersonDoubleBooking(_)) => unsupported.push("PersonDoubleBooking"),
+            Some(Params::RoomDoubleBooking(_)) => set.room_double_booking.push(instance),
+            Some(Params::LecturerDoubleBooking(_)) => set.lecturer_double_booking.push(instance),
+            Some(Params::GroupDoubleBooking(_)) => set.group_double_booking.push(instance),
+            Some(Params::PersonDoubleBooking(_)) => set.person_double_booking.push(instance),
+            Some(Params::ExactFrequency(_)) => set.exact_frequency.push(instance),
+
             Some(Params::LecturerVeto(_)) => unsupported.push("LecturerVeto"),
             Some(Params::OnlineOnsiteSameDay(_)) => unsupported.push("OnlineOnsiteSameDay"),
             Some(Params::MaxOnlineShare(_)) => unsupported.push("MaxOnlineShare"),
@@ -498,8 +500,8 @@ fn build_constraints(input: &pb::SolverInput) -> Result<ConstraintSet, Status> {
         unsupported.sort_unstable();
         unsupported.dedup();
         return Err(Status::unimplemented(format!(
-            "constraint type(s) not implemented in the v1 slice: {}. \
-             Implemented: RoomDoubleBooking, ExactFrequency",
+            "constraint type(s) not implemented yet: {}. Implemented: RoomDoubleBooking, \
+             LecturerDoubleBooking, GroupDoubleBooking, PersonDoubleBooking, ExactFrequency",
             unsupported.join(", ")
         )));
     }
@@ -542,7 +544,7 @@ pub fn build_output(
                 .map(|&l| problem.persons[l.get()].id.clone())
                 .collect(),
             group_ids: offering
-                .groups
+                .own_groups
                 .iter()
                 .map(|&g| problem.groups[g.get()].id.clone())
                 .collect(),

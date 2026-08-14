@@ -4,13 +4,15 @@
 //! and no expression language: tenant-supplied logic never executes. Adding a
 //! type is a code change here, by design.
 //!
-//! The v1 slice implements exactly two, and the pairing is deliberate. Room
-//! double-booking alone is not falsifiable: with nothing forcing placement, the
-//! objective-optimal solution is to place nothing, which satisfies it
-//! vacuously. Exact frequency supplies the placement pressure that makes room
-//! double-booking a real constraint.
+//! This module is the **authoritative** check. [`crate::solution::Occupancy`] is
+//! an index the constructive heuristic uses to *avoid* creating violations, and
+//! it is deliberately conservative about kind scoping; the pairwise rules below
+//! are exact.
 
-use crate::problem::Problem;
+use std::collections::HashSet;
+
+use crate::ids::{GroupIdx, PersonIdx, RoomIdx, SlotIdx};
+use crate::problem::{ConstraintInstance, Problem};
 use crate::solution::Solution;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -23,131 +25,265 @@ pub struct Violation {
 }
 
 pub const ROOM_DOUBLE_BOOKING: &str = "RoomDoubleBooking";
+pub const LECTURER_DOUBLE_BOOKING: &str = "LecturerDoubleBooking";
+pub const GROUP_DOUBLE_BOOKING: &str = "GroupDoubleBooking";
+pub const PERSON_DOUBLE_BOOKING: &str = "PersonDoubleBooking";
 pub const EXACT_FREQUENCY: &str = "ExactFrequency";
+
+/// A Session occupying slots, whether immovable or placed by this run.
+struct View<'a> {
+    label: String,
+    kind: &'a str,
+    room: Option<RoomIdx>,
+    lecturers: &'a [PersonIdx],
+    own_groups: &'a [GroupIdx],
+    attendees: &'a [PersonIdx],
+    span: Vec<SlotIdx>,
+}
 
 /// Evaluate every enabled hard constraint over a complete solution.
 ///
-/// Deterministic ordering: constraints in a fixed sequence, and within each,
-/// entities in index order. Two runs with the same seed must produce
-/// byte-identical violation lists, so this must never iterate a HashMap.
+/// Deterministic ordering throughout: constraints in a fixed sequence, slots
+/// ascending, sessions in index order. Two runs with the same seed must produce
+/// byte-identical violation lists, so this must never iterate a `HashMap`.
 pub fn evaluate_hard(problem: &Problem, solution: &Solution) -> Vec<Violation> {
     let mut out = Vec::new();
-    if let Some(id) = &problem.constraints.exact_frequency {
-        exact_frequency(problem, solution, id, &mut out);
-    }
-    if let Some(id) = &problem.constraints.room_double_booking {
-        room_double_booking(problem, solution, id, &mut out);
-    }
+    exact_frequency(problem, solution, &mut out);
+    structural(problem, solution, &mut out);
     out
 }
 
+// ---------------------------------------------------------------------------
+// ExactFrequency
+// ---------------------------------------------------------------------------
+
 /// HARD. Each in-scope Offering must be realized by exactly
 /// `required_session_count` placed Sessions.
-fn exact_frequency(
-    problem: &Problem,
-    solution: &Solution,
-    constraint_id: &str,
-    out: &mut Vec<Violation>,
-) {
+fn exact_frequency(problem: &Problem, solution: &Solution, out: &mut Vec<Violation>) {
+    if problem.constraints.exact_frequency.is_empty() {
+        return;
+    }
+
     let mut placed = vec![0u32; problem.offerings.len()];
+    let mut in_scope = vec![false; problem.offerings.len()];
     for p in problem.placement_ids() {
+        let o = problem.placement(p).offering.get();
+        in_scope[o] = true;
         if solution.get(p).is_some() {
-            placed[problem.placement(p).offering.get()] += 1;
+            placed[o] += 1;
         }
     }
 
-    for (i, offering) in problem.offerings.iter().enumerate() {
-        // An Offering with no placement variables is out of scope for this run;
-        // its frequency is not this run's business.
-        let in_scope = problem
-            .placements
-            .iter()
-            .any(|pv| pv.offering.get() == i);
-        if !in_scope {
-            continue;
-        }
-
-        let want = offering.required_session_count;
-        let got = placed[i];
-        if got != want {
-            out.push(Violation {
-                constraint_id: constraint_id.to_string(),
-                constraint_type: EXACT_FREQUENCY,
-                session_ids: Vec::new(),
-                offering_ids: vec![offering.id.clone()],
-                detail: format!(
-                    "offering '{}' requires {want} session(s), {got} placed",
-                    offering.id
-                ),
-            });
-        }
-    }
-}
-
-/// HARD. A Room hosts at most one Session per slot.
-///
-/// Considers placed Sessions *and* fixed occupancy, so a caller snapshot that
-/// already double-books a room — which the app's "warn and allow" manual-edit
-/// UX permits — is reported rather than silently tolerated.
-fn room_double_booking(
-    problem: &Problem,
-    solution: &Solution,
-    constraint_id: &str,
-    out: &mut Vec<Violation>,
-) {
-    // slot -> room -> occupants. Kept as a flat Vec keyed by (room, slot) so
-    // iteration order is deterministic.
-    let n_slots = problem.slots.len();
-    let mut occupants: Vec<Vec<String>> = vec![Vec::new(); problem.rooms.len() * n_slots];
-
-    let mut mark = |room: usize, slot: usize, who: String| {
-        occupants[room * n_slots + slot].push(who);
-    };
-
-    for f in &problem.fixed {
-        let Some(room) = f.room else { continue };
-        if let Some(span) = problem.slots.span(f.start, f.duration_blocks) {
-            for s in span {
-                mark(room.get(), s.get(), f.session_id.clone());
+    for instance in &problem.constraints.exact_frequency {
+        for (i, offering) in problem.offerings.iter().enumerate() {
+            // An Offering with no placement variables is out of scope for this
+            // run; its frequency is not this run's business.
+            if !in_scope[i] || !instance.covers(&offering.kind) {
+                continue;
             }
-        }
-    }
-
-    for p in problem.placement_ids() {
-        let Some(pl) = solution.get(p) else { continue };
-        let offering = problem.offering_of(p);
-        let who = problem
-            .placement(p)
-            .existing_session_id
-            .clone()
-            .unwrap_or_else(|| format!("{}#{}", offering.id, problem.placement(p).occurrence));
-        if let Some(span) = problem.slots.span(pl.start, offering.duration_blocks) {
-            for s in span {
-                mark(pl.room.get(), s.get(), who.clone());
-            }
-        }
-    }
-
-    for room in 0..problem.rooms.len() {
-        for slot in 0..n_slots {
-            let cell = &occupants[room * n_slots + slot];
-            if cell.len() > 1 {
-                let f = problem.slots.flags(crate::ids::SlotIdx(slot as u32));
+            let (want, got) = (offering.required_session_count, placed[i]);
+            if got != want {
                 out.push(Violation {
-                    constraint_id: constraint_id.to_string(),
-                    constraint_type: ROOM_DOUBLE_BOOKING,
-                    session_ids: cell.clone(),
-                    offering_ids: Vec::new(),
+                    constraint_id: instance.id.clone(),
+                    constraint_type: EXACT_FREQUENCY,
+                    session_ids: Vec::new(),
+                    offering_ids: vec![offering.id.clone()],
                     detail: format!(
-                        "room '{}' has {} sessions at week {} day {} block {}",
-                        problem.rooms[room].id,
-                        cell.len(),
-                        f.week,
-                        f.iso_weekday,
-                        f.block
+                        "offering '{}' requires {want} session(s), {got} placed",
+                        offering.id
                     ),
                 });
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// The four structural (double-booking) types
+// ---------------------------------------------------------------------------
+
+fn structural(problem: &Problem, solution: &Solution, out: &mut Vec<Violation>) {
+    let views = collect_views(problem, solution);
+    if views.is_empty() {
+        return;
+    }
+
+    // slot -> occupying view indices, ascending.
+    let mut by_slot: Vec<Vec<usize>> = vec![Vec::new(); problem.slots.len()];
+    for (i, v) in views.iter().enumerate() {
+        for s in &v.span {
+            by_slot[s.get()].push(i);
+        }
+    }
+
+    // A pair overlapping several blocks must be reported once, not once per
+    // block.
+    let mut seen: HashSet<(usize, usize, &'static str, &str)> = HashSet::new();
+
+    for (slot, occupants) in by_slot.iter().enumerate() {
+        if occupants.len() < 2 {
+            continue;
+        }
+        let slot = SlotIdx(slot as u32);
+
+        for (ai, &a) in occupants.iter().enumerate() {
+            for &b in &occupants[ai + 1..] {
+                check_pair(problem, &views[a], &views[b], a, b, slot, &mut seen, out);
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn check_pair<'p>(
+    problem: &'p Problem,
+    x: &View<'_>,
+    y: &View<'_>,
+    xi: usize,
+    yi: usize,
+    slot: SlotIdx,
+    seen: &mut HashSet<(usize, usize, &'static str, &'p str)>,
+    out: &mut Vec<Violation>,
+) {
+    let c = &problem.constraints;
+    let f = problem.slots.flags(slot);
+    let at = format!("week {} day {} block {}", f.week, f.iso_weekday, f.block);
+
+    let mut report =
+        |instance: &'p ConstraintInstance, ty: &'static str, detail: String, out: &mut Vec<Violation>| {
+            if !seen.insert((xi, yi, ty, instance.id.as_str())) {
+                return;
+            }
+            out.push(Violation {
+                constraint_id: instance.id.clone(),
+                constraint_type: ty,
+                session_ids: vec![x.label.clone(), y.label.clone()],
+                offering_ids: Vec::new(),
+                detail,
+            });
+        };
+
+    // A pair is only constrained when a single configured instance covers BOTH
+    // sessions' kinds. A constraint scoped to `lecture` must not police a clash
+    // between a lecture and a tenant-defined `staff_meeting`.
+    let both = |i: &ConstraintInstance| i.covers(x.kind) && i.covers(y.kind);
+
+    // 1. Room double-booking.
+    if let (Some(rx), Some(ry)) = (x.room, y.room)
+        && rx == ry
+    {
+        for i in c.room_double_booking.iter().filter(|i| both(i)) {
+            report(
+                i,
+                ROOM_DOUBLE_BOOKING,
+                format!(
+                    "room '{}' hosts '{}' and '{}' at {at}",
+                    problem.rooms[rx.get()].id, x.label, y.label
+                ),
+                out,
+            );
+        }
+    }
+
+    // 2. Lecturer double-booking.
+    if let Some(p) = x.lecturers.iter().find(|l| y.lecturers.contains(l)) {
+        for i in c.lecturer_double_booking.iter().filter(|i| both(i)) {
+            report(
+                i,
+                LECTURER_DOUBLE_BOOKING,
+                format!(
+                    "lecturer '{}' leads '{}' and '{}' at {at}",
+                    problem.persons[p.get()].id, x.label, y.label
+                ),
+                out,
+            );
+        }
+    }
+
+    // 3. Group double-booking, with nested propagation in both directions.
+    //
+    // Expressed directly as the pairwise rule — same root-to-leaf path — rather
+    // than by intersecting expanded closures, which would wrongly flag siblings
+    // that merely share an ancestor.
+    let clash = x.own_groups.iter().find_map(|a| {
+        y.own_groups
+            .iter()
+            .find(|b| problem.closure.conflicts(*a, **b))
+            .map(|b| (*a, *b))
+    });
+    if let Some((a, b)) = clash {
+        for i in c.group_double_booking.iter().filter(|i| both(i)) {
+            let rel = if a == b {
+                format!("group '{}'", problem.groups[a.get()].id)
+            } else {
+                format!(
+                    "nested groups '{}' and '{}'",
+                    problem.groups[a.get()].id,
+                    problem.groups[b.get()].id
+                )
+            };
+            report(
+                i,
+                GROUP_DOUBLE_BOOKING,
+                format!("{rel} attend '{}' and '{}' at {at}", x.label, y.label),
+                out,
+            );
+        }
+    }
+
+    // 4. Person double-booking.
+    //
+    // Catches what the group check structurally cannot: a Person who belongs to
+    // two Groups unrelated in the nesting tree, both scheduled at once.
+    if let Some(p) = x.attendees.iter().find(|p| y.attendees.binary_search(p).is_ok()) {
+        for i in c.person_double_booking.iter().filter(|i| both(i)) {
+            report(
+                i,
+                PERSON_DOUBLE_BOOKING,
+                format!(
+                    "person '{}' attends '{}' and '{}' at {at}",
+                    problem.persons[p.get()].id, x.label, y.label
+                ),
+                out,
+            );
+        }
+    }
+}
+
+fn collect_views<'a>(problem: &'a Problem, solution: &Solution) -> Vec<View<'a>> {
+    let mut views = Vec::with_capacity(problem.fixed.len() + solution.len());
+
+    for f in &problem.fixed {
+        let Some(span) = problem.slots.span(f.start, f.duration_blocks) else {
+            continue;
+        };
+        views.push(View {
+            label: f.session_id.clone(),
+            kind: &f.kind,
+            room: f.room,
+            lecturers: &f.lecturers,
+            own_groups: &f.own_groups,
+            attendees: &f.attendees,
+            span,
+        });
+    }
+
+    for p in problem.placement_ids() {
+        let Some(pl) = solution.get(p) else { continue };
+        let o = problem.offering_of(p);
+        let Some(span) = problem.slots.span(pl.start, o.duration_blocks) else {
+            continue;
+        };
+        views.push(View {
+            label: problem.placement_label(p),
+            kind: &o.kind,
+            room: Some(pl.room),
+            lecturers: &o.lecturers,
+            own_groups: &o.own_groups,
+            attendees: &o.attendees,
+            span,
+        });
+    }
+
+    views
 }

@@ -1,7 +1,8 @@
-//! Mutable search state, and the room-occupancy index the hot loop reads.
+//! Mutable search state, and the occupancy index the hot loop reads.
 
-use crate::ids::{PlacementIdx, RoomIdx, SlotIdx};
-use crate::problem::Problem;
+use crate::bitset::BitMatrix;
+use crate::ids::{GroupIdx, PersonIdx, PlacementIdx, RoomIdx, SlotIdx};
+use crate::problem::{Enforce, FixedOccupancy, Offering, Problem};
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub struct Placement {
@@ -47,93 +48,162 @@ impl Solution {
     }
 }
 
-/// Room × slot occupancy as a bitset.
-///
-/// Room-major so that a single room's week is contiguous in memory, which is
-/// the access pattern the constructive heuristic and every candidate move use.
-#[derive(Clone, Debug)]
-pub struct RoomOccupancy {
-    words: Vec<u64>,
-    n_slots: usize,
-    words_per_room: usize,
+/// A read-only view of one occupying Session, whether placed or immovable.
+#[derive(Copy, Clone, Debug)]
+pub struct Occupant<'a> {
+    pub room: Option<RoomIdx>,
+    pub lecturers: &'a [PersonIdx],
+    /// Unexpanded. Used to **query**.
+    pub own_groups: &'a [GroupIdx],
+    /// Expanded through ancestors and descendants. Used to **mark**.
+    pub conflict_groups: &'a [GroupIdx],
+    pub attendees: &'a [PersonIdx],
+    pub enforce: Enforce,
 }
 
-impl RoomOccupancy {
-    pub fn new(n_rooms: usize, n_slots: usize) -> Self {
-        let words_per_room = n_slots.div_ceil(64);
+impl<'a> Occupant<'a> {
+    pub fn of_offering(o: &'a Offering) -> Self {
         Self {
-            words: vec![0; n_rooms * words_per_room],
-            n_slots,
-            words_per_room,
+            room: None,
+            lecturers: &o.lecturers,
+            own_groups: &o.own_groups,
+            conflict_groups: &o.conflict_groups,
+            attendees: &o.attendees,
+            enforce: o.enforce,
         }
     }
 
-    #[inline]
-    fn addr(&self, room: RoomIdx, slot: SlotIdx) -> (usize, u64) {
-        let bit = slot.get();
-        debug_assert!(bit < self.n_slots);
-        (
-            room.get() * self.words_per_room + bit / 64,
-            1u64 << (bit % 64),
-        )
+    pub fn of_fixed(f: &'a FixedOccupancy) -> Self {
+        Self {
+            room: f.room,
+            lecturers: &f.lecturers,
+            own_groups: &f.own_groups,
+            conflict_groups: &f.conflict_groups,
+            attendees: &f.attendees,
+            enforce: f.enforce,
+        }
     }
 
-    #[inline]
-    pub fn is_busy(&self, room: RoomIdx, slot: SlotIdx) -> bool {
-        let (w, mask) = self.addr(room, slot);
-        self.words[w] & mask != 0
+    pub fn with_room(mut self, room: RoomIdx) -> Self {
+        self.room = Some(room);
+        self
     }
+}
 
-    #[inline]
-    pub fn occupy(&mut self, room: RoomIdx, slot: SlotIdx) {
-        let (w, mask) = self.addr(room, slot);
-        self.words[w] |= mask;
-    }
+/// Entity-by-slot occupancy for the four structural constraint types.
+///
+/// Lecturer and attendee are separate matrices even though both are indexed by
+/// Person, so `LecturerDoubleBooking` and `PersonDoubleBooking` remain
+/// independently switchable — a tenant may enable one without the other.
+#[derive(Clone, Debug)]
+pub struct Occupancy {
+    room: BitMatrix,
+    lecturer: BitMatrix,
+    attendee: BitMatrix,
+    group: BitMatrix,
+}
 
-    #[inline]
-    pub fn release(&mut self, room: RoomIdx, slot: SlotIdx) {
-        let (w, mask) = self.addr(room, slot);
-        self.words[w] &= !mask;
-    }
-
-    /// True if every slot in `span` is free for `room`.
-    pub fn span_free(&self, room: RoomIdx, span: &[SlotIdx]) -> bool {
-        span.iter().all(|&s| !self.is_busy(room, s))
+impl Occupancy {
+    pub fn new(problem: &Problem) -> Self {
+        let slots = problem.slots.len();
+        Self {
+            room: BitMatrix::new(problem.rooms.len().max(1), slots),
+            lecturer: BitMatrix::new(problem.persons.len().max(1), slots),
+            attendee: BitMatrix::new(problem.persons.len().max(1), slots),
+            group: BitMatrix::new(problem.groups.len().max(1), slots),
+        }
     }
 
     /// Seed with everything the solver may not move: locked, past and
     /// out-of-scope Sessions, plus other tenants' use of Federation-shared
     /// Rooms.
     pub fn from_fixed(problem: &Problem) -> Self {
-        let mut occ = Self::new(problem.rooms.len(), problem.slots.len());
+        let mut occ = Self::new(problem);
         for f in &problem.fixed {
-            let Some(room) = f.room else { continue };
             if let Some(span) = problem.slots.span(f.start, f.duration_blocks) {
-                for s in span {
-                    occ.occupy(room, s);
-                }
+                occ.mark(&Occupant::of_fixed(f), &span);
             }
         }
         occ
     }
-}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn bitset_round_trips_across_word_boundaries() {
-        let mut occ = RoomOccupancy::new(2, 130);
-        for slot in [0usize, 63, 64, 65, 129] {
-            let s = SlotIdx(slot as u32);
-            assert!(!occ.is_busy(RoomIdx(1), s));
-            occ.occupy(RoomIdx(1), s);
-            assert!(occ.is_busy(RoomIdx(1), s));
-            // Rooms must not alias each other.
-            assert!(!occ.is_busy(RoomIdx(0), s));
-            occ.release(RoomIdx(1), s);
-            assert!(!occ.is_busy(RoomIdx(1), s));
+    /// Mark a Session busy.
+    ///
+    /// Groups are marked through their **conflict closure** — a cohort-level
+    /// Session blocks every descendant class, and a seminar Session blocks its
+    /// ancestors. Only one side expands; see [`crate::groups`].
+    pub fn mark(&mut self, who: &Occupant<'_>, span: &[SlotIdx]) {
+        for &s in span {
+            let c = s.get();
+            if who.enforce.room && let Some(r) = who.room {
+                self.room.set(r.get(), c);
+            }
+            if who.enforce.lecturer {
+                for l in who.lecturers {
+                    self.lecturer.set(l.get(), c);
+                }
+            }
+            if who.enforce.group {
+                for g in who.conflict_groups {
+                    self.group.set(g.get(), c);
+                }
+            }
+            if who.enforce.person {
+                for p in who.attendees {
+                    self.attendee.set(p.get(), c);
+                }
+            }
         }
+    }
+
+    pub fn unmark(&mut self, who: &Occupant<'_>, span: &[SlotIdx]) {
+        for &s in span {
+            let c = s.get();
+            if who.enforce.room && let Some(r) = who.room {
+                self.room.clear(r.get(), c);
+            }
+            if who.enforce.lecturer {
+                for l in who.lecturers {
+                    self.lecturer.clear(l.get(), c);
+                }
+            }
+            if who.enforce.group {
+                for g in who.conflict_groups {
+                    self.group.clear(g.get(), c);
+                }
+            }
+            if who.enforce.person {
+                for p in who.attendees {
+                    self.attendee.clear(p.get(), c);
+                }
+            }
+        }
+    }
+
+    /// Whether this Session could occupy `span` without clashing.
+    ///
+    /// Groups are queried by **identity**, never expanded. That is what keeps
+    /// siblings from colliding: two classes under one cohort share an ancestor,
+    /// but neither is in the other's closure.
+    pub fn is_free(&self, who: &Occupant<'_>, span: &[SlotIdx]) -> bool {
+        for &s in span {
+            let c = s.get();
+            if who.enforce.room
+                && let Some(r) = who.room
+                && self.room.get(r.get(), c)
+            {
+                return false;
+            }
+            if who.enforce.lecturer && who.lecturers.iter().any(|l| self.lecturer.get(l.get(), c)) {
+                return false;
+            }
+            if who.enforce.group && who.own_groups.iter().any(|g| self.group.get(g.get(), c)) {
+                return false;
+            }
+            if who.enforce.person && who.attendees.iter().any(|p| self.attendee.get(p.get(), c)) {
+                return false;
+            }
+        }
+        true
     }
 }

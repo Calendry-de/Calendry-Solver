@@ -1,12 +1,14 @@
 //! Hand-written correctness fixtures.
 //!
-//! These are written by hand and checked in, deliberately kept separate from
-//! the parametrized benchmark generator in `calendry-solver-gen`. A generator
-//! bug that produced a wrong fixture would be a bug that silently validates
-//! itself.
+//! Written by hand and checked in, deliberately kept separate from the
+//! parametrized benchmark generator in `calendry-solver-gen`. A generator bug
+//! that produced a wrong fixture would be a bug that silently validates itself.
 
-use crate::ids::{OfferingIdx, RoomIdx, SlotIdx};
-use crate::problem::{ConstraintSet, FixedOccupancy, Immovable, Offering, PlacementVar, Problem, Room};
+use crate::ids::{GroupIdx, OfferingIdx, PersonIdx, RoomIdx, SlotIdx};
+use crate::problem::{
+    ConstraintInstance, ConstraintSet, FixedSpec, Group, Immovable, OfferingSpec, Person,
+    PlacementVar, Problem, Room,
+};
 use crate::slots::{SlotTable, WeekKind, WeekSpec};
 
 pub fn teaching_weeks(n: usize) -> Vec<WeekSpec> {
@@ -16,6 +18,11 @@ pub fn teaching_weeks(n: usize) -> Vec<WeekSpec> {
             holiday_weekdays: vec![],
         })
         .collect()
+}
+
+/// `blocks` blocks on Monday of each of `weeks` weeks.
+pub fn grid(blocks: u32, weeks: usize) -> SlotTable {
+    SlotTable::build(blocks, &[1], &teaching_weeks(weeks)).unwrap()
 }
 
 pub fn room(id: &str) -> Room {
@@ -30,8 +37,29 @@ pub fn room(id: &str) -> Room {
     }
 }
 
-pub fn offering(id: &str, count: u32, eligible: &[u32]) -> Offering {
-    Offering {
+pub fn rooms(n: u32) -> Vec<Room> {
+    (0..n).map(|i| room(&format!("R{i}"))).collect()
+}
+
+pub fn group(id: &str, parent: Option<u32>) -> Group {
+    Group {
+        id: id.to_string(),
+        parent: parent.map(GroupIdx),
+        name: id.to_string(),
+        size: 0,
+    }
+}
+
+pub fn person(id: &str, groups: &[u32]) -> Person {
+    Person {
+        id: id.to_string(),
+        role_tags: vec!["lecturer".to_string()],
+        groups: groups.iter().map(|&g| GroupIdx(g)).collect(),
+    }
+}
+
+pub fn offering(id: &str, count: u32, eligible: &[u32]) -> OfferingSpec {
+    OfferingSpec {
         id: id.to_string(),
         kind: "lecture".to_string(),
         required_session_count: count,
@@ -43,8 +71,18 @@ pub fn offering(id: &str, count: u32, eligible: &[u32]) -> Offering {
     }
 }
 
+pub fn with_groups(mut o: OfferingSpec, groups: &[u32]) -> OfferingSpec {
+    o.groups = groups.iter().map(|&g| GroupIdx(g)).collect();
+    o
+}
+
+pub fn with_lecturers(mut o: OfferingSpec, lecturers: &[u32]) -> OfferingSpec {
+    o.lecturers = lecturers.iter().map(|&p| PersonIdx(p)).collect();
+    o
+}
+
 /// Expand each Offering into `required_session_count` placement variables.
-pub fn expand(offerings: &[Offering]) -> Vec<PlacementVar> {
+pub fn expand(offerings: &[OfferingSpec]) -> Vec<PlacementVar> {
     let mut out = Vec::new();
     for (i, o) in offerings.iter().enumerate() {
         for occ in 0..o.required_session_count {
@@ -58,57 +96,95 @@ pub fn expand(offerings: &[Offering]) -> Vec<PlacementVar> {
     out
 }
 
-pub fn both_constraints() -> ConstraintSet {
+fn inst(id: &str) -> Vec<ConstraintInstance> {
+    vec![ConstraintInstance { id: id.to_string(), kinds: vec![] }]
+}
+
+/// Every implemented constraint type, applying to all kinds.
+pub fn all_constraints() -> ConstraintSet {
     ConstraintSet {
-        room_double_booking: Some("c-room".to_string()),
-        exact_frequency: Some("c-freq".to_string()),
+        room_double_booking: inst("c-room"),
+        lecturer_double_booking: inst("c-lect"),
+        group_double_booking: inst("c-group"),
+        person_double_booking: inst("c-person"),
+        exact_frequency: inst("c-freq"),
     }
 }
 
-fn assemble(
+/// Room + frequency only — the slice 1 pairing.
+pub fn structural_room_only() -> ConstraintSet {
+    ConstraintSet {
+        room_double_booking: inst("c-room"),
+        exact_frequency: inst("c-freq"),
+        ..Default::default()
+    }
+}
+
+/// Group-aware but person-blind: the configuration that *cannot* see a clash
+/// between two Groups unrelated in the nesting tree.
+pub fn group_only() -> ConstraintSet {
+    ConstraintSet {
+        room_double_booking: inst("c-room"),
+        group_double_booking: inst("c-group"),
+        exact_frequency: inst("c-freq"),
+        ..Default::default()
+    }
+}
+
+/// Assemble, expanding placements from the offerings' required counts.
+pub fn assemble(
     slots: SlotTable,
     rooms: Vec<Room>,
-    offerings: Vec<Offering>,
-    fixed: Vec<FixedOccupancy>,
+    groups: Vec<Group>,
+    persons: Vec<Person>,
+    offerings: Vec<OfferingSpec>,
+    fixed: Vec<FixedSpec>,
+    constraints: ConstraintSet,
 ) -> Problem {
     let placements = expand(&offerings);
-    Problem {
-        slots,
-        rooms,
-        groups: vec![],
-        persons: vec![],
-        offerings,
-        placements,
-        fixed,
-        constraints: both_constraints(),
-    }
+    Problem::build(slots, rooms, groups, persons, offerings, placements, fixed, constraints)
+        .expect("fixture group hierarchy must be acyclic")
 }
 
-/// 1 Offering needing 1 Session, 2 rooms, a single slot.
-pub fn tiny_problem() -> Problem {
-    let slots = SlotTable::build(1, &[1], &teaching_weeks(1)).unwrap();
-    assemble(
-        slots,
-        vec![room("R0"), room("R1")],
-        vec![offering("A", 1, &[0, 1])],
-        vec![],
-    )
-}
-
-fn blocker(id: &str, room: u32, slot: u32) -> FixedOccupancy {
-    FixedOccupancy {
+pub fn fixed_session(id: &str, room: Option<u32>, slot: u32) -> FixedSpec {
+    FixedSpec {
         session_id: id.to_string(),
-        room: Some(RoomIdx(room)),
+        kind: "lecture".to_string(),
+        room: room.map(RoomIdx),
         start: SlotIdx(slot),
         duration_blocks: 1,
         lecturers: vec![],
         groups: vec![],
+        persons: vec![],
         reason: Immovable::OutOfScope,
     }
 }
 
-/// **Test 1 fixture.** 3 Offerings x 1 Session, 3 rooms, 3 slots, with 6 of the
-/// 9 room-slot cells blocked so that exactly one assignment is feasible:
+pub fn fixed_for_groups(id: &str, room: u32, slot: u32, groups: &[u32]) -> FixedSpec {
+    let mut f = fixed_session(id, Some(room), slot);
+    f.groups = groups.iter().map(|&g| GroupIdx(g)).collect();
+    f
+}
+
+// ---------------------------------------------------------------------------
+// Slice 1 fixtures
+// ---------------------------------------------------------------------------
+
+/// 1 Offering needing 1 Session, 2 rooms, a single slot.
+pub fn tiny_problem() -> Problem {
+    assemble(
+        grid(1, 1),
+        rooms(2),
+        vec![],
+        vec![],
+        vec![offering("A", 1, &[0, 1])],
+        vec![],
+        structural_room_only(),
+    )
+}
+
+/// 3 Offerings x 1 Session, 3 rooms, 3 slots, with 6 of the 9 room-slot cells
+/// blocked so exactly one assignment is feasible:
 ///
 /// ```text
 ///        S0     S1     S2
@@ -116,65 +192,182 @@ fn blocker(id: &str, room: u32, slot: u32) -> FixedOccupancy {
 ///  R1   X      free   X
 ///  R2   X      X      free
 /// ```
-///
-/// Each Offering is eligible for exactly one room, so the packing is forced:
-/// A->(R0,S0), B->(R1,S1), C->(R2,S2).
 pub fn forced_unique() -> Problem {
-    // 1 week, Monday only, 3 blocks/day => 3 slots.
-    let slots = SlotTable::build(3, &[1], &teaching_weeks(1)).unwrap();
-
     let mut fixed = Vec::new();
     for r in 0..3u32 {
         for s in 0..3u32 {
             if r != s {
-                fixed.push(blocker(&format!("blk-r{r}s{s}"), r, s));
+                fixed.push(fixed_session(&format!("blk-r{r}s{s}"), Some(r), s));
             }
         }
     }
-
     assemble(
-        slots,
-        vec![room("R0"), room("R1"), room("R2")],
+        grid(3, 1),
+        rooms(3),
+        vec![],
+        vec![],
         vec![
             offering("A", 1, &[0]),
             offering("B", 1, &[1]),
             offering("C", 1, &[2]),
         ],
         fixed,
+        structural_room_only(),
     )
 }
 
-/// **Test 2 fixture.** One Offering demanding 4 Sessions into 3 room-slots.
+/// One Offering demanding 4 Sessions into 3 room-slots.
 pub fn oversubscribed() -> Problem {
-    let slots = SlotTable::build(3, &[1], &teaching_weeks(1)).unwrap();
-    assemble(slots, vec![room("R0")], vec![offering("A", 4, &[0])], vec![])
+    assemble(
+        grid(3, 1),
+        rooms(1),
+        vec![],
+        vec![],
+        vec![offering("A", 4, &[0])],
+        vec![],
+        structural_room_only(),
+    )
 }
 
-/// **Tests 3 & 4 fixture.** One room, 3 slots, one Offering needing 1 Session.
-/// The first slot — the one greedy construction would otherwise take — is
-/// occupied by an immovable Session for the given `reason`.
+/// One room, 3 slots, one Offering needing 1 Session. The first slot — the one
+/// greedy construction would otherwise take — is occupied by an immovable
+/// Session for the given `reason`.
 pub fn immovable_blocks_first_slot(reason: Immovable) -> Problem {
-    let slots = SlotTable::build(3, &[1], &teaching_weeks(1)).unwrap();
-    let fixed = vec![FixedOccupancy {
-        session_id: "pinned".to_string(),
-        room: Some(RoomIdx(0)),
-        start: SlotIdx(0),
-        duration_blocks: 1,
-        lecturers: vec![],
-        groups: vec![],
-        reason,
-    }];
-    assemble(slots, vec![room("R0")], vec![offering("A", 1, &[0])], fixed)
+    let mut f = fixed_session("pinned", Some(0), 0);
+    f.reason = reason;
+    assemble(
+        grid(3, 1),
+        rooms(1),
+        vec![],
+        vec![],
+        vec![offering("A", 1, &[0])],
+        vec![f],
+        structural_room_only(),
+    )
 }
 
-/// A symmetric instance with many equally-good placements, so that a
+/// A symmetric instance with many equally-good placements, so a
 /// non-deterministic search would visibly disagree with itself between runs.
 pub fn symmetric() -> Problem {
-    let slots = SlotTable::build(4, &[1, 2, 3, 4, 5], &teaching_weeks(3)).unwrap();
-    let rooms: Vec<Room> = (0..6).map(|i| room(&format!("R{i}"))).collect();
     let all: Vec<u32> = (0..6).collect();
-    let offerings: Vec<Offering> = (0..12)
+    let offerings: Vec<OfferingSpec> = (0..12)
         .map(|i| offering(&format!("O{i}"), 3, &all))
         .collect();
-    assemble(slots, rooms, offerings, vec![])
+    assemble(
+        SlotTable::build(4, &[1, 2, 3, 4, 5], &teaching_weeks(3)).unwrap(),
+        rooms(6),
+        vec![],
+        vec![],
+        offerings,
+        vec![],
+        structural_room_only(),
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Slice 2 fixtures — nested groups, lecturers, people
+// ---------------------------------------------------------------------------
+
+/// Cohort A(0) with two sibling classes B(1) and C(2).
+///
+/// One slot, two rooms: the siblings **must** be able to meet simultaneously.
+/// A symmetric-closure implementation would wrongly block this, because B and C
+/// share the ancestor A.
+pub fn sibling_classes() -> Problem {
+    assemble(
+        grid(1, 1),
+        rooms(2),
+        vec![group("A", None), group("B", Some(0)), group("C", Some(0))],
+        vec![],
+        vec![
+            with_groups(offering("sb", 1, &[0, 1]), &[1]),
+            with_groups(offering("sc", 1, &[0, 1]), &[2]),
+        ],
+        vec![],
+        all_constraints(),
+    )
+}
+
+/// Cohort A(0) -> class B(1). One of them is already fixed at slot 0; the other
+/// must be placed. Two rooms and two slots, so only the nested-group rule can
+/// force them apart.
+///
+/// `parent_fixed` selects which direction is exercised.
+pub fn parent_child_conflict(parent_fixed: bool) -> Problem {
+    let groups = vec![group("A", None), group("B", Some(0))];
+    let (fixed_group, placed_group, name) = if parent_fixed {
+        (0u32, 1u32, "child-after-parent")
+    } else {
+        (1u32, 0u32, "parent-after-child")
+    };
+    assemble(
+        grid(2, 1),
+        rooms(2),
+        groups,
+        vec![],
+        vec![with_groups(offering(name, 1, &[0, 1]), &[placed_group])],
+        vec![fixed_for_groups("pinned", 0, 0, &[fixed_group])],
+        all_constraints(),
+    )
+}
+
+/// A 4-level chain 0 <- 1 <- 2 <- 3, with the root fixed at slot 0 and a
+/// session for the leaf needing placement. Confirms the closure is transitive
+/// rather than one hop deep.
+pub fn deep_chain() -> Problem {
+    assemble(
+        grid(2, 1),
+        rooms(2),
+        vec![
+            group("L0", None),
+            group("L1", Some(0)),
+            group("L2", Some(1)),
+            group("L3", Some(2)),
+        ],
+        vec![],
+        vec![with_groups(offering("leaf", 1, &[0, 1]), &[3])],
+        vec![fixed_for_groups("root-session", 0, 0, &[0])],
+        all_constraints(),
+    )
+}
+
+/// One lecturer leading two Offerings. Two rooms and two slots, so only the
+/// lecturer rule can force them apart.
+pub fn lecturer_clash() -> Problem {
+    assemble(
+        grid(2, 1),
+        rooms(2),
+        vec![],
+        vec![person("dr-who", &[])],
+        vec![
+            with_lecturers(offering("L1", 1, &[0, 1]), &[0]),
+            with_lecturers(offering("L2", 1, &[0, 1]), &[0]),
+        ],
+        vec![],
+        all_constraints(),
+    )
+}
+
+/// **The type-4 case.** Groups X(0) and Y(1) are separate roots — neither is an
+/// ancestor or descendant of the other — but one Person belongs to both.
+///
+/// `GroupDoubleBooking` structurally cannot see this clash. Only
+/// `PersonDoubleBooking` can.
+pub fn cross_tree_person(constraints: ConstraintSet) -> Problem {
+    assemble(
+        grid(2, 1),
+        rooms(2),
+        vec![group("X", None), group("Y", None)],
+        vec![
+            person("dual-enrolled", &[0, 1]),
+            person("only-x", &[0]),
+            person("only-y", &[1]),
+        ],
+        vec![
+            with_groups(offering("ox", 1, &[0, 1]), &[0]),
+            with_groups(offering("oy", 1, &[0, 1]), &[1]),
+        ],
+        vec![],
+        constraints,
+    )
 }

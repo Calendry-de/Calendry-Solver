@@ -9,8 +9,10 @@
 //! See the repository `CLAUDE.md` for the domain model and the architecture
 //! decisions this implements.
 
+pub mod bitset;
 pub mod constraints;
 pub mod evaluator;
+pub mod groups;
 pub mod ids;
 pub mod problem;
 pub mod rng;
@@ -20,6 +22,7 @@ pub mod solution;
 
 pub mod testing;
 
-pub use problem::{Immovable, Problem};
+pub use groups::{GroupClosure, GroupCycle};
+pub use problem::{ConstraintInstance, ConstraintSet, Immovable, Problem};
 pub use search::{Budget, SolveOutcome, solve};
-pub use solution::{Placement, Solution};
+pub use solution::{Occupancy, Placement, Solution};

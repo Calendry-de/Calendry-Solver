@@ -422,23 +422,48 @@ tagged `v0.2.0`, and the Nuxt app installing `@mindcollaps/calendry-proto@0.2.0`
 built from that same tag, means "which schema is each side on" has one answer.
 
 ### Implementation status
-**Slice 1 complete.** Implemented: `StartRun`/`GetStatus`/`CancelRun`, in-memory
-run registry, both budgets, seeded determinism, past/locked/out-of-scope
-immovability, and **two** constraint types — `RoomDoubleBooking` and
-`ExactFrequency`. Search is **greedy construction only**; `MoveEvaluator` +
-`CpuEvaluator` exist and are tested, but no metaheuristic drives them yet.
+**Slices 1 and 2 complete.** Implemented: `StartRun`/`GetStatus`/`CancelRun`,
+in-memory run registry, both budgets, seeded determinism, past/locked/
+out-of-scope immovability, and **five** constraint types — all four structural
+double-booking checks plus `ExactFrequency`.
 
-The two-constraint pairing is deliberate: room double-booking alone is **not
-falsifiable**, because with nothing forcing placement an empty schedule
-satisfies it vacuously. Exact frequency supplies the placement pressure.
+Search is still **greedy construction only**; `MoveEvaluator` + `CpuEvaluator`
+exist and are tested, but no metaheuristic drives them yet.
 
-Everything unimplemented returns an explicit `UNIMPLEMENTED` — no enabled
+The slice 1 pairing of `RoomDoubleBooking` + `ExactFrequency` was deliberate:
+room double-booking alone is **not falsifiable**, because with nothing forcing
+placement an empty schedule satisfies it vacuously. Exact frequency supplies the
+placement pressure.
+
+**Slice 2 additions worth knowing before changing this code:**
+- `groups.rs` holds the closures, built once per run. **Conflict** expands both
+  directions (`{g} ∪ ancestors ∪ descendants`); **attendance** expands downward
+  only (`{g} ∪ descendants`). That asymmetry is intentional and confirmed: a
+  cohort session involves everyone below it, but a seminar session does not pull
+  in the whole cohort — while conflict blocking runs both ways.
+- **Only one side of a conflict check expands.** Marking uses the closure,
+  querying uses identity. Expanding *both* and intersecting is wrong: siblings
+  share an ancestor, so two classes under one cohort would be reported as
+  clashing — the normal case broken. `siblings_may_meet_simultaneously` is the
+  regression test; it fails if anyone "simplifies" this.
+- `applies_to_kinds` is implemented. `ConstraintSet` holds a **Vec** of
+  `{id, kinds}` per type, so one type may be configured several times with
+  different kind scopes. A pair of Sessions is only constrained when a *single*
+  instance covers **both** their kinds — a `lecture`-scoped constraint must not
+  police a clash involving a groupless `staff_meeting`.
+- `constraints.rs` is authoritative and exact. `Occupancy` (four bitsets: room,
+  lecturer, attendee, group) is only an index the heuristic uses to *avoid*
+  creating violations, and is knowingly conservative about kind scoping.
+- `Problem::build` is the single derivation path for closures and attendee sets,
+  shared by `convert.rs` and the test fixtures so the two cannot drift.
+
+Everything unimplemented still returns an explicit `UNIMPLEMENTED` — no enabled
 constraint is ever silently ignored, since that would make a schedule look
 validated when it was not.
 
-Next slices: (2) remaining structural types + group closure with
-ancestor/descendant sets; (3) SA/LNS + the six soft types + real objective;
-(4) remaining hard types; (5) benchmark generator.
+Next slices: (3) SA/LNS + the six soft types + real objective; (4) remaining
+hard types (`LecturerVeto`, `OnlineOnsiteSameDay`, `MaxOnlineShare`);
+(5) benchmark generator.
 
 ## 5. Reference
 
