@@ -1,0 +1,62 @@
+{
+  "input": {
+    "requestingTenantId": "tenant-demo",
+    "timeGrid": {
+      "blocksPerDay": 3,
+      "blockLengthMinutes": 90,
+      "dayStartMinute": 480,
+      "activeDays": [1],
+      "institutionTimezone": "Europe/Berlin"
+    },
+    "calendar": {
+      "termId": "2026-WS",
+      "weeks": [
+        { "index": 0, "startDate": "2026-10-05", "kind": "TEACHING" }
+      ]
+    },
+    "referenceSlot": { "week": 0, "day": 1, "block": 0 },
+
+    "rooms": [
+      { "id": "R0", "tenantId": "tenant-demo", "name": "Room 0", "capacity": 30, "rank": 1 },
+      { "id": "R1", "tenantId": "tenant-demo", "name": "Room 1", "capacity": 30, "rank": 1 },
+      { "id": "R2", "tenantId": "tenant-demo", "name": "Room 2", "capacity": 30, "rank": 1 }
+    ],
+
+    "offerings": [
+      { "id": "A", "tenantId": "tenant-demo", "kind": "lecture",
+        "requiredSessionCount": 1, "durationBlocks": 1, "allowedRoomIds": ["R0"] },
+      { "id": "B", "tenantId": "tenant-demo", "kind": "lecture",
+        "requiredSessionCount": 1, "durationBlocks": 1, "allowedRoomIds": ["R1"] },
+      { "id": "C", "tenantId": "tenant-demo", "kind": "lecture",
+        "requiredSessionCount": 1, "durationBlocks": 1, "allowedRoomIds": ["R2"] }
+    ],
+
+    "existingSessions": [
+      { "id": "blk-r0s1", "tenantId": "tenant-demo", "kind": "event", "roomId": "R0",
+        "startSlot": { "week": 0, "day": 1, "block": 1 }, "durationBlocks": 1 },
+      { "id": "blk-r0s2", "tenantId": "tenant-demo", "kind": "event", "roomId": "R0",
+        "startSlot": { "week": 0, "day": 1, "block": 2 }, "durationBlocks": 1 },
+      { "id": "blk-r1s0", "tenantId": "tenant-demo", "kind": "event", "roomId": "R1",
+        "startSlot": { "week": 0, "day": 1, "block": 0 }, "durationBlocks": 1 },
+      { "id": "blk-r1s2", "tenantId": "tenant-demo", "kind": "event", "roomId": "R1",
+        "startSlot": { "week": 0, "day": 1, "block": 2 }, "durationBlocks": 1 },
+      { "id": "blk-r2s0", "tenantId": "tenant-demo", "kind": "event", "roomId": "R2",
+        "startSlot": { "week": 0, "day": 1, "block": 0 }, "durationBlocks": 1 },
+      { "id": "blk-r2s1", "tenantId": "tenant-demo", "kind": "event", "roomId": "R2",
+        "startSlot": { "week": 0, "day": 1, "block": 1 }, "durationBlocks": 1 }
+    ],
+
+    "constraints": [
+      { "id": "c-room", "enabled": true, "roomDoubleBooking": {} },
+      { "id": "c-freq", "enabled": true, "exactFrequency": {} }
+    ]
+  },
+
+  "scope": {
+    "offeringIds": ["A", "B", "C"],
+    "outsideScopePolicy": "LOCK_POLICY_HARD"
+  },
+
+  "budget": { "maxWallMillis": 5000, "maxMoves": 0 },
+  "seed": "12648430"
+}

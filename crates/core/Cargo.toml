@@ -1,0 +1,14 @@
+[package]
+name = "calendry-solver-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# Deliberately depends on NO protobuf, NO tokio, NO I/O, and has no clock.
+# Generated prost types are String-id'd, Option-wrapped and heap-heavy; the
+# local search cannot touch that representation. Keeping them out of this
+# crate's dependency graph makes the boundary a compile error rather than a
+# convention someone erodes with one "just read the id off the message".
+[dependencies]
+rayon.workspace = true

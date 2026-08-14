@@ -1,0 +1,39 @@
+{
+  "input": {
+    "requestingTenantId": "tenant-demo",
+    "timeGrid": {
+      "blocksPerDay": 3,
+      "blockLengthMinutes": 90,
+      "dayStartMinute": 480,
+      "activeDays": [1],
+      "institutionTimezone": "Europe/Berlin"
+    },
+    "calendar": {
+      "termId": "2026-WS",
+      "weeks": [{ "index": 0, "startDate": "2026-10-05", "kind": "TEACHING" }]
+    },
+    "referenceSlot": { "week": 0, "day": 1, "block": 0 },
+
+    "rooms": [
+      { "id": "R0", "tenantId": "tenant-demo", "name": "Room 0", "capacity": 30, "rank": 1 }
+    ],
+
+    "offerings": [
+      { "id": "A", "tenantId": "tenant-demo", "kind": "lecture",
+        "requiredSessionCount": 4, "durationBlocks": 1, "allowedRoomIds": ["R0"] }
+    ],
+
+    "constraints": [
+      { "id": "c-room", "enabled": true, "roomDoubleBooking": {} },
+      { "id": "c-freq", "enabled": true, "exactFrequency": {} }
+    ]
+  },
+
+  "scope": {
+    "offeringIds": ["A"],
+    "outsideScopePolicy": "LOCK_POLICY_HARD"
+  },
+
+  "budget": { "maxWallMillis": 5000, "maxMoves": 0 },
+  "seed": "12648430"
+}

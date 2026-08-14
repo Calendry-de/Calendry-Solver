@@ -1,0 +1,28 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/core",
+    "crates/proto",
+    "crates/service",
+    "crates/gen",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+license = "proprietary"
+
+[workspace.dependencies]
+calendry-solver-core = { path = "crates/core" }
+calendry-solver-proto = { path = "crates/proto" }
+
+rayon = "1.12"
+tonic = "0.14"
+tonic-prost = "0.14"
+tonic-prost-build = "0.14"
+prost = "0.14"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4"] }

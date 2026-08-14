@@ -1,0 +1,22 @@
+[package]
+name = "calendry-solver"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "calendry-solver"
+path = "src/main.rs"
+
+[dependencies]
+calendry-solver-core.workspace = true
+calendry-solver-proto.workspace = true
+
+tonic.workspace = true
+tonic-prost.workspace = true
+prost.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
