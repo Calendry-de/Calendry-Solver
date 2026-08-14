@@ -1,38 +1,74 @@
 use std::path::PathBuf;
 
-/// The `.proto` files are NOT vendored into this repository — they are the
+/// Where the schema comes from.
+///
+/// The `.proto` files are NOT vendored into this repository. They are the
 /// contract, owned by github.com/MindCollaps/calendry-proto and shared with the
-/// Nuxt app. This build script locates that checkout and runs codegen against
-/// it.
+/// Nuxt app, and they are consumed here through a git submodule pinned to an
+/// exact revision.
 ///
 /// Resolution order:
-///   1. `CALENDRY_PROTO_DIR` — explicit override, used by CI.
-///   2. `proto/` inside this repo — the git submodule, once calendry-proto has
-///      commits to pin. This is the intended steady state: a submodule is how a
-///      *language-neutral* proto repo gets pinned to a revision, since it has no
-///      Cargo.toml for cargo to depend on directly.
-///   3. `../calendry-proto/proto` — a sibling checkout. Works today, while
-///      calendry-proto is still unpushed and has no revision to pin to.
-fn resolve_proto_root() -> PathBuf {
+///   1. `CALENDRY_PROTO_DIR` — explicit override, for CI and reproducible-build
+///      environments that provide the checkout themselves.
+///   2. `vendor/calendry-proto/proto` — the submodule. This is the steady state:
+///      a submodule is how a *language-neutral* proto repo gets pinned, since it
+///      has no Cargo.toml for cargo to depend on directly.
+///   3. Nothing. There is deliberately no third option — see below.
+///
+/// # Why there is no sibling-checkout fallback
+///
+/// An earlier revision of this script fell back to `../calendry-proto/proto`.
+/// That was removed on purpose. A sibling checkout is unpinned and unversioned,
+/// so the fallback let the build *succeed* against whatever happened to be in a
+/// directory next door whenever the submodule was missing or uninitialized —
+/// which is precisely the silent schema-drift failure this project guards
+/// against everywhere else. A missing submodule must fail loudly and say how to
+/// fix it, not quietly resolve somewhere unpinned.
+const SUBMODULE_REL: &str = "vendor/calendry-proto/proto";
+const SENTINEL: &str = "calendry/solver/v1/service.proto";
+
+fn repo_root() -> PathBuf {
+    let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
+    // crates/proto -> crates -> <repo root>
+    manifest.parent().unwrap().parent().unwrap().to_path_buf()
+}
+
+fn resolve_proto_root() -> Result<PathBuf, String> {
     println!("cargo:rerun-if-env-changed=CALENDRY_PROTO_DIR");
 
     if let Ok(dir) = std::env::var("CALENDRY_PROTO_DIR") {
-        return PathBuf::from(dir);
+        let root = PathBuf::from(dir);
+        if !root.join(SENTINEL).exists() {
+            return Err(format!(
+                "CALENDRY_PROTO_DIR is set to {}, but {SENTINEL} is not there.",
+                root.display()
+            ));
+        }
+        return Ok(root);
     }
 
-    let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
-    let repo_root = manifest.parent().unwrap().parent().unwrap();
-
-    let submodule = repo_root.join("proto");
-    if submodule.join("calendry/solver/v1/service.proto").exists() {
-        return submodule;
+    let root = repo_root().join(SUBMODULE_REL);
+    if root.join(SENTINEL).exists() {
+        return Ok(root);
     }
 
-    repo_root.parent().unwrap().join("calendry-proto/proto")
+    Err(format!(
+        "the calendry-proto submodule is not checked out at {}.\n\
+         \n\
+         Fix it with:\n\
+             git submodule update --init --recursive\n\
+         \n\
+         Or clone with submodules in the first place:\n\
+             git clone --recurse-submodules https://github.com/MindCollaps/calendry-solver.git\n\
+         \n\
+         To build against a checkout somewhere else, set CALENDRY_PROTO_DIR to a\n\
+         directory containing {SENTINEL}.",
+        root.display()
+    ))
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let root = resolve_proto_root();
+    let root = resolve_proto_root()?;
 
     let files = [
         "calendry/solver/v1/constraints.proto",
@@ -44,16 +80,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let path = root.join(f);
         if !path.exists() {
             return Err(format!(
-                "cannot find {}\n\
-                 calendry-proto was not located at {}.\n\
-                 Set CALENDRY_PROTO_DIR, add the submodule, or clone \
-                 https://github.com/MindCollaps/calendry-proto as a sibling directory.",
+                "{} is missing from the schema checkout at {}. The submodule may be \
+                 pinned to a revision that predates it.",
                 f,
                 root.display()
             )
             .into());
         }
         println!("cargo:rerun-if-changed={}", path.display());
+    }
+
+    // Re-run when the submodule pointer itself moves, so a `git submodule update`
+    // does not leave stale generated code behind.
+    let gitlink = repo_root().join(".git/modules/vendor/calendry-proto/HEAD");
+    if gitlink.exists() {
+        println!("cargo:rerun-if-changed={}", gitlink.display());
     }
 
     let paths: Vec<PathBuf> = files.iter().map(|f| root.join(f)).collect();

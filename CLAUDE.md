@@ -287,22 +287,52 @@ Conversion is deliberately *not* its own crate yet; promote it when its
 validation logic grows. Correctness fixtures are hand-written in
 `core/src/testing.rs`, kept separate from the generator on purpose.
 
-### Locating calendry-proto
-`.proto` files are **never vendored here**. `crates/proto/build.rs` resolves the
-checkout in this order:
-1. `CALENDRY_PROTO_DIR` env var (for CI)
-2. `proto/` inside this repo — the **git submodule**, which is the intended
-   steady state. A submodule is how a *language-neutral* proto repo gets pinned
-   to a revision, since it has no `Cargo.toml` for cargo to depend on directly.
-3. `../calendry-proto/proto` — sibling checkout.
+### Locating calendry-proto — git submodule at `vendor/calendry-proto`
+`.proto` files are **never vendored here**. The schema is consumed as a **git
+submodule pinned to an exact revision**:
 
-**Currently path 3 is what works**: as of 2026-08-14 the calendry-proto repo has
-the three `.proto` files written but **not committed and not pushed**, so there
-is no revision to pin a submodule to yet. Switch to the submodule once it is
-pushed.
+```
+vendor/calendry-proto/          <- submodule, url = github.com/MindCollaps/calendry-proto
+    proto/calendry/solver/v1/   <- the include root build.rs compiles against
+```
+
+`crates/proto/build.rs` resolves the checkout in this order:
+1. `CALENDRY_PROTO_DIR` env var — explicit override for CI / reproducible builds.
+2. `vendor/calendry-proto/proto` — the submodule.
+3. **Nothing.** A missing submodule is a hard error quoting
+   `git submodule update --init --recursive`.
+
+**There is deliberately no sibling-checkout fallback.** An earlier revision fell
+back to `../calendry-proto/proto`; it was removed because a sibling checkout is
+unpinned and unversioned, so the fallback let the build succeed against whatever
+happened to sit in a neighbouring directory whenever the submodule was missing.
+That is exactly the silent schema-drift failure this repo guards against
+elsewhere. Do not reintroduce it.
+
+**Pinning policy.** The submodule records an exact SHA in this repo's tree, so
+pinning is automatic; the discipline is in how it *moves*. `branch = main` in
+`.gitmodules` affects **only** `git submodule update --remote` — it is not
+auto-tracking, and `--remote` must never appear in a build script or in CI.
+Updating the schema is a deliberate act:
 
 ```bash
-cargo test --workspace          # 26 tests
+git submodule update --remote vendor/calendry-proto
+cd vendor/calendry-proto && git checkout v0.2.0   # a TAG, not a branch tip
+cd ../.. && git add vendor/calendry-proto && git commit -m "proto: bump to v0.2.0"
+```
+
+The diff is one reviewable line (`-Subproject commit …` / `+Subproject commit …`).
+Schema movement cannot enter this repo without a commit that says so.
+
+**Pin to tagged commits, not loose SHAs.** The tag is what ties the two consumers
+together: this repo pinned at the commit tagged `v0.1.0`, and the Nuxt app
+installing `@mindcollaps/calendry-proto@0.1.0` built from that same tag, means
+"which schema is each side on" has one answer. A loose SHA works mechanically but
+breaks that correspondence.
+
+```bash
+git clone --recurse-submodules …   # or: git submodule update --init --recursive
+cargo test --workspace             # 26 tests
 cargo clippy --workspace --all-targets
 CALENDRY_SOLVER_ADDR=127.0.0.1:50051 cargo run -p calendry-solver
 ```
@@ -311,7 +341,7 @@ Example request payloads live in `examples/`. The service does **not** expose
 gRPC reflection, so `grpcurl` needs the proto files explicitly:
 
 ```bash
-grpcurl -plaintext -import-path ../calendry-proto/proto \
+grpcurl -plaintext -import-path vendor/calendry-proto/proto \
   -proto calendry/solver/v1/service.proto \
   -d @ 127.0.0.1:50051 calendry.solver.v1.SolverService/StartRun \
   < examples/forced_unique.json
