@@ -10,7 +10,7 @@
     },
     "calendar": {
       "termId": "2026-WS",
-      "weeks": [{ "index": 0, "startDate": "2026-10-05", "kind": "TEACHING" }]
+      "weeks": [{ "index": 0, "startDate": "2026-10-05", "kind": "WEEK_KIND_TEACHING" }]
     },
     "referenceSlot": { "week": 0, "day": 1, "block": 0 },
 
