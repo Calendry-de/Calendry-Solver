@@ -29,6 +29,10 @@ pub struct SlotFlags {
     pub block: u32,
     pub is_first_block: bool,
     pub is_last_block: bool,
+    /// Dense identity for the calendar day this slot belongs to, i.e. a unique
+    /// `(week, weekday)` pair. Day-granularity constraints key on this rather
+    /// than deriving a day from slot arithmetic.
+    pub day_index: u32,
     pub week_kind: WeekKind,
     pub is_holiday: bool,
 }
@@ -103,8 +107,9 @@ impl SlotTable {
         let mut flags = Vec::with_capacity(weeks.len() * days.len() * blocks_per_day as usize);
 
         for (w, spec) in weeks.iter().enumerate() {
-            for &day in &days {
+            for (day_pos, &day) in days.iter().enumerate() {
                 let is_holiday = spec.holiday_weekdays.contains(&day);
+                let day_index = (w * days.len() + day_pos) as u32;
                 for block in 0..blocks_per_day {
                     flags.push(SlotFlags {
                         week: w as u32,
@@ -112,6 +117,7 @@ impl SlotTable {
                         block,
                         is_first_block: block == 0,
                         is_last_block: block == blocks_per_day - 1,
+                        day_index,
                         week_kind: spec.kind,
                         is_holiday,
                     });
@@ -150,6 +156,13 @@ impl SlotTable {
     #[inline]
     pub fn active_days(&self) -> &[u32] {
         &self.active_days
+    }
+
+    /// Number of distinct calendar days in the term — the dimension that
+    /// day-granularity counters are sized against.
+    #[inline]
+    pub fn day_count(&self) -> usize {
+        self.week_count as usize * self.active_days.len()
     }
 
     #[inline]
@@ -248,6 +261,22 @@ mod tests {
         assert_eq!(g.resolve(1, 1, 0), Some(SlotIdx(9)));
         // Thursday is not an active day for this tenant.
         assert_eq!(g.resolve(0, 4, 0), None);
+    }
+
+    #[test]
+    fn day_index_identifies_a_calendar_day() {
+        let g = grid(); // 2 weeks, Mon/Tue/Wed, 3 blocks
+        assert_eq!(g.day_count(), 6);
+
+        // Every block of one day shares a day_index...
+        let a = g.flags(g.resolve(0, 1, 0).unwrap()).day_index;
+        let b = g.flags(g.resolve(0, 1, 2).unwrap()).day_index;
+        assert_eq!(a, b);
+
+        // ...and different days, or the same weekday in another week, do not.
+        assert_ne!(a, g.flags(g.resolve(0, 2, 0).unwrap()).day_index);
+        assert_ne!(a, g.flags(g.resolve(1, 1, 0).unwrap()).day_index);
+        assert_eq!(g.flags(g.resolve(1, 3, 0).unwrap()).day_index, 5);
     }
 
     #[test]

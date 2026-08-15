@@ -1,5 +1,6 @@
 //! Mutable search state, and the occupancy index the hot loop reads.
 
+use crate::aggregates::Aggregates;
 use crate::bitset::BitMatrix;
 use crate::ids::{GroupIdx, PersonIdx, PlacementIdx, RoomIdx, SlotIdx};
 use crate::problem::{Enforce, FixedOccupancy, Offering, Problem};
@@ -51,6 +52,7 @@ impl Solution {
 /// A read-only view of one occupying Session, whether placed or immovable.
 #[derive(Copy, Clone, Debug)]
 pub struct Occupant<'a> {
+    pub kind: &'a str,
     pub room: Option<RoomIdx>,
     pub lecturers: &'a [PersonIdx],
     /// Unexpanded. Used to **query**.
@@ -58,28 +60,42 @@ pub struct Occupant<'a> {
     /// Expanded through ancestors and descendants. Used to **mark**.
     pub conflict_groups: &'a [GroupIdx],
     pub attendees: &'a [PersonIdx],
+    /// `own_groups` expanded downward only — the scope for the two
+    /// Group-aggregate types.
+    pub subtree_groups: &'a [GroupIdx],
+    /// Slots blocked by this Session's lecturers' blackouts. `None` for
+    /// immovable occupancy, which is never re-placed.
+    pub veto_slots: Option<&'a crate::bitset::BitSet>,
     pub enforce: Enforce,
 }
 
 impl<'a> Occupant<'a> {
     pub fn of_offering(o: &'a Offering) -> Self {
         Self {
+            kind: &o.kind,
             room: None,
             lecturers: &o.lecturers,
             own_groups: &o.own_groups,
             conflict_groups: &o.conflict_groups,
             attendees: &o.attendees,
+            subtree_groups: &o.subtree_groups,
+            veto_slots: Some(&o.veto_slots),
             enforce: o.enforce,
         }
     }
 
     pub fn of_fixed(f: &'a FixedOccupancy) -> Self {
         Self {
+            kind: &f.kind,
             room: f.room,
             lecturers: &f.lecturers,
             own_groups: &f.own_groups,
             conflict_groups: &f.conflict_groups,
             attendees: &f.attendees,
+            subtree_groups: &f.subtree_groups,
+            // Immovable occupancy is never re-placed, so its own blackout mask
+            // is irrelevant; it still contributes to every other counter.
+            veto_slots: None,
             enforce: f.enforce,
         }
     }
@@ -205,5 +221,143 @@ impl Occupancy {
             }
         }
         true
+    }
+}
+
+/// The search's full incremental index.
+///
+/// Slot-keyed occupancy is no longer the whole story: slice 4 added
+/// day-granularity and window-granularity counters, which cannot be expressed
+/// as `(entity, slot)` bitsets. Both live here so the evaluator receives one
+/// coherent view of "what is currently true".
+#[derive(Clone, Debug)]
+pub struct SearchState {
+    pub occupancy: Occupancy,
+    pub aggregates: Aggregates,
+}
+
+impl SearchState {
+    /// Seed with everything the solver may not move.
+    pub fn from_fixed(problem: &Problem) -> Self {
+        let mut state = Self {
+            occupancy: Occupancy::new(problem),
+            aggregates: problem.aggregate_template.clone(),
+        };
+        for f in &problem.fixed {
+            if let Some(span) = problem.slots.span(f.start, f.duration_blocks) {
+                state.mark(problem, &Occupant::of_fixed(f), &span);
+            }
+        }
+        state
+    }
+
+    fn is_online(problem: &Problem, room: Option<RoomIdx>) -> bool {
+        room.is_some_and(|r| problem.rooms[r.get()].is_virtual)
+    }
+
+    fn days_of(problem: &Problem, span: &[SlotIdx]) -> Vec<u32> {
+        let mut days: Vec<u32> = span
+            .iter()
+            .map(|&s| problem.slots.flags(s).day_index)
+            .collect();
+        days.dedup();
+        days
+    }
+
+    /// Whether this Session could occupy `span`.
+    ///
+    /// Covers the four structural types, `LecturerVeto` (a unary slot mask) and
+    /// `OnlineOnsiteSameDay` (day-granularity). `MaxOnlineShare` is deliberately
+    /// absent — it is a ratio with a moving denominator and cannot be a filter
+    /// without dead-ending construction, so it is scored on the objective
+    /// instead. See [`crate::aggregates`].
+    pub fn is_free(&self, problem: &Problem, who: &Occupant<'_>, span: &[SlotIdx]) -> bool {
+        if !self.occupancy.is_free(who, span) {
+            return false;
+        }
+
+        if who.enforce.lecturer_veto
+            && let Some(veto) = who.veto_slots
+            && span.iter().any(|s| veto.contains(s.get()))
+        {
+            return false;
+        }
+
+        if who.enforce.day_mix && !who.subtree_groups.is_empty() {
+            let days = Self::days_of(problem, span);
+            let online = Self::is_online(problem, who.room);
+            if !self
+                .aggregates
+                .day_mix_allows(who.subtree_groups, &days, online)
+            {
+                return false;
+            }
+        }
+
+        true
+    }
+
+    pub fn mark(&mut self, problem: &Problem, who: &Occupant<'_>, span: &[SlotIdx]) {
+        self.occupancy.mark(who, span);
+        self.apply_aggregates(problem, who, span, true);
+    }
+
+    pub fn unmark(&mut self, problem: &Problem, who: &Occupant<'_>, span: &[SlotIdx]) {
+        self.occupancy.unmark(who, span);
+        self.apply_aggregates(problem, who, span, false);
+    }
+
+    fn apply_aggregates(
+        &mut self,
+        problem: &Problem,
+        who: &Occupant<'_>,
+        span: &[SlotIdx],
+        add: bool,
+    ) {
+        if who.subtree_groups.is_empty() || span.is_empty() {
+            return;
+        }
+        let online = Self::is_online(problem, who.room);
+
+        if who.enforce.day_mix {
+            let days = Self::days_of(problem, span);
+            if add {
+                self.aggregates.add_day_mode(who.subtree_groups, &days, online);
+            } else {
+                self.aggregates
+                    .remove_day_mode(who.subtree_groups, &days, online);
+            }
+        }
+
+        // Share counters are keyed per rule and gated by the rule's own kind
+        // scope, so they are applied unconditionally here.
+        let week = problem.slots.flags(span[0]).week;
+        self.aggregates
+            .apply_share(who.kind, who.subtree_groups, week, online, add);
+    }
+
+    #[inline]
+    pub fn share_violations(&self) -> u32 {
+        self.aggregates.share_violations()
+    }
+
+    /// Whether placing this Session here would push a share cell over its
+    /// allowance. Scored, not filtered — see [`crate::aggregates`].
+    pub fn would_worsen_share(
+        &self,
+        problem: &Problem,
+        who: &Occupant<'_>,
+        span: &[SlotIdx],
+    ) -> bool {
+        if who.subtree_groups.is_empty() || span.is_empty() {
+            return false;
+        }
+        let week = problem.slots.flags(span[0]).week;
+        self.aggregates.share_would_worsen(
+            who.kind,
+            who.subtree_groups,
+            week,
+            Self::is_online(problem, who.room),
+        )
     }
 }

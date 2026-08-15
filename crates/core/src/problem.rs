@@ -5,6 +5,8 @@
 //! (group closures, attendee lists) is precomputed here rather than in the hot
 //! loop.
 
+use crate::aggregates::{Aggregates, ShareInstance};
+use crate::bitset::BitSet;
 use crate::groups::{GroupClosure, GroupCycle};
 use crate::ids::{GroupIdx, OfferingIdx, PersonIdx, PlacementIdx, RoomIdx, SlotIdx};
 use crate::slots::SlotTable;
@@ -35,6 +37,31 @@ pub struct Person {
     pub id: String,
     pub role_tags: Vec<String>,
     pub groups: Vec<GroupIdx>,
+    /// Windows in which this Person is unavailable. Enforced for Sessions they
+    /// LEAD, by `LecturerVeto` — never for Sessions they merely attend.
+    pub blackouts: Vec<Unavailability>,
+}
+
+/// A blackout window.
+///
+/// An empty list on an axis means "every value on that axis", so `{days:[5]}`
+/// is every Friday and `{blocks:[0]}` is every first block. All three empty
+/// therefore means always unavailable, which is the literal reading and is
+/// preserved rather than silently treated as "never".
+#[derive(Clone, Debug, Default)]
+pub struct Unavailability {
+    pub days: Vec<u32>,
+    pub blocks: Vec<u32>,
+    pub weeks: Vec<u32>,
+}
+
+impl Unavailability {
+    #[inline]
+    pub fn matches(&self, f: &crate::slots::SlotFlags) -> bool {
+        (self.days.is_empty() || self.days.contains(&f.iso_weekday))
+            && (self.blocks.is_empty() || self.blocks.contains(&f.block))
+            && (self.weeks.is_empty() || self.weeks.contains(&f.week))
+    }
 }
 
 /// Why a piece of occupancy cannot be moved.
@@ -118,6 +145,15 @@ pub struct ConstraintSet {
     pub group_double_booking: Vec<ConstraintInstance>,
     pub person_double_booking: Vec<ConstraintInstance>,
     pub exact_frequency: Vec<ConstraintInstance>,
+    /// HARD, unary: a lecturer is never assigned during their own blackout.
+    /// The blackout VALUES live on `Person.blackouts`; this list only switches
+    /// enforcement on.
+    pub lecturer_veto: Vec<ConstraintInstance>,
+    /// HARD, day-granularity filter.
+    pub online_onsite_same_day: Vec<ConstraintInstance>,
+    /// HARD, aggregate ratio. Carried on the objective rather than as a filter
+    /// — see [`crate::aggregates`].
+    pub max_online_share: Vec<ShareInstance>,
     /// The six soft types. Separate from the hard lists because only soft
     /// instances carry a weight and typed parameters.
     pub soft: Vec<SoftInstance>,
@@ -142,6 +178,8 @@ pub struct Enforce {
     pub lecturer: bool,
     pub group: bool,
     pub person: bool,
+    pub lecturer_veto: bool,
+    pub day_mix: bool,
 }
 
 impl ConstraintSet {
@@ -151,6 +189,8 @@ impl ConstraintSet {
             lecturer: any_covers(&self.lecturer_double_booking, kind),
             group: any_covers(&self.group_double_booking, kind),
             person: any_covers(&self.person_double_booking, kind),
+            lecturer_veto: any_covers(&self.lecturer_veto, kind),
+            day_mix: any_covers(&self.online_onsite_same_day, kind),
         }
     }
 }
@@ -209,6 +249,14 @@ pub struct Offering {
     pub enforce: Enforce,
     /// Index into the soft cost tables for this Offering's `kind`.
     pub soft_profile: usize,
+    /// Slots blocked by the blackouts of this Offering's lecturers. Unary, so
+    /// it precomputes into a mask exactly like the soft costs do.
+    pub veto_slots: BitSet,
+    /// `own_groups` expanded DOWNWARD only. Used by the two Group-scoped
+    /// aggregate types, matching attendance semantics: a cohort Session is
+    /// attended by its classes, but a class Session does not implicate the
+    /// cohort.
+    pub subtree_groups: Vec<GroupIdx>,
 }
 
 #[derive(Clone, Debug)]
@@ -224,6 +272,7 @@ pub struct FixedOccupancy {
     pub attendees: Vec<PersonIdx>,
     pub reason: Immovable,
     pub enforce: Enforce,
+    pub subtree_groups: Vec<GroupIdx>,
 }
 
 /// One Session that needs placing.
@@ -248,6 +297,9 @@ pub struct Problem {
     pub fixed: Vec<FixedOccupancy>,
     pub constraints: ConstraintSet,
     pub soft: SoftModel,
+    /// Template for the search's aggregate counters: sized and configured, but
+    /// empty. The search clones it and fills it from the fixed occupancy.
+    pub aggregate_template: Aggregates,
     /// Derived, never tuned: large enough that one unplaced Session outranks
     /// every reachable soft configuration, so the scalar objective orders
     /// lexicographically without a magic constant.
@@ -302,10 +354,31 @@ impl Problem {
 
         let soft = SoftModel::build(constraints.soft.clone(), &slots, &rooms, &kinds);
 
+        // Blackout -> slot mask, resolved against the tenant's grid. Unary, so
+        // it precomputes once per Offering.
+        let veto_mask = |lecturers: &[PersonIdx]| -> BitSet {
+            let mut mask = BitSet::new(slots.len());
+            for l in lecturers {
+                let blackouts = &persons[l.get()].blackouts;
+                if blackouts.is_empty() {
+                    continue;
+                }
+                for slot in slots.all() {
+                    let f = slots.flags(slot);
+                    if blackouts.iter().any(|b| b.matches(f)) {
+                        mask.insert(slot.get());
+                    }
+                }
+            }
+            mask
+        };
+
         let derived_offerings = offerings
             .into_iter()
             .map(|o| Offering {
                 soft_profile: soft.profile_for_kind(&o.kind),
+                veto_slots: veto_mask(&o.lecturers),
+                subtree_groups: closure.expand_subtree(&o.groups),
                 enforce: constraints.enforce_for_kind(&o.kind),
                 conflict_groups: closure.expand_conflict(&o.groups),
                 attendees: attendees_of(&o.groups, &o.participants),
@@ -324,6 +397,7 @@ impl Problem {
             .into_iter()
             .map(|f| FixedOccupancy {
                 enforce: constraints.enforce_for_kind(&f.kind),
+                subtree_groups: closure.expand_subtree(&f.groups),
                 conflict_groups: closure.expand_conflict(&f.groups),
                 attendees: attendees_of(&f.groups, &f.persons),
                 own_groups: f.groups,
@@ -337,8 +411,17 @@ impl Problem {
             })
             .collect();
 
-        // sum(weights) * placements + 1 dominates any achievable soft total.
+        // sum(weights) * placements + 1 dominates any achievable soft total, so
+        // the scalar objective orders lexicographically. Aggregate violations
+        // join `unplaced` on the hard side and are covered by the same bound.
         let hard_penalty = soft.total_weight * placements.len() as f64 + 1.0;
+
+        let aggregate_template = Aggregates::new(
+            groups.len(),
+            slots.day_count(),
+            slots.week_count() as usize,
+            constraints.max_online_share.clone(),
+        );
 
         Ok(Self {
             slots,
@@ -351,6 +434,7 @@ impl Problem {
             fixed: derived_fixed,
             constraints,
             soft,
+            aggregate_template,
             hard_penalty,
         })
     }
@@ -407,9 +491,9 @@ mod tests {
         // A(0) -> B(1) -> C(2)
         let groups = vec![group("A", None), group("B", Some(0)), group("C", Some(1))];
         let persons = vec![
-            Person { id: "pa".into(), role_tags: vec![], groups: vec![GroupIdx(0)] },
-            Person { id: "pb".into(), role_tags: vec![], groups: vec![GroupIdx(1)] },
-            Person { id: "pc".into(), role_tags: vec![], groups: vec![GroupIdx(2)] },
+            Person { id: "pa".into(), role_tags: vec![], groups: vec![GroupIdx(0)], blackouts: vec![] },
+            Person { id: "pb".into(), role_tags: vec![], groups: vec![GroupIdx(1)], blackouts: vec![] },
+            Person { id: "pc".into(), role_tags: vec![], groups: vec![GroupIdx(2)], blackouts: vec![] },
         ];
 
         let specs = vec![

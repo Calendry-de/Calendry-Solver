@@ -207,6 +207,9 @@ impl SoftModel {
 #[derive(Copy, Clone, Debug, PartialEq, Default)]
 pub struct Objective {
     pub unplaced: u32,
+    /// Violated `MaxOnlineShare` cells. Joins `unplaced` on the hard side
+    /// because it is an aggregate ratio that cannot be enforced as a filter.
+    pub aggregate: u32,
     pub soft: f64,
 }
 
@@ -218,8 +221,13 @@ impl Objective {
     /// magic constant, and is large enough that one hard violation outranks
     /// every reachable soft configuration.
     #[inline]
+    pub fn hard(&self) -> u32 {
+        self.unplaced + self.aggregate
+    }
+
+    #[inline]
     pub fn total(&self, hard_penalty: f64) -> f64 {
-        self.unplaced as f64 * hard_penalty + self.soft
+        self.hard() as f64 * hard_penalty + self.soft
     }
 }
 
@@ -350,8 +358,8 @@ mod tests {
     fn total_is_lexicographic_under_a_derived_penalty() {
         // Any single unplaced session must outrank every soft configuration.
         let hard_penalty = 7.0 * 4.0 + 1.0; // total_weight * placements + 1
-        let all_soft_bad = Objective { unplaced: 0, soft: 7.0 * 4.0 };
-        let one_unplaced = Objective { unplaced: 1, soft: 0.0 };
+        let all_soft_bad = Objective { unplaced: 0, aggregate: 0, soft: 7.0 * 4.0 };
+        let one_unplaced = Objective { unplaced: 1, aggregate: 0, soft: 0.0 };
         assert!(one_unplaced.total(hard_penalty) > all_soft_bad.total(hard_penalty));
     }
 }

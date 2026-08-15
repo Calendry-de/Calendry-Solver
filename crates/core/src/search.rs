@@ -40,7 +40,7 @@ use crate::ids::{PlacementIdx, RoomIdx};
 use crate::problem::Problem;
 use crate::rng::Rng;
 use crate::soft::{Objective, SoftComponent};
-use crate::solution::{Occupancy, Occupant, Placement, Solution};
+use crate::solution::{Occupant, Placement, SearchState, Solution};
 
 /// Search hyperparameters.
 ///
@@ -101,7 +101,7 @@ impl Halt for NeverHalt {
 pub fn solve(problem: &Problem, seed: u64, budget: Budget, halt: &dyn Halt) -> SolveOutcome {
     let mut rng = Rng::new(seed);
 
-    let (mut current, mut occupancy) = construct(problem);
+    let (mut current, mut state) = construct(problem);
     let mut objective = recompute_objective(problem, &current);
 
     let mut best = current.clone();
@@ -142,7 +142,7 @@ pub fn solve(problem: &Problem, seed: u64, budget: Budget, halt: &dyn Halt) -> S
         // `original` is what an undo needs: the removed placements and where
         // they were, so a rejected trial is rolled back in O(k) rather than by
         // rebuilding the whole occupancy.
-        let (removed, original) = ruin(problem, &current, &mut occupancy, &mut rng);
+        let (removed, original) = ruin(problem, &current, &mut state, &mut rng);
         if removed.is_empty() {
             stagnant += 1;
             continue;
@@ -166,13 +166,13 @@ pub fn solve(problem: &Problem, seed: u64, budget: Budget, halt: &dyn Halt) -> S
         // --- recreate -----------------------------------------------------
         let mut repaired: Vec<(PlacementIdx, Placement)> = Vec::with_capacity(removed.len());
         for &p in &removed {
-            let scored = repair_one(problem, &evaluator, &occupancy, &trial, p, &mut rng);
+            let scored = repair_one(problem, &evaluator, &state, &trial, p, &mut rng);
             moves_evaluated += scored.evaluated;
             if let Some(placement) = scored.best {
                 let offering = problem.offering_of(p);
                 let occupant = Occupant::of_offering(offering).with_room(placement.room);
                 if let Some(span) = problem.slots.span(placement.start, offering.duration_blocks) {
-                    occupancy.mark(&occupant, &span);
+                    state.mark(problem, &occupant, &span);
                 }
                 trial.set(p, Some(placement));
                 trial_obj.soft +=
@@ -181,6 +181,13 @@ pub fn solve(problem: &Problem, seed: u64, budget: Budget, halt: &dyn Halt) -> S
                 repaired.push((p, placement));
             }
         }
+
+        // The aggregate term is read straight off the incremental counters,
+        // which `SearchState::mark`/`unmark` have already updated. Unlike the
+        // soft sum there is no delta to accumulate — the counters ARE the
+        // running state — but they can still drift, which is what the assertion
+        // below and the aggregate-drift test exist to catch.
+        trial_obj.aggregate = state.share_violations();
 
         // Delta drift is the classic metaheuristic bug: the search optimizes a
         // number that has quietly diverged from the real objective. Checked on
@@ -215,14 +222,14 @@ pub fn solve(problem: &Problem, seed: u64, budget: Budget, halt: &dyn Halt) -> S
                 let o = problem.offering_of(p);
                 let occupant = Occupant::of_offering(o).with_room(pl.room);
                 if let Some(span) = problem.slots.span(pl.start, o.duration_blocks) {
-                    occupancy.unmark(&occupant, &span);
+                    state.unmark(problem, &occupant, &span);
                 }
             }
             for &(p, pl) in &original {
                 let o = problem.offering_of(p);
                 let occupant = Occupant::of_offering(o).with_room(pl.room);
                 if let Some(span) = problem.slots.span(pl.start, o.duration_blocks) {
-                    occupancy.mark(&occupant, &span);
+                    state.mark(problem, &occupant, &span);
                 }
             }
         }
@@ -264,9 +271,9 @@ pub fn solve(problem: &Problem, seed: u64, budget: Budget, halt: &dyn Halt) -> S
 // ---------------------------------------------------------------------------
 
 /// Greedy construction: most-constrained-first, first feasible slot.
-pub fn construct(problem: &Problem) -> (Solution, Occupancy) {
+pub fn construct(problem: &Problem) -> (Solution, SearchState) {
     let mut solution = Solution::empty(problem);
-    let mut occupancy = Occupancy::from_fixed(problem);
+    let mut state = SearchState::from_fixed(problem);
 
     // Ordering is a pure function of the problem; the seed only ever perturbs
     // the LNS phase, so construction is reproducible on its own.
@@ -292,7 +299,7 @@ pub fn construct(problem: &Problem) -> (Solution, Occupancy) {
             };
             for &room in &offering.eligible_rooms {
                 let candidate = base.with_room(room);
-                if occupancy.is_free(&candidate, &span) {
+                if state.is_free(problem, &candidate, &span) {
                     chosen = Some((Placement { start: slot, room }, span, candidate));
                     break 'search;
                 }
@@ -303,12 +310,12 @@ pub fn construct(problem: &Problem) -> (Solution, Occupancy) {
         // an ExactFrequency violation rather than an error, because the solver
         // must degrade gracefully on infeasible input.
         if let Some((placement, span, occupant)) = chosen {
-            occupancy.mark(&occupant, &span);
+            state.mark(problem, &occupant, &span);
             solution.set(p, Some(placement));
         }
     }
 
-    (solution, occupancy)
+    (solution, state)
 }
 
 // ---------------------------------------------------------------------------
@@ -326,15 +333,28 @@ type Ruined = (Vec<PlacementIdx>, Vec<(PlacementIdx, Placement)>);
 fn ruin(
     problem: &Problem,
     current: &Solution,
-    occupancy: &mut Occupancy,
+    state: &mut SearchState,
     rng: &mut Rng,
 ) -> Ruined {
     let placed: Vec<PlacementIdx> = problem
         .placement_ids()
         .filter(|&p| current.get(p).is_some())
         .collect();
-    if placed.is_empty() {
+
+    // Anything construction failed to place is retried on every iteration.
+    // Without this, ruin only ever selects PLACED Sessions, so a Session that
+    // greedy dead-ended on could never be reconsidered and the `unplaced` term
+    // of the objective would be permanently unoptimizable.
+    let unplaced: Vec<PlacementIdx> = problem
+        .placement_ids()
+        .filter(|&p| current.get(p).is_none())
+        .collect();
+
+    if placed.is_empty() && unplaced.is_empty() {
         return (Vec::new(), Vec::new());
+    }
+    if placed.is_empty() {
+        return (unplaced, Vec::new());
     }
 
     // Ruin size: at least 1, at most 8 or the number placed, whichever is smaller.
@@ -347,13 +367,20 @@ fn ruin(
         _ => ruin_related(problem, current, &placed, k, rng),
     };
 
+    // Unplaced ones carry no occupancy to release and no original position to
+    // restore; they simply join the repair list.
+    let mut chosen = chosen;
+    chosen.extend_from_slice(&unplaced);
+    chosen.sort_unstable();
+    chosen.dedup();
+
     let mut original = Vec::with_capacity(chosen.len());
     for &p in &chosen {
         if let Some(pl) = current.get(p) {
             let offering = problem.offering_of(p);
             let occupant = Occupant::of_offering(offering).with_room(pl.room);
             if let Some(span) = problem.slots.span(pl.start, offering.duration_blocks) {
-                occupancy.unmark(&occupant, &span);
+                state.unmark(problem, &occupant, &span);
             }
             original.push((p, pl));
         }
@@ -448,7 +475,7 @@ struct Repaired {
 fn repair_one(
     problem: &Problem,
     evaluator: &dyn MoveEvaluator,
-    occupancy: &Occupancy,
+    state: &SearchState,
     solution: &Solution,
     p: PlacementIdx,
     rng: &mut Rng,
@@ -484,21 +511,37 @@ fn repair_one(
     }
 
     let mut scores = vec![Score::default(); candidates.len()];
-    evaluator.score_batch(problem, solution, occupancy, &candidates, &mut scores);
+    evaluator.score_batch(problem, solution, state, &candidates, &mut scores);
 
-    let mut best: Option<(usize, f64)> = None;
-    for (i, s) in scores.iter().enumerate() {
-        if !s.0.is_finite() {
-            continue;
-        }
-        // Strictly-less keeps the lowest index on ties.
-        if best.is_none_or(|(_, b)| s.0 < b) {
-            best = Some((i, s.0));
+    // Best score, then a SEEDED choice among everything tied with it.
+    //
+    // Breaking ties by lowest index instead would make repair fully
+    // deterministic given a candidate list — and that collapses the
+    // neighbourhood: ruining the same Session always regenerates the same
+    // placement, so LNS can never escape a tie-induced dead end. (Observed for
+    // real: a Group forced onto one day would keep re-picking the virtual room
+    // and leave its second Session permanently unplaced.) The RNG is consumed
+    // sequentially here like everywhere else, so the run stays reproducible.
+    let mut best_score = f64::INFINITY;
+    for s in scores.iter() {
+        if s.0.is_finite() && s.0 < best_score {
+            best_score = s.0;
         }
     }
+    if !best_score.is_finite() {
+        return Repaired { best: None, evaluated: candidates.len() as u64 };
+    }
+
+    let tied: Vec<usize> = scores
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| s.0 <= best_score + f64::EPSILON)
+        .map(|(i, _)| i)
+        .collect();
+    let pick = tied[rng.below(tied.len())];
 
     Repaired {
-        best: best.map(|(i, _)| candidates[i].to),
+        best: Some(candidates[pick].to),
         evaluated: candidates.len() as u64,
     }
 }
@@ -521,7 +564,27 @@ pub fn recompute_objective(problem: &Problem, solution: &Solution) -> Objective 
             None => unplaced += 1,
         }
     }
-    Objective { unplaced, soft }
+    // Aggregate violations are recomputed by replaying the whole solution into
+    // a fresh counter set — the from-scratch counterpart to the incremental
+    // counters the search maintains.
+    let aggregate = rebuild_state(problem, solution).share_violations();
+    Objective { unplaced, aggregate, soft }
+}
+
+/// Replay a solution into a fresh [`SearchState`]. Used by the from-scratch
+/// objective and by the per-iteration drift assertion.
+pub fn rebuild_state(problem: &Problem, solution: &Solution) -> SearchState {
+    let mut state = SearchState::from_fixed(problem);
+    for p in problem.placement_ids() {
+        if let Some(pl) = solution.get(p) {
+            let o = problem.offering_of(p);
+            let occupant = Occupant::of_offering(o).with_room(pl.room);
+            if let Some(span) = problem.slots.span(pl.start, o.duration_blocks) {
+                state.mark(problem, &occupant, &span);
+            }
+        }
+    }
+    state
 }
 
 /// Per-instance counts for `ObjectiveBreakdown`.
@@ -565,7 +628,9 @@ pub fn soft_breakdown(problem: &Problem, solution: &Solution) -> Vec<SoftCompone
 /// associative, so accumulating deltas and summing from scratch can legitimately
 /// differ in the last place. Anything beyond that is drift, and drift is a bug.
 pub fn objectives_agree(a: Objective, b: Objective) -> bool {
-    a.unplaced == b.unplaced && (a.soft - b.soft).abs() <= 1e-9 * (1.0 + a.soft.abs())
+    a.unplaced == b.unplaced
+        && a.aggregate == b.aggregate
+        && (a.soft - b.soft).abs() <= 1e-9 * (1.0 + a.soft.abs())
 }
 
 /// Set so a move worsening the objective by the average instance weight is

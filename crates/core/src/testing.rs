@@ -55,6 +55,7 @@ pub fn person(id: &str, groups: &[u32]) -> Person {
         id: id.to_string(),
         role_tags: vec!["lecturer".to_string()],
         groups: groups.iter().map(|&g| GroupIdx(g)).collect(),
+        blackouts: vec![],
     }
 }
 
@@ -108,6 +109,9 @@ pub fn all_constraints() -> ConstraintSet {
         group_double_booking: inst("c-group"),
         person_double_booking: inst("c-person"),
         exact_frequency: inst("c-freq"),
+        lecturer_veto: inst("c-veto"),
+        online_onsite_same_day: inst("c-mix"),
+        max_online_share: Vec::new(),
         soft: Vec::new(),
     }
 }
@@ -496,4 +500,167 @@ pub fn seeded_instance(seed: u64) -> Problem {
     ];
 
     assemble(slots, room_list, group_list, people, offerings, vec![], with_soft(soft_set))
+}
+
+// ---------------------------------------------------------------------------
+// Slice 4 fixtures — blackouts, day mix, share ratio
+// ---------------------------------------------------------------------------
+
+use crate::aggregates::{ShareInstance, ShareWindow};
+use crate::problem::Unavailability;
+
+pub fn blackout(days: &[u32], blocks: &[u32], weeks: &[u32]) -> Unavailability {
+    Unavailability {
+        days: days.to_vec(),
+        blocks: blocks.to_vec(),
+        weeks: weeks.to_vec(),
+    }
+}
+
+pub fn person_with_blackouts(id: &str, groups: &[u32], b: Vec<Unavailability>) -> Person {
+    let mut p = person(id, groups);
+    p.blackouts = b;
+    p
+}
+
+pub fn share_rule(id: &str, max_ratio: f64, window: ShareWindow) -> ShareInstance {
+    ShareInstance { id: id.to_string(), kinds: vec![], max_ratio, window }
+}
+
+/// Structural + the given `MaxOnlineShare` rules.
+pub fn with_share(rules: Vec<ShareInstance>) -> ConstraintSet {
+    ConstraintSet { max_online_share: rules, ..all_constraints() }
+}
+
+/// Everything except the day-mix rule, so a test can show what happens without it.
+pub fn without_day_mix() -> ConstraintSet {
+    ConstraintSet { online_onsite_same_day: vec![], ..all_constraints() }
+}
+
+/// Everything except lecturer vetoes.
+pub fn without_lecturer_veto() -> ConstraintSet {
+    ConstraintSet { lecturer_veto: vec![], ..all_constraints() }
+}
+
+/// One virtual room and one on-site room, in that order, so greedy reaches for
+/// the online one first.
+pub fn online_first_rooms() -> Vec<Room> {
+    vec![room_with("R-online", 1, true), room_with("R-onsite", 1, false)]
+}
+
+/// A lecturer blacked out on the first block. Two blocks, one room, one Session.
+pub fn lecturer_blacked_out_on_first_block(constraints: ConstraintSet) -> Problem {
+    assemble(
+        grid(2, 1),
+        rooms(1),
+        vec![],
+        vec![person_with_blackouts("dr-busy", &[], vec![blackout(&[], &[0], &[])])],
+        vec![with_lecturers(offering("S", 1, &[0]), &[0])],
+        vec![],
+        constraints,
+    )
+}
+
+/// One Group, two Sessions on a single day, with the virtual room available for
+/// only one of the two blocks.
+///
+/// GroupDoubleBooking already forces the two Sessions into different blocks, and
+/// greedy reaches for the virtual room first — so without the day-mix rule the
+/// result is one online plus one on-site: a mixed day. With the rule, both must
+/// end up on-site, which is reachable because the on-site room is free all day.
+pub fn group_day_with_both_room_types(constraints: ConstraintSet) -> Problem {
+    let mut block_virtual = fixed_session("occupies-virtual", Some(0), 1);
+    block_virtual.kind = "other".to_string();
+    assemble(
+        grid(2, 1), // one day, two blocks
+        online_first_rooms(),
+        vec![group("G", None)],
+        vec![],
+        vec![with_groups(offering("S", 2, &[0, 1]), &[0])],
+        vec![block_virtual],
+        constraints,
+    )
+}
+
+/// One Group with four Sessions across four blocks of one day, with an online
+/// room available. `max_ratio` caps how many may be online.
+pub fn share_capped_group(rules: Vec<ShareInstance>) -> Problem {
+    assemble(
+        SlotTable::build(4, &[1], &teaching_weeks(1)).unwrap(),
+        online_first_rooms(),
+        vec![group("G", None)],
+        vec![],
+        vec![with_groups(offering("S", 4, &[0, 1]), &[0])],
+        vec![],
+        // Day-mix would forbid mixing modes on the single day, which would mask
+        // what the share cap is doing, so it is deliberately off here.
+        ConstraintSet { max_online_share: rules, ..without_day_mix() },
+    )
+}
+
+/// Two weeks, two Sessions per week, one Group. Under PER_TERM a 50% cap allows
+/// two online anywhere; under PER_WEEK it allows at most one per week.
+pub fn share_across_two_weeks(rules: Vec<ShareInstance>) -> Problem {
+    assemble(
+        SlotTable::build(2, &[1], &teaching_weeks(2)).unwrap(),
+        online_first_rooms(),
+        vec![group("G", None)],
+        vec![],
+        vec![with_groups(offering("S", 4, &[0, 1]), &[0])],
+        vec![],
+        ConstraintSet { max_online_share: rules, ..without_day_mix() },
+    )
+}
+
+/// A seeded instance that exercises the aggregate counters: nested groups,
+/// virtual rooms, several weeks, and both aggregate rules enabled.
+pub fn seeded_aggregate_instance(seed: u64) -> Problem {
+    let mut rng = Rng::new(seed);
+
+    let blocks = 2 + rng.below(2) as u32;
+    let weeks = 2 + rng.below(2);
+    let slots = SlotTable::build(blocks, &[1, 2], &teaching_weeks(weeks)).unwrap();
+
+    let room_list = vec![
+        room_with("V0", 1, true),
+        room_with("R1", 3, false),
+        room_with("R2", 7, false),
+    ];
+
+    let groups = vec![group("G0", None), group("G1", Some(0)), group("G2", Some(0))];
+
+    let n_people = 2 + rng.below(3);
+    let people: Vec<Person> = (0..n_people)
+        .map(|i| {
+            let mut p = person(&format!("P{i}"), &[(1 + rng.below(2)) as u32]);
+            if rng.below(3) == 0 {
+                p.blackouts = vec![blackout(&[], &[rng.below(blocks as usize) as u32], &[])];
+            }
+            p
+        })
+        .collect();
+
+    let offerings: Vec<OfferingSpec> = (0..3 + rng.below(3))
+        .map(|i| {
+            let mut o = offering(&format!("O{i}"), 1 + rng.below(3) as u32, &[0, 1, 2]);
+            o.groups = vec![GroupIdx(rng.below(3) as u32)];
+            o.lecturers = vec![PersonIdx(rng.below(n_people) as u32)];
+            o
+        })
+        .collect();
+
+    let constraints = ConstraintSet {
+        max_online_share: vec![share_rule(
+            "share",
+            0.25 * (1 + rng.below(3)) as f64,
+            if rng.below(2) == 0 { ShareWindow::PerTerm } else { ShareWindow::PerWeek },
+        )],
+        soft: vec![
+            soft("first", 2.0, SoftParams::MinimizeFirstBlock),
+            soft("online", 3.0, SoftParams::MinimizeOnline),
+        ],
+        ..all_constraints()
+    };
+
+    assemble(slots, room_list, groups, people, offerings, vec![], constraints)
 }

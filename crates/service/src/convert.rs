@@ -15,8 +15,9 @@ use std::collections::{HashMap, HashSet};
 use calendry_solver_core::ids::{GroupIdx, OfferingIdx, PersonIdx, RoomIdx, SlotIdx};
 use calendry_solver_core::problem::{
     ConstraintInstance, ConstraintSet, FixedSpec, Immovable, OfferingSpec, PlacementVar, Problem,
-    classify_immovable,
+    Unavailability, classify_immovable,
 };
+use calendry_solver_core::aggregates::{ShareInstance, ShareWindow};
 use calendry_solver_core::slots::{SlotTable, WeekKind, WeekSpec};
 use calendry_solver_core::soft::{SoftInstance, SoftParams};
 use calendry_solver_proto::v1 as pb;
@@ -234,6 +235,18 @@ fn build_persons(
                 .group_ids
                 .iter()
                 .filter_map(|g| group_index.get(g).map(|&i| GroupIdx(i)))
+                .collect(),
+            // An empty list on an axis means "every value on that axis", which
+            // is preserved verbatim rather than normalised here — the grid is
+            // what resolves it, in `Problem::build`.
+            blackouts: p
+                .blackouts
+                .iter()
+                .map(|b| Unavailability {
+                    days: b.days.clone(),
+                    blocks: b.blocks.clone(),
+                    weeks: b.weeks.clone(),
+                })
                 .collect(),
         })
         .collect();
@@ -455,7 +468,6 @@ fn build_constraints(input: &pb::SolverInput) -> Result<ConstraintSet, Status> {
     use pb::constraint_config::Params;
 
     let mut set = ConstraintSet::default();
-    let mut unsupported: Vec<&str> = Vec::new();
 
     for c in &input.constraints {
         if !c.enabled {
@@ -476,9 +488,33 @@ fn build_constraints(input: &pb::SolverInput) -> Result<ConstraintSet, Status> {
             Some(Params::PersonDoubleBooking(_)) => set.person_double_booking.push(instance),
             Some(Params::ExactFrequency(_)) => set.exact_frequency.push(instance),
 
-            Some(Params::LecturerVeto(_)) => unsupported.push("LecturerVeto"),
-            Some(Params::OnlineOnsiteSameDay(_)) => unsupported.push("OnlineOnsiteSameDay"),
-            Some(Params::MaxOnlineShare(_)) => unsupported.push("MaxOnlineShare"),
+            Some(Params::LecturerVeto(_)) => set.lecturer_veto.push(instance),
+            Some(Params::OnlineOnsiteSameDay(_)) => set.online_onsite_same_day.push(instance),
+            Some(Params::MaxOnlineShare(p)) => {
+                if !(0.0..=1.0).contains(&p.max_ratio) || p.max_ratio.is_nan() {
+                    return Err(Status::invalid_argument(format!(
+                        "constraint '{}' has max_ratio {}; it is a share and must be in 0.0..=1.0",
+                        c.id, p.max_ratio
+                    )));
+                }
+                let window = match pb::ShareWindow::try_from(p.window) {
+                    Ok(pb::ShareWindow::PerTerm) => ShareWindow::PerTerm,
+                    Ok(pb::ShareWindow::PerWeek) => ShareWindow::PerWeek,
+                    _ => {
+                        return Err(Status::invalid_argument(format!(
+                            "constraint '{}' must set window to PER_TERM or PER_WEEK; the \
+                             ratio is meaningless without a window to measure it over",
+                            c.id
+                        )));
+                    }
+                };
+                set.max_online_share.push(ShareInstance {
+                    id: c.id.clone(),
+                    kinds: c.applies_to_kinds.clone(),
+                    max_ratio: p.max_ratio,
+                    window,
+                });
+            }
 
             // The six soft types. Weight is meaningful only here — hard types
             // ignore it, because hard-vs-soft is a property of the TYPE.
@@ -521,19 +557,10 @@ fn build_constraints(input: &pb::SolverInput) -> Result<ConstraintSet, Status> {
         }
     }
 
-    // Nothing silently no-ops. An enabled constraint this slice cannot evaluate
-    // is an explicit UNIMPLEMENTED, not a quietly ignored setting that would
-    // make the schedule look validated when it was not.
-    if !unsupported.is_empty() {
-        unsupported.sort_unstable();
-        unsupported.dedup();
-        return Err(Status::unimplemented(format!(
-            "constraint type(s) not implemented yet: {}. Implemented: the four structural \
-             types, ExactFrequency, and all six soft types",
-            unsupported.join(", ")
-        )));
-    }
-
+    // Every one of the 14 catalogue types is now implemented, so there is no
+    // longer an UNIMPLEMENTED branch here. A new type added to the schema will
+    // fail to compile against this match rather than being silently ignored —
+    // which is the property that mattered about the old branch.
     Ok(set)
 }
 

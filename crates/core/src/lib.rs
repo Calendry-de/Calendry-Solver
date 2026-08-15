@@ -9,6 +9,7 @@
 //! See the repository `CLAUDE.md` for the domain model and the architecture
 //! decisions this implements.
 
+pub mod aggregates;
 pub mod bitset;
 pub mod constraints;
 pub mod evaluator;
@@ -23,6 +24,7 @@ pub mod solution;
 
 pub mod testing;
 
+pub use aggregates::{ShareInstance, ShareWindow};
 pub use groups::{GroupClosure, GroupCycle};
 pub use problem::{ConstraintInstance, ConstraintSet, Immovable, Problem};
 pub use search::{Budget, SolveOutcome, solve};

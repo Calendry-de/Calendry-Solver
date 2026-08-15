@@ -29,6 +29,9 @@ pub const LECTURER_DOUBLE_BOOKING: &str = "LecturerDoubleBooking";
 pub const GROUP_DOUBLE_BOOKING: &str = "GroupDoubleBooking";
 pub const PERSON_DOUBLE_BOOKING: &str = "PersonDoubleBooking";
 pub const EXACT_FREQUENCY: &str = "ExactFrequency";
+pub const LECTURER_VETO: &str = "LecturerVeto";
+pub const ONLINE_ONSITE_SAME_DAY: &str = "OnlineOnsiteSameDay";
+pub const MAX_ONLINE_SHARE: &str = "MaxOnlineShare";
 
 /// A Session occupying slots, whether immovable or placed by this run.
 struct View<'a> {
@@ -50,7 +53,109 @@ pub fn evaluate_hard(problem: &Problem, solution: &Solution) -> Vec<Violation> {
     let mut out = Vec::new();
     exact_frequency(problem, solution, &mut out);
     structural(problem, solution, &mut out);
+    lecturer_veto(problem, solution, &mut out);
+    aggregates(problem, solution, &mut out);
     out
+}
+
+/// HARD, unary. A lecturer is never assigned during their own blackout.
+///
+/// Evaluated over placed Sessions only: immovable occupancy is reported by the
+/// caller's own data, and re-reporting a locked Session the solver cannot move
+/// would be noise. Blackout VALUES live on `Person.blackouts`; the constraint
+/// instance only switches enforcement on.
+fn lecturer_veto(problem: &Problem, solution: &Solution, out: &mut Vec<Violation>) {
+    if problem.constraints.lecturer_veto.is_empty() {
+        return;
+    }
+    for instance in &problem.constraints.lecturer_veto {
+        for p in problem.placement_ids() {
+            let Some(pl) = solution.get(p) else { continue };
+            let o = problem.offering_of(p);
+            if !instance.covers(&o.kind) {
+                continue;
+            }
+            let Some(span) = problem.slots.span(pl.start, o.duration_blocks) else {
+                continue;
+            };
+            for &s in &span {
+                if !o.veto_slots.contains(s.get()) {
+                    continue;
+                }
+                let f = problem.slots.flags(s);
+                let who = o
+                    .lecturers
+                    .iter()
+                    .find(|l| {
+                        problem.persons[l.get()]
+                            .blackouts
+                            .iter()
+                            .any(|b| b.matches(f))
+                    })
+                    .map(|l| problem.persons[l.get()].id.clone())
+                    .unwrap_or_default();
+                out.push(Violation {
+                    constraint_id: instance.id.clone(),
+                    constraint_type: LECTURER_VETO,
+                    session_ids: vec![problem.placement_label(p)],
+                    offering_ids: vec![o.id.clone()],
+                    detail: format!(
+                        "lecturer '{who}' is unavailable at week {} day {} block {}",
+                        f.week, f.iso_weekday, f.block
+                    ),
+                });
+                break;
+            }
+        }
+    }
+}
+
+/// The two Group-scoped aggregate types, evaluated by replaying the whole
+/// solution into a fresh counter set.
+///
+/// `OnlineOnsiteSameDay` is a filter the search can never violate, so anything
+/// reported here came from the caller's immovable input — which the "warn and
+/// allow" manual-edit UX can legitimately produce. `MaxOnlineShare` lives on the
+/// objective and CAN survive into a returned solution.
+fn aggregates(problem: &Problem, solution: &Solution, out: &mut Vec<Violation>) {
+    if problem.constraints.online_onsite_same_day.is_empty()
+        && problem.constraints.max_online_share.is_empty()
+    {
+        return;
+    }
+    let state = crate::search::rebuild_state(problem, solution);
+
+    for instance in &problem.constraints.online_onsite_same_day {
+        for (group, day) in state.aggregates.mixed_days() {
+            out.push(Violation {
+                constraint_id: instance.id.clone(),
+                constraint_type: ONLINE_ONSITE_SAME_DAY,
+                session_ids: Vec::new(),
+                offering_ids: Vec::new(),
+                detail: format!(
+                    "group '{}' has both online and on-site sessions on day {day}",
+                    problem.groups[group.get()].id
+                ),
+            });
+        }
+    }
+
+    for (rule_idx, group, window, online, total) in state.aggregates.violated_cells() {
+        let rule = &problem.constraints.max_online_share[rule_idx];
+        out.push(Violation {
+            constraint_id: rule.id.clone(),
+            constraint_type: MAX_ONLINE_SHARE,
+            session_ids: Vec::new(),
+            offering_ids: Vec::new(),
+            detail: format!(
+                "group '{}' has {online} of {total} sessions online in window {window}, \
+                 above the {:.0}% cap (allowance {})",
+                problem.groups[group.get()].id,
+                rule.max_ratio * 100.0,
+                rule.allowance(total)
+            ),
+        });
+    }
 }
 
 // ---------------------------------------------------------------------------

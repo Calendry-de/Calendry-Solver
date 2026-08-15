@@ -14,7 +14,7 @@ use rayon::prelude::*;
 
 use crate::ids::PlacementIdx;
 use crate::problem::Problem;
-use crate::solution::{Occupancy, Occupant, Placement, Solution};
+use crate::solution::{Occupant, Placement, SearchState, Solution};
 
 /// A candidate relocation of one placement.
 #[derive(Copy, Clone, Debug)]
@@ -36,7 +36,7 @@ pub trait MoveEvaluator: Send + Sync {
         &self,
         problem: &Problem,
         solution: &Solution,
-        occupancy: &Occupancy,
+        state: &SearchState,
         moves: &[Move],
         out: &mut [Score],
     );
@@ -50,7 +50,7 @@ impl MoveEvaluator for CpuEvaluator {
         &self,
         problem: &Problem,
         solution: &Solution,
-        occupancy: &Occupancy,
+        state: &SearchState,
         moves: &[Move],
         out: &mut [Score],
     ) {
@@ -59,7 +59,7 @@ impl MoveEvaluator for CpuEvaluator {
         out.par_iter_mut()
             .zip(moves.par_iter())
             .for_each(|(slot, mv)| {
-                *slot = score_one(problem, solution, occupancy, mv);
+                *slot = score_one(problem, solution, state, mv);
             });
     }
 }
@@ -67,7 +67,7 @@ impl MoveEvaluator for CpuEvaluator {
 fn score_one(
     problem: &Problem,
     solution: &Solution,
-    occupancy: &Occupancy,
+    state: &SearchState,
     mv: &Move,
 ) -> Score {
     let offering = problem.offering_of(mv.placement);
@@ -90,11 +90,21 @@ fn score_one(
     );
 
     let candidate = Occupant::of_offering(offering).with_room(mv.to.room);
-    if !occupancy.is_free(&candidate, &span) {
+    if !state.is_free(problem, &candidate, &span) {
         return Score(f64::INFINITY);
     }
 
-    Score(problem.soft.cost(offering.soft_profile, mv.to.start, mv.to.room))
+    // MaxOnlineShare is NOT a feasibility filter (see `crate::aggregates`), so
+    // its marginal effect is folded into the score instead: a candidate that
+    // would push a (group, window) cell over its allowance is heavily
+    // penalised, but remains reachable.
+    let share_penalty = if state.would_worsen_share(problem, &candidate, &span) {
+        problem.hard_penalty
+    } else {
+        0.0
+    };
+
+    Score(problem.soft.cost(offering.soft_profile, mv.to.start, mv.to.room) + share_penalty)
 }
 
 #[cfg(test)]
@@ -108,11 +118,11 @@ mod tests {
         // 1 offering x 1 session, 2 rooms, 1 slot; room 0 already taken.
         let problem = testing::tiny_problem();
         let solution = Solution::empty(&problem);
-        let mut occ = Occupancy::from_fixed(&problem);
+        let mut occ = SearchState::from_fixed(&problem);
         let slot = problem.slots.resolve(0, 1, 0).unwrap();
 
         let blocker = Occupant::of_offering(&problem.offerings[0]).with_room(RoomIdx(0));
-        occ.mark(&blocker, &[slot]);
+        occ.mark(&problem, &blocker, &[slot]);
 
         let moves = vec![
             Move { placement: PlacementIdx(0), to: Placement { start: slot, room: RoomIdx(0) } },

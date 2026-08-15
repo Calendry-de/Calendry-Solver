@@ -434,60 +434,86 @@ tagged `v0.2.0`, and the Nuxt app installing `@mindcollaps/calendry-proto@0.2.0`
 built from that same tag, means "which schema is each side on" has one answer.
 
 ### Implementation status
-**Slices 1-3 complete.** Implemented: `StartRun`/`GetStatus`/`CancelRun`,
-in-memory run registry, both budgets, seeded determinism, past/locked/
-out-of-scope immovability, **all four structural types**, `ExactFrequency`, and
-**all six soft types** driving a real weighted objective.
+**Slices 1-4 complete. All 14 catalogue types are implemented.** There is no
+longer an `UNIMPLEMENTED` branch in `convert.rs` — a new type added to the schema
+fails to compile against the match instead, which is the property that mattered.
 
-Search is **greedy construction followed by Large Neighborhood Search with
-simulated-annealing acceptance**, driving `MoveEvaluator` for real.
+Search is greedy construction followed by Large Neighborhood Search with
+simulated-annealing acceptance, driving `MoveEvaluator` for real.
 
-Remaining: the three hard types `LecturerVeto`, `OnlineOnsiteSameDay` and
-`MaxOnlineShare` (slice 4), and the benchmark generator (slice 5). Everything
-unimplemented still returns an explicit `UNIMPLEMENTED`.
+Remaining: the benchmark generator (slice 5), and the deferred v2
+minimize-movement lock policy.
 
 #### BREAKING CHANGE for the Nuxt integration: `GetStatus.best_objective`
-Through slices 1-2 this field carried the **hard-violation count**. It now
-carries the **real weighted objective** (`unplaced x hard_penalty + soft_sum`).
-Nothing consumes it yet — the Nuxt integration has not happened — but anything
-built against the old meaning must be updated. `ObjectiveBreakdown` is also
-populated for the first time; it previously shipped empty.
+Through slices 1-2 this field carried the **hard-violation count**. Since slice 3
+it carries the **real weighted objective** (`hard x hard_penalty + soft_sum`).
+Nothing consumes it yet, but anything built against the old meaning must be
+updated. `ObjectiveBreakdown` is also populated; it previously shipped empty.
 
-#### Slice 3 design notes worth knowing before changing this code
-- **All six soft types are unary** — each depends only on one Session's
-  `(slot, room)`, unlike the four structural types, which are pairwise. That is
-  why soft cost can be a precomputed `(profile, slot, room)` table and why a
-  move's soft delta is exact and O(1). A future soft type that is *not* unary
-  would break this and needs a different mechanism, not a new table entry.
-- **LNS, not plain SA**, because `score_batch` is batched by construction: plain
-  SA proposes one move per iteration and would leave the interface — and the
-  future GPU backend it exists for — with nothing to do. LNS's repair step
-  naturally enumerates every eligible `(slot, room)`.
-- **The objective is maintained incrementally**; ruin subtracts, repair adds.
-  Debug builds assert on every iteration that it still matches a from-scratch
-  recomputation. Delta drift is the classic metaheuristic bug — the search
-  silently optimizes a number that no longer describes the schedule — and no
-  other test would catch it.
-- **The hard penalty is derived, never tuned**: `sum(weights) x placements + 1`,
-  which makes the scalar objective order lexicographically without a magic
-  constant.
-- **Search hyperparameters are not domain magic numbers.** `search::tuning`
-  holds the cooling rate, stagnation limit and candidate cap. The ban in this
-  repo is on *domain* assumptions — `slot % 3`, `timeslot > 14`, `weeks[-n:]` —
-  which silently encode a grid or calendar the tenant never configured. A
-  cooling rate encodes nothing about Calendry.
-- **Construction is seed-independent.** The seed influences only the LNS phase,
-  so a schedule is reproducible from the input alone before any metaheuristic
-  runs. On an instance with no soft constraints the objective is already 0, LNS
-  exits with zero iterations, and the seed cannot matter at all — which is what
-  keeps the slice 1 and 2 exact-assignment tests valid.
-- **Negative soft weights are rejected** with `INVALID_ARGUMENT`. Every soft type
-  declares "minimize", so a negative weight would silently invert it into a
-  maximize the type never declared. Zero is valid and means "report the count,
-  do not steer".
+#### The three constraint SHAPES — read before adding a type
+Slices 1-3 needed two shapes. Slice 4 needed a third, and forcing the new types
+into the old ones would have been the mistake:
+
+1. **Pairwise, keyed by `(entity, slot)`** — the four structural double-booking
+   types. Occupancy bitsets; the search can never violate them.
+2. **Unary, keyed by `(slot, room)`** — the six soft types, and also
+   `LecturerVeto`, which despite its name depends only on one Session's slot and
+   its lecturers. Precomputed lookup tables and masks; O(1) exact deltas.
+3. **Aggregate over a set** — `OnlineOnsiteSameDay` and `MaxOnlineShare`, in
+   `aggregates.rs`. Neither is expressible as a slot-keyed bitset.
+
+Within shape 3 the two types still differ, and the difference is load-bearing:
+
+- **`OnlineOnsiteSameDay` stays a feasibility filter.** It interacts at *day*
+  granularity, but it is monotone-safe: placing the first Session on a day can
+  never violate it. So the search never produces one, and anything reported came
+  from the caller's immovable input.
+- **`MaxOnlineShare` cannot be a filter at all.** It is a cardinality ratio —
+  invisible in any pair — and a filter would dead-end construction, because the
+  first online Session placed makes the ratio 100% before the denominator has
+  grown. Under `PER_WEEK` the denominator also *moves* when a Session relocates
+  between weeks. So it lives on the **objective**, on the hard side. A run can
+  therefore succeed while still reporting a `MaxOnlineShare` violation — the same
+  shape as `ExactFrequency` reporting unplaced Sessions, not a new exception.
+
+#### Group scoping differs by constraint, deliberately
+- **Double-booking** propagates **both** directions (ancestors and descendants).
+- **Attendance, and both Group-scoped aggregate types**, propagate **downward
+  only**. A cohort Session implicates its classes' members; a class Session does
+  not implicate the cohort.
+
+#### Two search fixes found by slice 4's falsification tests
+Both were real defects, surfaced by tests written to fail against a wrong
+implementation rather than to confirm the right one:
+
+- **LNS never retried Sessions that construction left unplaced**, because `ruin`
+  only selected *placed* placements. That made the `unplaced` term of the
+  objective permanently unoptimizable. Unplaced placements now join the repair
+  list every iteration.
+- **Repair broke ties by lowest index**, which made it fully deterministic given
+  a candidate list and collapsed the neighbourhood: ruining the same Session
+  always regenerated the same placement, so LNS could not escape a tie-induced
+  dead end. Ties are now broken with the seeded RNG — still reproducible, but the
+  neighbourhood is real.
+
+#### Other notes worth knowing before changing this code
+- **The objective is maintained incrementally.** Debug builds assert on every
+  iteration that it matches a from-scratch recomputation. The share counters have
+  a *moving denominator*, which is more error-prone than the soft sums, so the
+  aggregate-drift test is the highest-value test in slice 4 — as the soft
+  equivalent was in slice 3.
+- **The hard penalty is derived, never tuned**: `sum(weights) x placements + 1`.
+  Both `unplaced` and `aggregate` sit on the hard side and are covered by the
+  same bound, so the scalar objective still orders lexicographically.
+- **Search hyperparameters are not domain magic numbers.** `search::tuning` holds
+  the cooling rate, stagnation limit and candidate cap. The ban here is on
+  *domain* assumptions — `slot % 3`, `timeslot > 14`, `weeks[-n:]`.
+- **Construction is seed-independent**; the seed influences only the LNS phase.
+- **Negative soft weights and out-of-range share ratios are rejected** with
+  `INVALID_ARGUMENT`, as is a `MaxOnlineShare` with no window — a ratio is
+  meaningless without one.
 - Known performance item for slice 5: repair enumerates `slots x eligible_rooms`
-  per removed Session, sampled down to `MAX_CANDIDATES`. Fine at correctness
-  scale, worth revisiting against real benchmark instances.
+  per removed Session, sampled down to `MAX_CANDIDATES`.
 
 ## 5. Reference
 
