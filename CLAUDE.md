@@ -509,6 +509,28 @@ simulated-annealing acceptance, driving `MoveEvaluator` for real.
 Remaining: the two scaling defects slice 5 measured (below), and the deferred v2
 minimize-movement lock policy.
 
+#### THE RECURRING MISTAKE — measure end-to-end impact before optimizing a component
+**A real, correctly-measured inefficiency can still be irrelevant to whole-system
+performance if it sits in a small time slice. Always measure end-to-end impact
+before optimizing a diagnosed component.**
+
+Three independent instances in this repo, each one a correct measurement that
+pointed at the wrong work:
+
+- **H1** — repair's enumeration waste was genuinely 149x at large-university, and
+  fixing it was worth **<1% of runtime**, because repair sat inside a 1% slice.
+- **H2** — the retry-all-unplaced multiplier was real and dramatic, but it was a
+  **symptom of infeasible instances**, not a defect to fix directly. It vanished
+  on its own once the generator was corrected.
+- **6b-i** — hoisting the room-independent checks gave 31x on construction, and
+  the true bottleneck afterwards turned out to be `evaluate_hard`, **not** the
+  room loop that 6b-ii had been scoped to attack.
+
+The corollary that costs the most when skipped: a component's *share* of runtime
+decides whether optimizing it matters, and that share **moves** every time
+something else is fixed. Re-attribute after every change rather than carrying
+forward the previous slice's picture.
+
 #### MEASURED — where a run's time actually goes
 Numbers from `cargo run --release -p calendry-solver-gen --bin bench`, taken
 against **corrected** instances (slice 6a). The slice-5 figures were measured on
@@ -517,46 +539,66 @@ infeasible instances and are superseded.
 All four presets now place **every** Session, and LNS runs properly at every
 scale:
 
-| preset | placements | construct | evaluate_hard | LNS | iterations | improvements |
-|---|---|---|---|---|---|---|
-| small-school | 1,497 | 31 ms (44%) | 1.1 ms (2%) | 38 ms (54%) | 91 | 82 |
-| large-school | 3,167 | 108 ms (70%) | 5.8 ms (4%) | 40 ms (26%) | 84 | 76 |
-| small-university | 6,760 | 560 ms (81%) | 46 ms (7%) | 83 ms (12%) | 89 | 77 |
-| large-university | 27,136 | **7.12 s (91%)** | 625 ms (8%) | 47 ms (1%) | 80 | 67 |
+| preset | placements | iterations | improvements | unplaced |
+|---|---|---|---|---|
+| small-school | 1,497 | 91 | 82 | 0 |
+| large-school | 3,167 | 84 | 76 | 0 |
+| small-university | 6,760 | 89 | 77 | 0 |
+| large-university | 27,136 | 80 | 67 | 0 |
 
-**Construction is the scaling problem, and it is the only one left.** First-fit
-scans `slots x eligible_rooms` per placement, and the per-candidate cost is
-constant across a 15x range of candidate-space size — 3.67 / 3.24 / 3.18 / 3.11
-ns — which is the signature of scanning essentially the whole space every time.
-
-`evaluate_hard` is now second at 8%; it is the end-of-run violation report, once
-per run.
-
-**H2 is gone, at every preset size.** It was a symptom of infeasibility, not an
+Phase timings move as fixes land; the current split is in the two callouts
+below. **H2 is gone, at every preset size.** It was a symptom of infeasibility, not an
 independent defect: with 0 unplaced there is nothing to retry, and LNS completes
 80-91 iterations everywhere. **H1 is fixed but was never the lever** — repair
 sits inside a 1% slice at large-university, so its 148x enumeration waste was
 worth well under 1% of wall time.
 
-#### 60% of construction's inner loop is provably wasted
-Measured by the `--diagnose` mode, consistently across all four presets:
-
-| preset | start slots rejected by a room-INDEPENDENT axis | probes wasted |
-|---|---|---|
-| small-school | 58.9% | 58.4% |
-| large-school | 59.0% | 58.4% |
-| small-university | 62.7% | 61.9% |
-| large-university | 60.2% | 59.7% |
-
+#### FIXED — construction re-tested room-independent axes once per Room
 Of the six axes only **room occupancy** and **day-mix** (via virtual-vs-physical)
-depend on which Room is being tried. Lecturer, group, person and veto do not —
-yet `construct` re-tests them once per eligible Room at every slot. At a slot
-already rejected by one of them, the entire room loop cannot succeed.
+depend on which Room is being tried. Lecturer, group, person and veto read the
+slot alone — yet `construct` re-tested them once per eligible Room at every slot.
 
-The waste is worse than the probe count suggests: the room check is one bit test
-and exits early, while the room-*independent* path scans the attendee list (mean
-65, max ~300). So the expensive scan currently runs once per *free* Room per
-slot instead of once per slot.
+`construct` now tests those four **once per slot**, before the room loop. It is a
+pure short-circuit: if they reject, no Room could have rescued the slot. Output
+is byte-identical — every objective, iteration count and violation count matched
+exactly across all four presets.
+
+| preset | construct before | after | speedup | mean eligible rooms |
+|---|---|---|---|---|
+| small-school | 31.1 ms | 3.3 ms | **9.4x** | 14 |
+| large-school | 108.1 ms | 7.8 ms | **13.8x** | 17 |
+| small-university | 560.4 ms | 24.9 ms | **22.5x** | 36 |
+| large-university | **7.12 s** | **229 ms** | **31.1x** | 83 |
+
+The estimate on record beforehand was "~60% floor, materially more from the
+attendee-scan argument, maybe ~50x". The floor was the wrong model and badly
+understated it: 60% was the share of *probes* saved, but the probes are not
+equal. A room check is one early-exiting bit test; the room-independent path
+scans an attendee list averaging 65 people, and that scan previously ran once per
+*free* Room per slot. Speedup tracks `~0.4 x eligible_rooms` — 0.4 x 83 = 33
+against 31.1x measured — which is the room-occupancy rate deciding how often the
+expensive path was redundantly re-entered.
+
+#### THE BOTTLENECK IS NOW `evaluate_hard` — read before optimizing construction further
+6b-i moved it. Post-fix attribution:
+
+| preset | construct | evaluate_hard | LNS | total solve |
+|---|---|---|---|---|
+| small-school | 3.3 ms (8%) | 1.1 ms (3%) | 38.4 ms (90%) | 42.8 ms |
+| large-school | 7.8 ms (15%) | 4.4 ms (8%) | 40.2 ms (77%) | 52.4 ms |
+| small-university | 24.9 ms (21%) | 45.4 ms (38%) | 49.6 ms (41%) | 119.9 ms |
+| large-university | 229 ms (25%) | **636 ms (69%)** | 53.1 ms (6%) | 918 ms |
+
+`constraints::evaluate_hard` runs **once**, at the end of a run, to produce the
+violation report. Its `structural()` buckets occupancy by slot and then checks
+every **pair** within each slot, and each `check_pair` intersects two attendee
+lists. At large-university that is ~57 occupants per slot, ~1.6M pairs, each
+scanning ~65 attendees — and `collect_views` additionally allocates a `String`
+label per view.
+
+It is superlinear: pair count grows 74x from small-school to large-university
+while measured time grows 558x. Any further scaling work belongs here, not in
+construction, which is now a 25% slice.
 
 #### FIXED — locked Sessions used to be double-counted
 Found by slice 5, fixed standalone straight after it. `Session.offering_id`

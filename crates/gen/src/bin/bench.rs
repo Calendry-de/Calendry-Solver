@@ -55,6 +55,8 @@ struct Args {
     /// placements. 0 = skip. Implies skipping the solve.
     diagnose: usize,
     elective: Option<f64>,
+    /// Attribute `evaluate_hard` across its four phases.
+    evaluate: bool,
 }
 
 fn parse_args() -> Args {
@@ -68,6 +70,7 @@ fn parse_args() -> Args {
         calibrate: false,
         diagnose: 0,
         elective: None,
+        evaluate: false,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -84,6 +87,7 @@ fn parse_args() -> Args {
             "--gen-seed" => a.gen_seed = num("--gen-seed"),
             "--calibrate" => a.calibrate = true,
             "--diagnose" => a.diagnose = num("--diagnose") as usize,
+            "--evaluate" => a.evaluate = true,
             // Override the one parameter under test, so a sweep does not need a
             // preset edit and a rebuild per point.
             "--elective" => {
@@ -306,6 +310,10 @@ fn run_phases(problem: &Problem, stats: &InstanceStats, seed: u64, args: &Args) 
         share(lns_time),
     );
     println!("  recheck    {} violations from a fresh evaluate_hard", violations.len());
+
+    if args.evaluate {
+        attribute_evaluate(problem, &outcome.solution);
+    }
 
     report_curve(&halt, args.moves, problem.hard_penalty);
 }
@@ -597,4 +605,102 @@ fn report_clique(c: &calendry_solver_gen::diagnose::CliqueEvidence) {
             c.capacity, c.sessions
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// evaluate_hard attribution
+// ---------------------------------------------------------------------------
+
+fn attribute_evaluate(problem: &Problem, solution: &Solution) {
+    use calendry_solver_core::constraints as k;
+
+    println!("\nevaluate_hard attribution");
+
+    // --- phase split ------------------------------------------------------
+    let phase = |name: &str, f: &dyn Fn(&mut Vec<k::Violation>)| {
+        let mut out = Vec::new();
+        let t = Instant::now();
+        f(&mut out);
+        (name.to_string(), t.elapsed(), out)
+    };
+
+    let phases = [
+        phase("exact_frequency", &|o| k::exact_frequency(problem, solution, o)),
+        phase("structural", &|o| k::structural(problem, solution, o)),
+        phase("lecturer_veto", &|o| k::lecturer_veto(problem, solution, o)),
+        phase("aggregates", &|o| k::aggregates(problem, solution, o)),
+    ];
+    let total: Duration = phases.iter().map(|(_, d, _)| *d).sum();
+    for (name, d, out) in &phases {
+        println!(
+            "  {name:<16} {:>10.2?}  {:>5.1}%   {} violations",
+            d,
+            100.0 * d.as_secs_f64() / total.as_secs_f64().max(1e-12),
+            out.len()
+        );
+    }
+    println!("  {:<16} {:>10.2?}", "TOTAL", total);
+
+    // --- can the search even create a structural violation? ---------------
+    //
+    // Repair only ever places into slots `SearchState::is_free` accepts, and
+    // that state is seeded from the immovable input. So a structural violation
+    // should only ever involve an immovable Session. If that holds, the
+    // placed-vs-placed pairs — the overwhelming majority — can never report
+    // anything, and the question is not how to compute the scan faster.
+    let fixed_ids: std::collections::HashSet<&str> =
+        problem.fixed.iter().map(|f| f.session_id.as_str()).collect();
+
+    let structural = &phases[1].2;
+    let (mut both_fixed, mut one_fixed, mut neither) = (0usize, 0usize, 0usize);
+    for v in structural {
+        let n = v
+            .session_ids
+            .iter()
+            .filter(|id| fixed_ids.contains(id.as_str()))
+            .count();
+        match n {
+            2 => both_fixed += 1,
+            1 => one_fixed += 1,
+            _ => neither += 1,
+        }
+    }
+    println!(
+        "  structural violations by origin: both immovable {both_fixed}, \
+         one immovable {one_fixed}, neither {neither}"
+    );
+
+    // Pairs the scan examines, versus pairs that could possibly report.
+    let placed = solution.placed_count() as u64;
+    let fixed = problem.fixed.len() as u64;
+    let all = placed + fixed;
+    println!(
+        "  occupancy: {placed} placed + {fixed} immovable = {all}; \
+         immovable is {:.1}% of it, so immovable-involving pairs are ~{:.1}% of all pairs",
+        100.0 * fixed as f64 / all.max(1) as f64,
+        100.0 * (1.0 - (placed as f64 / all.max(1) as f64).powi(2))
+    );
+
+    // --- is the cost in reporting, or in the unconditional scanning? ------
+    //
+    // `check_pair` runs all four clash searches and formats a location string
+    // BEFORE consulting the configured instances. Emptying every constraint
+    // list therefore leaves the scan intact and removes only the reporting.
+    let mut bare = problem.clone();
+    bare.constraints.room_double_booking.clear();
+    bare.constraints.lecturer_double_booking.clear();
+    bare.constraints.group_double_booking.clear();
+    bare.constraints.person_double_booking.clear();
+
+    let mut out = Vec::new();
+    let t = Instant::now();
+    k::structural(&bare, solution, &mut out);
+    let bare_time = t.elapsed();
+    println!(
+        "  structural with ALL constraint lists emptied: {:>10.2?} ({:.1}% of the real run, \
+         {} violations)",
+        bare_time,
+        100.0 * bare_time.as_secs_f64() / phases[1].1.as_secs_f64().max(1e-12),
+        out.len()
+    );
 }

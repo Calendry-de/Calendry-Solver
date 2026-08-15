@@ -49,6 +49,11 @@ struct View<'a> {
 /// Deterministic ordering throughout: constraints in a fixed sequence, slots
 /// ascending, sessions in index order. Two runs with the same seed must produce
 /// byte-identical violation lists, so this must never iterate a `HashMap`.
+///
+/// The four phases below are individually public so a caller can attribute this
+/// function's cost without the crate carrying a clock. Same reasoning as
+/// [`crate::solution::Occupant::enforce`] being public: measurement should drive
+/// the real code path rather than a reimplementation that can drift from it.
 pub fn evaluate_hard(problem: &Problem, solution: &Solution) -> Vec<Violation> {
     let mut out = Vec::new();
     exact_frequency(problem, solution, &mut out);
@@ -64,7 +69,7 @@ pub fn evaluate_hard(problem: &Problem, solution: &Solution) -> Vec<Violation> {
 /// caller's own data, and re-reporting a locked Session the solver cannot move
 /// would be noise. Blackout VALUES live on `Person.blackouts`; the constraint
 /// instance only switches enforcement on.
-fn lecturer_veto(problem: &Problem, solution: &Solution, out: &mut Vec<Violation>) {
+pub fn lecturer_veto(problem: &Problem, solution: &Solution, out: &mut Vec<Violation>) {
     if problem.constraints.lecturer_veto.is_empty() {
         return;
     }
@@ -117,7 +122,7 @@ fn lecturer_veto(problem: &Problem, solution: &Solution, out: &mut Vec<Violation
 /// reported here came from the caller's immovable input — which the "warn and
 /// allow" manual-edit UX can legitimately produce. `MaxOnlineShare` lives on the
 /// objective and CAN survive into a returned solution.
-fn aggregates(problem: &Problem, solution: &Solution, out: &mut Vec<Violation>) {
+pub fn aggregates(problem: &Problem, solution: &Solution, out: &mut Vec<Violation>) {
     if problem.constraints.online_onsite_same_day.is_empty()
         && problem.constraints.max_online_share.is_empty()
     {
@@ -164,7 +169,7 @@ fn aggregates(problem: &Problem, solution: &Solution, out: &mut Vec<Violation>) 
 
 /// HARD. Each in-scope Offering must be realized by exactly
 /// `required_session_count` placed Sessions.
-fn exact_frequency(problem: &Problem, solution: &Solution, out: &mut Vec<Violation>) {
+pub fn exact_frequency(problem: &Problem, solution: &Solution, out: &mut Vec<Violation>) {
     if problem.constraints.exact_frequency.is_empty() {
         return;
     }
@@ -222,7 +227,7 @@ fn exact_frequency(problem: &Problem, solution: &Solution, out: &mut Vec<Violati
 // The four structural (double-booking) types
 // ---------------------------------------------------------------------------
 
-fn structural(problem: &Problem, solution: &Solution, out: &mut Vec<Violation>) {
+pub fn structural(problem: &Problem, solution: &Solution, out: &mut Vec<Violation>) {
     let views = collect_views(problem, solution);
     if views.is_empty() {
         return;
