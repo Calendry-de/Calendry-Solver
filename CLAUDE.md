@@ -498,16 +498,45 @@ The tag is what keeps the two consumers honest: this repo pinned at the commit
 tagged `v0.2.0`, and the Nuxt app installing `@mindcollaps/calendry-proto@0.2.0`
 built from that same tag, means "which schema is each side on" has one answer.
 
-### Implementation status
-**Slices 1-5 complete. All 14 catalogue types are implemented.** There is no
-longer an `UNIMPLEMENTED` branch in `convert.rs` — a new type added to the schema
-fails to compile against the match instead, which is the property that mattered.
+### Implementation status — slices 1-6 complete
 
-Search is greedy construction followed by Large Neighborhood Search with
-simulated-annealing acceptance, driving `MoveEvaluator` for real.
+**Done, and measured:**
 
-Remaining: the two scaling defects slice 5 measured (below), and the deferred v2
-minimize-movement lock policy.
+- **All 14 catalogue types.** There is no longer an `UNIMPLEMENTED` branch in
+  `convert.rs` — a new type added to the schema fails to compile against the
+  match instead, which is the property that mattered.
+- **Search**: greedy construction, then Large Neighborhood Search with
+  simulated-annealing acceptance, driving `MoveEvaluator` for real.
+- **Benchmark generator and harness** (`crates/gen`), calibrated on the binding
+  axis and guarded against the class of infeasibility a load metric cannot see.
+- **Performance**, end to end. A 27,136-Session university solves in **349 ms**,
+  down from 7.79 s across slice 6: construction 229 ms, `evaluate_hard` 47 ms,
+  LNS 73 ms. See the attribution table below.
+
+**Performance work is finished.** It stopped here deliberately, not for lack of
+a next idea. The remaining candidate — 6b-ii, bitset-intersecting the
+room-independent axes in construction — was instrumented rather than assumed:
+first-fit already exits after ~26% of the slot space while a bitset computes all
+of it, so the estimate was 3-5x on construction and ~1.7x whole-run, for a larger
+change than either fix that landed. Against three consecutive overestimates
+(see the recurring-mistake callout), that did not justify the work on a case
+already this fast. **Do not reopen it without a new measurement showing the run
+is too slow in practice.**
+
+**What remains is correctness and feature work, not performance:**
+
+1. **v2 minimize-movement lock policy.** `LOCK_POLICY_MINIMIZE_MOVEMENT` still
+   returns `UNIMPLEMENTED`. Replaces the v1 hard lock with a soft
+   minimize-movement penalty so the solver *may* disturb out-of-scope Sessions
+   when genuinely necessary. `Immovable` already records *why* each Session is
+   immovable precisely so this is a policy change rather than a rewrite: v2
+   relaxes `OutOfScope` and no other variant.
+2. **The over-supply reporting gap** — see its own callout below.
+
+**Outside this repo entirely:** the Nuxt (`calendry`) integration session,
+deferred since before slice 1. See "STILL TO DO" above — the submodule pin, the
+`.npmrc` for GitHub Packages (the one part of the pipeline never exercised end to
+end), and `PersonDoubleBooking` in the app's manual-edit evaluator.
 
 #### THE RECURRING MISTAKE — measure end-to-end impact before optimizing a component
 **A real, correctly-measured inefficiency can still be irrelevant to whole-system
@@ -757,8 +786,9 @@ implementation rather than to confirm the right one:
 - **Negative soft weights and out-of-range share ratios are rejected** with
   `INVALID_ARGUMENT`, as is a `MaxOnlineShare` with no window — a ratio is
   meaningless without one.
-- Known performance item for slice 5: repair enumerates `slots x eligible_rooms`
-  per removed Session, sampled down to `MAX_CANDIDATES`.
+- Repair addresses the `slots x eligible_rooms` candidate space **by index** and
+  samples `MAX_CANDIDATES` out of it with a virtual partial Fisher-Yates, rather
+  than materializing the cross product. See `SlotTable::start_count` / `nth_start`.
 
 ## 5. Reference
 
