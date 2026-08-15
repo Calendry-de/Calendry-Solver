@@ -108,6 +108,7 @@ pub fn all_constraints() -> ConstraintSet {
         group_double_booking: inst("c-group"),
         person_double_booking: inst("c-person"),
         exact_frequency: inst("c-freq"),
+        soft: Vec::new(),
     }
 }
 
@@ -370,4 +371,129 @@ pub fn cross_tree_person(constraints: ConstraintSet) -> Problem {
         vec![],
         constraints,
     )
+}
+
+// ---------------------------------------------------------------------------
+// Slice 3 fixtures — soft constraints
+// ---------------------------------------------------------------------------
+
+use crate::rng::Rng;
+use crate::slots::WeekKind as WK;
+use crate::soft::{SoftInstance, SoftParams};
+
+pub fn room_with(id: &str, rank: u32, is_virtual: bool) -> Room {
+    let mut r = room(id);
+    r.rank = rank;
+    r.is_virtual = is_virtual;
+    r
+}
+
+pub fn soft(id: &str, weight: f64, params: SoftParams) -> SoftInstance {
+    SoftInstance { id: id.to_string(), kinds: vec![], weight, params }
+}
+
+/// Structural checks plus the given soft instances.
+pub fn with_soft(soft: Vec<SoftInstance>) -> ConstraintSet {
+    ConstraintSet { soft, ..all_constraints() }
+}
+
+/// One Offering needing one Session, over the given grid and rooms.
+pub fn single_session(slots: SlotTable, rooms: Vec<Room>, soft: Vec<SoftInstance>) -> Problem {
+    let eligible: Vec<u32> = (0..rooms.len() as u32).collect();
+    assemble(
+        slots,
+        rooms,
+        vec![],
+        vec![],
+        vec![offering("S", 1, &eligible)],
+        vec![],
+        with_soft(soft),
+    )
+}
+
+/// **Fixture (a).** 3 blocks on one day, one room, one Session.
+///
+/// With `MinimizeFirstBlock` and `MinimizeLastBlock` both enabled, block 0 and
+/// block 2 each cost `weight` and block 1 costs nothing — so the optimum is
+/// **unique and hand-computable**: slot 1, soft cost exactly 0.
+pub fn uniquely_optimal_middle_block() -> Problem {
+    single_session(
+        grid(3, 1),
+        rooms(1),
+        vec![
+            soft("first", 4.0, SoftParams::MinimizeFirstBlock),
+            soft("last", 4.0, SoftParams::MinimizeLastBlock),
+        ],
+    )
+}
+
+/// Two weeks: week 0 is an exam week, week 1 is teaching. One block per day,
+/// one day, one room — so slot 0 is in the exam week and slot 1 is not.
+pub fn exam_week_grid() -> SlotTable {
+    SlotTable::build(
+        1,
+        &[1],
+        &[
+            WeekSpec { kind: WK::Exam, holiday_weekdays: vec![] },
+            WeekSpec { kind: WK::Teaching, holiday_weekdays: vec![] },
+        ],
+    )
+    .unwrap()
+}
+
+/// Monday and Saturday, one block each: slot 0 is Monday, slot 1 is Saturday.
+pub fn two_day_grid() -> SlotTable {
+    SlotTable::build(1, &[1, 6], &teaching_weeks(1)).unwrap()
+}
+
+/// A small pseudo-random instance for property tests.
+///
+/// Deliberately **not** the slice 5 benchmark generator: this exists only to
+/// give properties (monotonicity, feasibility, delta agreement) more than one
+/// shape to hold over, and correctness fixtures remain hand-written above.
+pub fn seeded_instance(seed: u64) -> Problem {
+    let mut rng = Rng::new(seed);
+
+    let blocks = 2 + rng.below(3) as u32; // 2..4
+    let weeks = 1 + rng.below(2); // 1..2
+    let slots = SlotTable::build(blocks, &[1, 2, 6], &teaching_weeks(weeks)).unwrap();
+
+    let n_rooms = 2 + rng.below(3);
+    let room_list: Vec<Room> = (0..n_rooms)
+        .map(|i| room_with(&format!("R{i}"), 1 + (rng.below(9) as u32), rng.below(4) == 0))
+        .collect();
+
+    let n_groups = 1 + rng.below(3);
+    let group_list: Vec<Group> = (0..n_groups)
+        .map(|i| {
+            let parent = if i == 0 || rng.below(2) == 0 { None } else { Some((i - 1) as u32) };
+            group(&format!("G{i}"), parent)
+        })
+        .collect();
+
+    let n_people = 2 + rng.below(4);
+    let people: Vec<Person> = (0..n_people)
+        .map(|i| person(&format!("P{i}"), &[(rng.below(n_groups)) as u32]))
+        .collect();
+
+    let eligible: Vec<u32> = (0..n_rooms as u32).collect();
+    let n_off = 2 + rng.below(4);
+    let offerings: Vec<OfferingSpec> = (0..n_off)
+        .map(|i| {
+            let mut o = offering(&format!("O{i}"), 1 + rng.below(2) as u32, &eligible);
+            o.groups = vec![GroupIdx(rng.below(n_groups) as u32)];
+            o.lecturers = vec![PersonIdx(rng.below(n_people) as u32)];
+            o
+        })
+        .collect();
+
+    let soft_set = vec![
+        soft("first", 1.0 + rng.below(4) as f64, SoftParams::MinimizeFirstBlock),
+        soft("last", 1.0 + rng.below(4) as f64, SoftParams::MinimizeLastBlock),
+        soft("sat", 1.0 + rng.below(4) as f64, SoftParams::MinimizeDayUsage { days: vec![6] }),
+        soft("rank", 1.0 + rng.below(4) as f64, SoftParams::MinimizeRoomRank { rank_threshold: 5 }),
+        soft("online", 1.0 + rng.below(4) as f64, SoftParams::MinimizeOnline),
+    ];
+
+    assemble(slots, room_list, group_list, people, offerings, vec![], with_soft(soft_set))
 }

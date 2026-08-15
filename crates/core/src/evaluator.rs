@@ -23,8 +23,11 @@ pub struct Move {
     pub to: Placement,
 }
 
-/// Lower is better. Currently counts hard-constraint clashes the move would
-/// introduce; the weighted soft objective joins this in a later slice.
+/// Lower is better. `INFINITY` means the move is infeasible — the target is
+/// occupied, the room is ineligible, or the Session would spill past the end of
+/// its day. Finite scores are the move's **soft cost**, read from the
+/// precomputed table, which is exact rather than an estimate because all six
+/// soft types are unary.
 #[derive(Copy, Clone, Debug, PartialEq, PartialOrd, Default)]
 pub struct Score(pub f64);
 
@@ -77,22 +80,21 @@ fn score_one(
         return Score(f64::INFINITY);
     }
 
+    // LNS scores only placements it has already removed, so the occupancy never
+    // contains this placement's own marks and there is nothing to discount. An
+    // earlier revision cloned the whole occupancy here to subtract them, which
+    // would have been a full four-bitset copy per candidate move.
+    debug_assert!(
+        solution.get(mv.placement).is_none(),
+        "score_batch expects the placement to be unplaced; ruin removes it first"
+    );
+
     let candidate = Occupant::of_offering(offering).with_room(mv.to.room);
+    if !occupancy.is_free(&candidate, &span) {
+        return Score(f64::INFINITY);
+    }
 
-    // Moving vacates the placement's current slots, so evaluate against an
-    // occupancy that no longer contains it.
-    let free = match solution.get(mv.placement) {
-        Some(current) => {
-            let mut without = occupancy.clone();
-            if let Some(own) = problem.slots.span(current.start, offering.duration_blocks) {
-                without.unmark(&candidate.with_room(current.room), &own);
-            }
-            without.is_free(&candidate, &span)
-        }
-        None => occupancy.is_free(&candidate, &span),
-    };
-
-    Score(if free { 0.0 } else { 1.0 })
+    Score(problem.soft.cost(offering.soft_profile, mv.to.start, mv.to.room))
 }
 
 #[cfg(test)]
@@ -120,7 +122,7 @@ mod tests {
 
         CpuEvaluator.score_batch(&problem, &solution, &occ, &moves, &mut out);
 
-        assert_eq!(out[0], Score(1.0), "occupied room should score a clash");
-        assert_eq!(out[1], Score(0.0), "free room should score clean");
+        assert!(!out[0].0.is_finite(), "occupied room must be infeasible");
+        assert_eq!(out[1], Score(0.0), "free room, no soft constraints, costs 0");
     }
 }

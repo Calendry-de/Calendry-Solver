@@ -161,6 +161,18 @@ no database, no on-disk run journal. Run state dies with the process.
 **Both** a time budget **and** an iteration/move-count budget; **whichever hits
 first** ends the run. Both configurable **per request**.
 
+#### Determinism has one inherent limit — read before writing a test
+Same seed gives byte-identical output **only when termination is deterministic**:
+`"converged"` or `"move_budget"`. A run stopped by the **wall-clock budget**
+cannot be reproducible, because the number of LNS iterations completed depends on
+machine speed and load. That is inherent to a time-boxed metaheuristic, not a
+defect, and it is why `termination_reason` exists — a caller can tell which
+guarantee they got.
+
+**Tests must therefore use move budgets, never wall-clock budgets.** A
+determinism test written against `max_wall_millis` will look flaky and will
+waste somebody's afternoon.
+
 ### Constraint catalogue — 14 predefined types
 Each type gets **one typed, compiled evaluator function** reading that type's
 typed parameters. There is **no interpreter and no free-form expression DSL** —
@@ -422,48 +434,60 @@ tagged `v0.2.0`, and the Nuxt app installing `@mindcollaps/calendry-proto@0.2.0`
 built from that same tag, means "which schema is each side on" has one answer.
 
 ### Implementation status
-**Slices 1 and 2 complete.** Implemented: `StartRun`/`GetStatus`/`CancelRun`,
+**Slices 1-3 complete.** Implemented: `StartRun`/`GetStatus`/`CancelRun`,
 in-memory run registry, both budgets, seeded determinism, past/locked/
-out-of-scope immovability, and **five** constraint types — all four structural
-double-booking checks plus `ExactFrequency`.
+out-of-scope immovability, **all four structural types**, `ExactFrequency`, and
+**all six soft types** driving a real weighted objective.
 
-Search is still **greedy construction only**; `MoveEvaluator` + `CpuEvaluator`
-exist and are tested, but no metaheuristic drives them yet.
+Search is **greedy construction followed by Large Neighborhood Search with
+simulated-annealing acceptance**, driving `MoveEvaluator` for real.
 
-The slice 1 pairing of `RoomDoubleBooking` + `ExactFrequency` was deliberate:
-room double-booking alone is **not falsifiable**, because with nothing forcing
-placement an empty schedule satisfies it vacuously. Exact frequency supplies the
-placement pressure.
+Remaining: the three hard types `LecturerVeto`, `OnlineOnsiteSameDay` and
+`MaxOnlineShare` (slice 4), and the benchmark generator (slice 5). Everything
+unimplemented still returns an explicit `UNIMPLEMENTED`.
 
-**Slice 2 additions worth knowing before changing this code:**
-- `groups.rs` holds the closures, built once per run. **Conflict** expands both
-  directions (`{g} ∪ ancestors ∪ descendants`); **attendance** expands downward
-  only (`{g} ∪ descendants`). That asymmetry is intentional and confirmed: a
-  cohort session involves everyone below it, but a seminar session does not pull
-  in the whole cohort — while conflict blocking runs both ways.
-- **Only one side of a conflict check expands.** Marking uses the closure,
-  querying uses identity. Expanding *both* and intersecting is wrong: siblings
-  share an ancestor, so two classes under one cohort would be reported as
-  clashing — the normal case broken. `siblings_may_meet_simultaneously` is the
-  regression test; it fails if anyone "simplifies" this.
-- `applies_to_kinds` is implemented. `ConstraintSet` holds a **Vec** of
-  `{id, kinds}` per type, so one type may be configured several times with
-  different kind scopes. A pair of Sessions is only constrained when a *single*
-  instance covers **both** their kinds — a `lecture`-scoped constraint must not
-  police a clash involving a groupless `staff_meeting`.
-- `constraints.rs` is authoritative and exact. `Occupancy` (four bitsets: room,
-  lecturer, attendee, group) is only an index the heuristic uses to *avoid*
-  creating violations, and is knowingly conservative about kind scoping.
-- `Problem::build` is the single derivation path for closures and attendee sets,
-  shared by `convert.rs` and the test fixtures so the two cannot drift.
+#### BREAKING CHANGE for the Nuxt integration: `GetStatus.best_objective`
+Through slices 1-2 this field carried the **hard-violation count**. It now
+carries the **real weighted objective** (`unplaced x hard_penalty + soft_sum`).
+Nothing consumes it yet — the Nuxt integration has not happened — but anything
+built against the old meaning must be updated. `ObjectiveBreakdown` is also
+populated for the first time; it previously shipped empty.
 
-Everything unimplemented still returns an explicit `UNIMPLEMENTED` — no enabled
-constraint is ever silently ignored, since that would make a schedule look
-validated when it was not.
-
-Next slices: (3) SA/LNS + the six soft types + real objective; (4) remaining
-hard types (`LecturerVeto`, `OnlineOnsiteSameDay`, `MaxOnlineShare`);
-(5) benchmark generator.
+#### Slice 3 design notes worth knowing before changing this code
+- **All six soft types are unary** — each depends only on one Session's
+  `(slot, room)`, unlike the four structural types, which are pairwise. That is
+  why soft cost can be a precomputed `(profile, slot, room)` table and why a
+  move's soft delta is exact and O(1). A future soft type that is *not* unary
+  would break this and needs a different mechanism, not a new table entry.
+- **LNS, not plain SA**, because `score_batch` is batched by construction: plain
+  SA proposes one move per iteration and would leave the interface — and the
+  future GPU backend it exists for — with nothing to do. LNS's repair step
+  naturally enumerates every eligible `(slot, room)`.
+- **The objective is maintained incrementally**; ruin subtracts, repair adds.
+  Debug builds assert on every iteration that it still matches a from-scratch
+  recomputation. Delta drift is the classic metaheuristic bug — the search
+  silently optimizes a number that no longer describes the schedule — and no
+  other test would catch it.
+- **The hard penalty is derived, never tuned**: `sum(weights) x placements + 1`,
+  which makes the scalar objective order lexicographically without a magic
+  constant.
+- **Search hyperparameters are not domain magic numbers.** `search::tuning`
+  holds the cooling rate, stagnation limit and candidate cap. The ban in this
+  repo is on *domain* assumptions — `slot % 3`, `timeslot > 14`, `weeks[-n:]` —
+  which silently encode a grid or calendar the tenant never configured. A
+  cooling rate encodes nothing about Calendry.
+- **Construction is seed-independent.** The seed influences only the LNS phase,
+  so a schedule is reproducible from the input alone before any metaheuristic
+  runs. On an instance with no soft constraints the objective is already 0, LNS
+  exits with zero iterations, and the seed cannot matter at all — which is what
+  keeps the slice 1 and 2 exact-assignment tests valid.
+- **Negative soft weights are rejected** with `INVALID_ARGUMENT`. Every soft type
+  declares "minimize", so a negative weight would silently invert it into a
+  maximize the type never declared. Zero is valid and means "report the count,
+  do not steer".
+- Known performance item for slice 5: repair enumerates `slots x eligible_rooms`
+  per removed Session, sampled down to `MAX_CANDIDATES`. Fine at correctness
+  scale, worth revisiting against real benchmark instances.
 
 ## 5. Reference
 

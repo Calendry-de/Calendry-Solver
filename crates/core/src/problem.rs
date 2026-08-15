@@ -8,6 +8,7 @@
 use crate::groups::{GroupClosure, GroupCycle};
 use crate::ids::{GroupIdx, OfferingIdx, PersonIdx, PlacementIdx, RoomIdx, SlotIdx};
 use crate::slots::SlotTable;
+use crate::soft::{SoftInstance, SoftModel};
 
 #[derive(Clone, Debug)]
 pub struct Room {
@@ -117,6 +118,9 @@ pub struct ConstraintSet {
     pub group_double_booking: Vec<ConstraintInstance>,
     pub person_double_booking: Vec<ConstraintInstance>,
     pub exact_frequency: Vec<ConstraintInstance>,
+    /// The six soft types. Separate from the hard lists because only soft
+    /// instances carry a weight and typed parameters.
+    pub soft: Vec<SoftInstance>,
 }
 
 fn any_covers(list: &[ConstraintInstance], kind: &str) -> bool {
@@ -203,6 +207,8 @@ pub struct Offering {
     pub attendees: Vec<PersonIdx>,
     pub eligible_rooms: Vec<RoomIdx>,
     pub enforce: Enforce,
+    /// Index into the soft cost tables for this Offering's `kind`.
+    pub soft_profile: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -241,6 +247,11 @@ pub struct Problem {
     pub placements: Vec<PlacementVar>,
     pub fixed: Vec<FixedOccupancy>,
     pub constraints: ConstraintSet,
+    pub soft: SoftModel,
+    /// Derived, never tuned: large enough that one unplaced Session outranks
+    /// every reachable soft configuration, so the scalar objective orders
+    /// lexicographically without a magic constant.
+    pub hard_penalty: f64,
 }
 
 impl Problem {
@@ -279,9 +290,22 @@ impl Problem {
             out
         };
 
+        // Distinct kinds in play, so the soft model can build one cost table
+        // per profile rather than one per kind.
+        let mut kinds: Vec<String> = offerings
+            .iter()
+            .map(|o| o.kind.clone())
+            .chain(fixed.iter().map(|f| f.kind.clone()))
+            .collect();
+        kinds.sort();
+        kinds.dedup();
+
+        let soft = SoftModel::build(constraints.soft.clone(), &slots, &rooms, &kinds);
+
         let derived_offerings = offerings
             .into_iter()
             .map(|o| Offering {
+                soft_profile: soft.profile_for_kind(&o.kind),
                 enforce: constraints.enforce_for_kind(&o.kind),
                 conflict_groups: closure.expand_conflict(&o.groups),
                 attendees: attendees_of(&o.groups, &o.participants),
@@ -313,6 +337,9 @@ impl Problem {
             })
             .collect();
 
+        // sum(weights) * placements + 1 dominates any achievable soft total.
+        let hard_penalty = soft.total_weight * placements.len() as f64 + 1.0;
+
         Ok(Self {
             slots,
             rooms,
@@ -323,6 +350,8 @@ impl Problem {
             placements,
             fixed: derived_fixed,
             constraints,
+            soft,
+            hard_penalty,
         })
     }
 

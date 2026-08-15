@@ -18,6 +18,7 @@ pub mod problem;
 pub mod rng;
 pub mod search;
 pub mod slots;
+pub mod soft;
 pub mod solution;
 
 pub mod testing;
@@ -25,4 +26,5 @@ pub mod testing;
 pub use groups::{GroupClosure, GroupCycle};
 pub use problem::{ConstraintInstance, ConstraintSet, Immovable, Problem};
 pub use search::{Budget, SolveOutcome, solve};
+pub use soft::{Objective, SoftInstance, SoftParams};
 pub use solution::{Occupancy, Placement, Solution};

@@ -18,6 +18,7 @@ use calendry_solver_core::problem::{
     classify_immovable,
 };
 use calendry_solver_core::slots::{SlotTable, WeekKind, WeekSpec};
+use calendry_solver_core::soft::{SoftInstance, SoftParams};
 use calendry_solver_proto::v1 as pb;
 use tonic::Status;
 
@@ -478,12 +479,39 @@ fn build_constraints(input: &pb::SolverInput) -> Result<ConstraintSet, Status> {
             Some(Params::LecturerVeto(_)) => unsupported.push("LecturerVeto"),
             Some(Params::OnlineOnsiteSameDay(_)) => unsupported.push("OnlineOnsiteSameDay"),
             Some(Params::MaxOnlineShare(_)) => unsupported.push("MaxOnlineShare"),
-            Some(Params::MinimizeFirstBlock(_)) => unsupported.push("MinimizeFirstBlock"),
-            Some(Params::MinimizeLastBlock(_)) => unsupported.push("MinimizeLastBlock"),
-            Some(Params::MinimizeDayUsage(_)) => unsupported.push("MinimizeDayUsage"),
-            Some(Params::MinimizeRoomRank(_)) => unsupported.push("MinimizeRoomRank"),
-            Some(Params::MinimizeExamWeek(_)) => unsupported.push("MinimizeExamWeek"),
-            Some(Params::MinimizeOnline(_)) => unsupported.push("MinimizeOnline"),
+
+            // The six soft types. Weight is meaningful only here — hard types
+            // ignore it, because hard-vs-soft is a property of the TYPE.
+            Some(Params::MinimizeFirstBlock(_)) => {
+                set.soft.push(soft_instance(c, SoftParams::MinimizeFirstBlock)?)
+            }
+            Some(Params::MinimizeLastBlock(_)) => {
+                set.soft.push(soft_instance(c, SoftParams::MinimizeLastBlock)?)
+            }
+            Some(Params::MinimizeDayUsage(p)) => {
+                for d in &p.days {
+                    if !(1..=7).contains(d) {
+                        return Err(Status::invalid_argument(format!(
+                            "constraint '{}': {d} is not an ISO weekday (1..=7)",
+                            c.id
+                        )));
+                    }
+                }
+                set.soft.push(soft_instance(
+                    c,
+                    SoftParams::MinimizeDayUsage { days: p.days.clone() },
+                )?)
+            }
+            Some(Params::MinimizeRoomRank(p)) => set.soft.push(soft_instance(
+                c,
+                SoftParams::MinimizeRoomRank { rank_threshold: p.rank_threshold },
+            )?),
+            Some(Params::MinimizeExamWeek(_)) => {
+                set.soft.push(soft_instance(c, SoftParams::MinimizeExamWeek)?)
+            }
+            Some(Params::MinimizeOnline(_)) => {
+                set.soft.push(soft_instance(c, SoftParams::MinimizeOnline)?)
+            }
             None => {
                 return Err(Status::invalid_argument(format!(
                     "constraint '{}' has no params set",
@@ -500,13 +528,34 @@ fn build_constraints(input: &pb::SolverInput) -> Result<ConstraintSet, Status> {
         unsupported.sort_unstable();
         unsupported.dedup();
         return Err(Status::unimplemented(format!(
-            "constraint type(s) not implemented yet: {}. Implemented: RoomDoubleBooking, \
-             LecturerDoubleBooking, GroupDoubleBooking, PersonDoubleBooking, ExactFrequency",
+            "constraint type(s) not implemented yet: {}. Implemented: the four structural \
+             types, ExactFrequency, and all six soft types",
             unsupported.join(", ")
         )));
     }
 
     Ok(set)
+}
+
+/// Build a soft instance, rejecting a negative weight.
+///
+/// Every soft type declares "minimize". A negative weight would silently invert
+/// it into a maximize the type never declared — so it is refused rather than
+/// quietly honoured. Zero is fine and means "report the count, do not steer".
+fn soft_instance(c: &pb::ConstraintConfig, params: SoftParams) -> Result<SoftInstance, Status> {
+    if c.weight < 0.0 || c.weight.is_nan() {
+        return Err(Status::invalid_argument(format!(
+            "constraint '{}' has weight {}; soft weights must be >= 0 because every soft \
+             type declares minimize, and a negative weight would invert it",
+            c.id, c.weight
+        )));
+    }
+    Ok(SoftInstance {
+        id: c.id.clone(),
+        kinds: c.applies_to_kinds.clone(),
+        weight: c.weight,
+        params,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -568,15 +617,23 @@ pub fn build_output(
         })
         .collect();
 
+    let components: Vec<pb::ComponentScore> =
+        calendry_solver_core::search::soft_breakdown(problem, &outcome.solution)
+            .into_iter()
+            .map(|c| pb::ComponentScore {
+                constraint_id: c.constraint_id,
+                constraint_type: c.constraint_type.to_string(),
+                raw_count: c.raw_count,
+                weighted: c.weighted,
+            })
+            .collect();
+
     pb::SolverOutput {
         sessions,
         hard_violations,
-        // No soft constraints in this slice, so the weighted objective is
-        // empty. `best_objective` on GetStatus reports the hard-violation count
-        // meanwhile, which is the only quality signal that exists yet.
         objective: Some(pb::ObjectiveBreakdown {
-            total: 0.0,
-            components: Vec::new(),
+            total: outcome.objective.total(problem.hard_penalty),
+            components,
         }),
         stats: Some(pb::SolveStats {
             moves_evaluated: outcome.moves_evaluated,

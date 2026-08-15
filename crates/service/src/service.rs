@@ -65,7 +65,7 @@ impl SolverService for SolverSvc {
 
         let run = self
             .registry
-            .create(seed, budget.max_wall_millis, &req.idempotency_key);
+            .create(seed, budget.max_wall_millis, budget.max_moves, &req.idempotency_key);
 
         let core_budget = Budget {
             max_wall_millis: budget.max_wall_millis,
