@@ -113,9 +113,12 @@ pub fn generate(params: &InstanceParams, seed: u64) -> GeneratedInstance {
     let group_sizes = group_sizes(params);
     let persons = build_persons(params, &mut rng);
 
-    let (mut offering_specs, occurrences) =
+    let (offering_specs, occurrences) =
         build_offerings(params, &rooms, &group_sizes, &mut rng);
 
+    // Locked Sessions carry their Offering link, so `required_session_count`
+    // keeps its true domain meaning — the total this Offering needs — and
+    // `exact_frequency` counts placements plus locks against it.
     let (placements, fixed) = split_occurrences(
         params,
         &offering_specs,
@@ -124,23 +127,6 @@ pub fn generate(params: &InstanceParams, seed: u64) -> GeneratedInstance {
         &slots,
         &mut rng,
     );
-
-    // `required_session_count` counts what this run must PLACE, so occurrences
-    // that arrived as locked Sessions are deducted.
-    //
-    // This is not cosmetic. `constraints::exact_frequency` compares the required
-    // count against placement variables only — `FixedOccupancy` carries no
-    // Offering link, so a locked Session cannot be counted toward its Offering's
-    // frequency. Emitting the undeducted count would therefore make every
-    // Offering with a lock report a violation it does not have, and the
-    // benchmark would be measuring a known gap instead of the search.
-    let mut placed_per_offering = vec![0u32; offering_specs.len()];
-    for pv in &placements {
-        placed_per_offering[pv.offering.get()] += 1;
-    }
-    for (spec, n) in offering_specs.iter_mut().zip(&placed_per_offering) {
-        spec.required_session_count = *n;
-    }
 
     let constraints = build_constraints(params, &slots);
 
@@ -560,6 +546,9 @@ fn split_occurrences(
         match placed {
             Some((start, room)) => fixed.push(FixedSpec {
                 session_id: format!("{}#{}-locked", spec.id, occ.index),
+                // A locked Session still realizes its Offering, so it counts
+                // toward that Offering's required frequency.
+                offering: Some(OfferingIdx(occ.offering)),
                 kind: spec.kind.clone(),
                 room: Some(room),
                 start,

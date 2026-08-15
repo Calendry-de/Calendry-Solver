@@ -370,7 +370,7 @@ breaks that correspondence.
 
 ```bash
 git clone --recurse-submodules …   # or: git submodule update --init --recursive
-cargo test --workspace             # 87 tests
+cargo test --workspace             # 93 tests
 cargo clippy --workspace --all-targets
 CALENDRY_SOLVER_ADDR=127.0.0.1:50051 cargo run -p calendry-solver
 
@@ -540,19 +540,39 @@ first place, the retry cap may be treating the symptom.
 Its share *falls* as instances grow, because enumeration outgrows it. It is
 linear in placements, not a blow-up.
 
-#### DEFECT, found by slice 5, NOT yet fixed: locked Sessions are double-counted
-`Session.offering_id` exists on the wire, but `convert.rs` drops it when building
-a `FixedSpec`, and then creates placement variables for the **full**
-`required_session_count` of every in-scope Offering. So an Offering requiring 12
-Sessions with 3 already locked gets 12 new placements on top of the 3 — 15 total.
+#### FIXED — locked Sessions used to be double-counted
+Found by slice 5, fixed standalone straight after it. `Session.offering_id`
+existed on the wire but `convert.rs` dropped it when building a `FixedSpec`, then
+created placement variables for the **full** `required_session_count` of every
+in-scope Offering. An Offering requiring 12 Sessions with 3 already locked got 12
+new placements on top of the 3 — **15 total**. That is the ordinary mid-term
+re-solve, the exact case the lock policy exists for.
 
-This is the ordinary mid-term re-solve, the exact case the lock policy exists
-for. `FixedOccupancy` carries no Offering link either, so `exact_frequency` also
-cannot count locked Sessions toward frequency. Both halves are the same gap: the
-Offering<->locked-Session link is lost at the boundary.
+Both halves were the same gap — the Offering↔locked-Session link was lost at the
+boundary — so both halves were closed:
 
-The generator sidesteps it by emitting an already-deducted
-`required_session_count`, which is what a corrected `convert.rs` would produce.
+- `FixedSpec` / `FixedOccupancy` carry `offering: Option<OfferingIdx>`. `None` is
+  correct and meaningful: ad-hoc Sessions (a `staff_meeting` kind) realize no
+  Offering, and external Federation occupancy belongs to another tenant.
+- `constraints::exact_frequency` counts immovable Sessions toward their
+  Offering. A locked or past Session is still a Session that happened.
+- `convert.rs` places `required_session_count.saturating_sub(already_realized)`.
+  **`saturating_sub`, never `-`**: "warn and allow" means a caller can send more
+  Sessions than an Offering claims to need, and wrapping a `u32` would ask the
+  solver to place four billion Sessions.
+
+Nothing else reads `problem.fixed` beyond span/room/lecturers/groups/attendees,
+so `Occupancy::from_fixed`, `SearchState::from_fixed` and `collect_views` were
+untouched, and there was **no schema change** — the field already existed on the
+wire.
+
+**Known limitation, deliberately left:** `exact_frequency` uses "has placement
+variables" as its proxy for "in scope". Deducting locks is the first thing that
+can drive an in-scope Offering's placement count to zero, so an **over-supplied**
+Offering (4 locked against 2 required) now reports nothing rather than a
+mismatch. Reporting it means carrying real scope membership into `Problem`, which
+is a semantic change to core rather than a fix at the conversion boundary. A test
+asserts the current behaviour so that changing it has to be deliberate.
 
 #### BREAKING CHANGE for the Nuxt integration: `GetStatus.best_objective`
 Through slices 1-2 this field carried the **hard-violation count**. Since slice 3

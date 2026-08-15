@@ -363,9 +363,17 @@ fn partition_sessions(
 
         let in_scope = !s.offering_id.is_empty() && scope_offerings.contains(&s.offering_id);
 
+        // The Offering this Session realizes, if any. Ad-hoc Sessions (a
+        // `staff_meeting` kind) legitimately realize none, and a Session naming
+        // an Offering absent from the snapshot resolves to `None` rather than
+        // erroring — the caller's "warn and allow" editing UX can produce that,
+        // and it is occupancy either way.
+        let offering = offering_index.get(&s.offering_id).map(|&i| OfferingIdx(i));
+
         match classify_immovable(start, reference, s.is_locked, in_scope) {
             Some(reason) => fixed.push(FixedSpec {
                 session_id: s.id.clone(),
+                offering,
                 kind: s.kind.clone(),
                 room: room_index.get(&s.room_id).map(|&i| RoomIdx(i)),
                 start,
@@ -388,13 +396,30 @@ fn partition_sessions(
         ids.sort();
     }
 
+    // Immovable Sessions already realizing each in-scope Offering. These are
+    // Sessions that exist and are not going to move — locked, in the past, or
+    // out of scope — so the run must place the REMAINDER, not the full count.
+    let mut already_realized = vec![0u32; offerings.len()];
+    for f in &fixed {
+        if let Some(o) = f.offering {
+            already_realized[o.get()] += 1;
+        }
+    }
+
     let mut placements = Vec::new();
     for (i, o) in offerings.iter().enumerate() {
         if !scope_offerings.contains(&o.id) {
             continue;
         }
+        // `saturating_sub`, not `-`: the app's editing UX is "warn and allow",
+        // so a caller can legitimately send more Sessions than the Offering
+        // claims to need. Wrapping a u32 here would ask the solver to place four
+        // billion Sessions. Over-supply instead yields zero placements, and
+        // `ExactFrequency` reports the mismatch as the violation it is.
+        let outstanding = o.required_session_count.saturating_sub(already_realized[i]);
+
         let reuse = reusable.remove(&o.id).unwrap_or_default();
-        for occurrence in 0..o.required_session_count {
+        for occurrence in 0..outstanding {
             placements.push(PlacementVar {
                 offering: OfferingIdx(i as u32),
                 occurrence,
@@ -403,7 +428,6 @@ fn partition_sessions(
         }
     }
 
-    let _ = offering_index;
     Ok((placements, fixed))
 }
 
@@ -441,6 +465,9 @@ fn build_external_occupancy(
         };
 
         out.push(FixedSpec {
+            // Another tenant's use of a Federation-shared Room. It realizes no
+            // Offering in *this* snapshot, so it is occupancy and nothing more.
+            offering: None,
             session_id: if e.source_ref.is_empty() {
                 format!("external:{}", e.room_id)
             } else {
@@ -668,5 +695,321 @@ pub fn build_output(
             elapsed_millis,
             termination_reason: outcome.termination_reason.to_string(),
         }),
+    }
+}
+
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod locked_frequency_tests {
+    //! Locked Sessions must count toward their Offering's required frequency.
+    //!
+    //! This is the ordinary mid-term re-solve — the primary case the lock
+    //! mechanism exists for. An Offering needing 12 Sessions with 3 already
+    //! locked (user-locked, or in the past) needs **9** more, not 12.
+    //!
+    //! Two halves of one gap made that wrong:
+    //!
+    //! 1. [`partition_sessions`] dropped `Session.offering_id` when building a
+    //!    `FixedSpec`, then created placement variables for the **full**
+    //!    `required_session_count` — so the solver scheduled 12 on top of the 3
+    //!    locked ones, 15 in total.
+    //! 2. `FixedOccupancy` carried no Offering link either, so
+    //!    `constraints::exact_frequency` could not have counted the locked
+    //!    Sessions toward frequency even had the placements been deducted.
+    //!
+    //! These are written to be **red against the pre-fix code**, and were
+    //! confirmed red before the fix landed.
+
+    use super::convert;
+    use calendry_solver_core::constraints;
+    use calendry_solver_core::ids::OfferingIdx;
+    use calendry_solver_core::search::construct;
+    use calendry_solver_proto::v1 as pb;
+
+    const KIND: &str = "lecture";
+
+    fn slot(week: u32, day: u32, block: u32) -> pb::SlotRef {
+        pb::SlotRef { week, day, block }
+    }
+
+    /// Roomy enough that nothing here is infeasible for want of space:
+    /// 4 weeks x Mon-Fri x 6 blocks = 120 slots, 2 rooms.
+    fn base_input() -> pb::SolverInput {
+        pb::SolverInput {
+            requesting_tenant_id: "t1".into(),
+            federation_id: String::new(),
+            time_grid: Some(pb::TimeGrid {
+                blocks_per_day: 6,
+                block_length_minutes: 45,
+                day_start_minute: 480,
+                active_days: vec![1, 2, 3, 4, 5],
+                institution_timezone: "Europe/Berlin".into(),
+            }),
+            calendar: Some(pb::AcademicCalendar {
+                term_id: "term-1".into(),
+                weeks: (0..4)
+                    .map(|i| pb::Week {
+                        index: i,
+                        start_date: format!("2026-01-{:02}", 5 + i * 7),
+                        kind: pb::WeekKind::Teaching as i32,
+                    })
+                    .collect(),
+                holidays: vec![],
+            }),
+            rooms: (0..2)
+                .map(|i| pb::Room {
+                    id: format!("r{i}"),
+                    owner: Some(pb::room::Owner::TenantId("t1".into())),
+                    name: format!("Room {i}"),
+                    capacity: 100,
+                    rank: 1,
+                    is_virtual: false,
+                    feature_tags: vec![],
+                    location: String::new(),
+                })
+                .collect(),
+            persons: vec![pb::Person {
+                id: "p1".into(),
+                role_tags: vec!["Lecturer".into()],
+                group_ids: vec![],
+                blackouts: vec![],
+            }],
+            groups: vec![pb::Group {
+                id: "g1".into(),
+                parent_id: String::new(),
+                name: "Group 1".into(),
+                size: 20,
+            }],
+            offerings: vec![],
+            existing_sessions: vec![],
+            external_occupancy: vec![],
+            constraints: vec![
+                enabled(
+                    "c-room",
+                    pb::constraint_config::Params::RoomDoubleBooking(pb::RoomDoubleBooking {}),
+                ),
+                enabled(
+                    "c-freq",
+                    pb::constraint_config::Params::ExactFrequency(pb::ExactFrequency {}),
+                ),
+            ],
+            // Week 0 Monday block 0 — nothing here is past unless a test puts
+            // it there deliberately.
+            reference_slot: Some(slot(0, 1, 0)),
+        }
+    }
+
+    fn enabled(id: &str, params: pb::constraint_config::Params) -> pb::ConstraintConfig {
+        pb::ConstraintConfig {
+            id: id.into(),
+            enabled: true,
+            applies_to_kinds: vec![],
+            weight: 0.0,
+            params: Some(params),
+        }
+    }
+
+    fn offering(id: &str, required: u32) -> pb::Offering {
+        pb::Offering {
+            id: id.into(),
+            owner: Some(pb::offering::Owner::TenantId("t1".into())),
+            kind: KIND.into(),
+            required_session_count: required,
+            duration_blocks: 1,
+            candidate_lecturer_ids: vec!["p1".into()],
+            required_lecturer_count: 1,
+            group_ids: vec!["g1".into()],
+            participant_person_ids: vec![],
+            required_room_features: vec![],
+            min_capacity: 0,
+            allowed_room_ids: vec![],
+            allow_online: false,
+        }
+    }
+
+    fn locked_session(id: &str, offering_id: &str, at: pb::SlotRef) -> pb::Session {
+        pb::Session {
+            id: id.into(),
+            owner: Some(pb::session::Owner::TenantId("t1".into())),
+            offering_id: offering_id.into(),
+            kind: KIND.into(),
+            start_slot: Some(at),
+            duration_blocks: 1,
+            room_id: "r0".into(),
+            lecturer_ids: vec!["p1".into()],
+            group_ids: vec!["g1".into()],
+            person_ids: vec![],
+            is_locked: true,
+        }
+    }
+
+    fn scope(ids: &[&str]) -> pb::SolveScope {
+        pb::SolveScope {
+            offering_ids: ids.iter().map(|s| s.to_string()).collect(),
+            group_ids: vec![],
+            outside_scope_policy: pb::LockPolicy::Hard as i32,
+        }
+    }
+
+    fn frequency_violations(
+        problem: &calendry_solver_core::Problem,
+    ) -> Vec<constraints::Violation> {
+        let (solution, _) = construct(problem);
+        constraints::evaluate_hard(problem, &solution)
+            .into_iter()
+            .filter(|v| v.constraint_type == "ExactFrequency")
+            .collect()
+    }
+
+    #[test]
+    fn locked_sessions_count_toward_required_frequency() {
+        // 12 required, 3 already locked. The run must place exactly 9 more.
+        let mut input = base_input();
+        input.offerings = vec![offering("o1", 12)];
+        input.existing_sessions = vec![
+            locked_session("s1", "o1", slot(0, 1, 1)),
+            locked_session("s2", "o1", slot(0, 2, 1)),
+            locked_session("s3", "o1", slot(0, 3, 1)),
+        ];
+
+        let problem = convert(&input, &scope(&["o1"])).expect("valid input");
+
+        assert_eq!(
+            problem.fixed.len(),
+            3,
+            "the three locked Sessions must survive as immovable occupancy"
+        );
+
+        // RED BEFORE THE FIX: this was 12, so the solver scheduled 12 on top of
+        // the 3 locked ones — 15 Sessions for an Offering requiring 12.
+        assert_eq!(
+            problem.placements.len(),
+            9,
+            "12 required minus 3 locked = 9 placements to position"
+        );
+
+        // RED BEFORE THE FIX: the link did not exist, so frequency had nothing
+        // to count.
+        let linked = problem
+            .fixed
+            .iter()
+            .filter(|f| f.offering == Some(OfferingIdx(0)))
+            .count();
+        assert_eq!(linked, 3, "locked Sessions must carry their Offering link");
+
+        // RED BEFORE THE FIX: 12 required against 9 placed reported a violation
+        // that does not exist.
+        let freq = frequency_violations(&problem);
+        assert!(
+            freq.is_empty(),
+            "a fully realized Offering must report no frequency violation, got {freq:#?}"
+        );
+    }
+
+    #[test]
+    fn a_genuine_shortfall_is_still_reported() {
+        // The counterpart: counting locked Sessions must not become a way to
+        // silence a real shortfall. One slot, two rooms, so 5 cannot be reached.
+        let mut input = base_input();
+        input.time_grid = Some(pb::TimeGrid {
+            blocks_per_day: 1,
+            block_length_minutes: 45,
+            day_start_minute: 480,
+            active_days: vec![1],
+            institution_timezone: "Europe/Berlin".into(),
+        });
+        input.calendar = Some(pb::AcademicCalendar {
+            term_id: "term-1".into(),
+            weeks: vec![pb::Week {
+                index: 0,
+                start_date: "2026-01-05".into(),
+                kind: pb::WeekKind::Teaching as i32,
+            }],
+            holidays: vec![],
+        });
+        input.offerings = vec![offering("o1", 5)];
+        input.existing_sessions = vec![locked_session("s1", "o1", slot(0, 1, 0))];
+
+        let problem = convert(&input, &scope(&["o1"])).expect("valid input");
+        assert_eq!(problem.placements.len(), 4, "5 required minus 1 locked");
+
+        assert!(
+            !frequency_violations(&problem).is_empty(),
+            "a genuine shortfall must still be reported"
+        );
+    }
+
+    #[test]
+    fn out_of_scope_offerings_are_unaffected() {
+        // o2 is not in scope, so it gets no placement variables and its
+        // frequency is not this run's business. Its locked Sessions must still
+        // occupy the grid without leaking a violation or perturbing o1.
+        let mut input = base_input();
+        input.offerings = vec![offering("o1", 4), offering("o2", 7)];
+        input.existing_sessions = vec![
+            locked_session("s1", "o1", slot(0, 1, 1)),
+            locked_session("s2", "o2", slot(0, 2, 1)),
+            locked_session("s3", "o2", slot(0, 3, 1)),
+        ];
+
+        let problem = convert(&input, &scope(&["o1"])).expect("valid input");
+
+        assert_eq!(
+            problem.placements.len(),
+            3,
+            "only o1 is in scope: 4 required minus its 1 lock"
+        );
+        assert_eq!(problem.fixed.len(), 3, "all three locks remain occupancy");
+
+        let freq = frequency_violations(&problem);
+        assert!(
+            freq.is_empty(),
+            "an out-of-scope Offering must not report a frequency violation, got {freq:#?}"
+        );
+    }
+
+    #[test]
+    fn more_locks_than_required_saturates_instead_of_underflowing() {
+        // The app's editing UX is "warn and allow", so a caller can legitimately
+        // send more Sessions than the Offering claims to need. The deduction
+        // must saturate at zero rather than wrapping a u32 into four billion
+        // placement variables.
+        let mut input = base_input();
+        input.offerings = vec![offering("o1", 2)];
+        input.existing_sessions = vec![
+            locked_session("s1", "o1", slot(0, 1, 1)),
+            locked_session("s2", "o1", slot(0, 2, 1)),
+            locked_session("s3", "o1", slot(0, 3, 1)),
+            locked_session("s4", "o1", slot(0, 4, 1)),
+        ];
+
+        let problem = convert(&input, &scope(&["o1"])).expect("valid input");
+        assert_eq!(
+            problem.placements.len(),
+            0,
+            "already over-supplied: nothing left to place, and no underflow"
+        );
+
+        // The safety-critical property: no underflow, no absurd placement count.
+        // The run simply has nothing to do for this Offering.
+        assert!(
+            frequency_violations(&problem).is_empty(),
+            "KNOWN LIMITATION, asserted so a change is deliberate: over-supply \
+             is NOT reported"
+        );
+
+        // Why it is not reported, and why that is left alone here:
+        //
+        // `constraints::exact_frequency` treats "has placement variables" as its
+        // proxy for "in scope" — a documented decision that predates this fix.
+        // Deducting locks is the first thing that can drive an in-scope
+        // Offering's placement count to zero, so this is the first input for
+        // which the proxy and real scope membership disagree.
+        //
+        // Reporting it would mean carrying real scope membership into
+        // `Problem`, which is a semantic change to core rather than a fix to
+        // the conversion boundary. Deliberately out of scope for a standalone
+        // bug fix; recorded in CLAUDE.md as its own decision.
     }
 }

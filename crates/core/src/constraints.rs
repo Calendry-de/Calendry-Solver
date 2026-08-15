@@ -179,6 +179,21 @@ fn exact_frequency(problem: &Problem, solution: &Solution, out: &mut Vec<Violati
         }
     }
 
+    // Immovable Sessions realize their Offering just as placed ones do. A
+    // locked or already-past Session is still a Session that happened, so it
+    // counts toward the required frequency — otherwise every Offering carrying
+    // a lock would report a shortfall it does not have, and the ordinary
+    // mid-term re-solve could never satisfy this constraint at all.
+    //
+    // This does NOT mark the Offering in scope: an Offering whose only presence
+    // is immovable has no placement variables, so its frequency is not this
+    // run's business and the `in_scope` gate below still skips it.
+    for f in &problem.fixed {
+        if let Some(o) = f.offering {
+            placed[o.get()] += 1;
+        }
+    }
+
     for instance in &problem.constraints.exact_frequency {
         for (i, offering) in problem.offerings.iter().enumerate() {
             // An Offering with no placement variables is out of scope for this

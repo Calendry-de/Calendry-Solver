@@ -111,25 +111,37 @@ fn electives_create_tree_unrelated_co_membership() {
 }
 
 #[test]
-fn locked_sessions_are_deducted_from_required_counts() {
-    // `constraints::exact_frequency` compares required_session_count against
-    // placement variables only — FixedOccupancy carries no Offering link, so a
-    // locked Session cannot count toward its Offering's frequency. The generator
-    // therefore emits the already-deducted count; if it did not, every Offering
-    // holding a lock would report a violation it does not have and the benchmark
-    // would measure that gap instead of the search.
+fn locked_sessions_are_linked_and_complete_their_offerings() {
+    // Every occurrence is realized exactly once: either as a placement variable
+    // the solver must position, or as a locked Session carrying its Offering
+    // link. Together they must equal required_session_count, so
+    // `constraints::exact_frequency` is satisfiable — otherwise every Offering
+    // holding a lock would report a violation it does not have, and the
+    // benchmark would measure that gap instead of the search.
     let instance = generate(&Preset::SmallSchool.params(), 2);
     let problem = &instance.problem;
     assert!(instance.stats.fixed > 0, "preset should generate some locks");
 
-    let mut placements_per_offering = vec![0u32; problem.offerings.len()];
+    let mut realized = vec![0u32; problem.offerings.len()];
     for p in problem.placement_ids() {
-        placements_per_offering[problem.placement(p).offering.get()] += 1;
+        realized[problem.placement(p).offering.get()] += 1;
     }
-    for (o, &n) in problem.offerings.iter().zip(&placements_per_offering) {
+
+    let mut linked_locks = 0;
+    for f in &problem.fixed {
+        let o = f.offering.expect("a generated lock always realizes an Offering");
+        realized[o.get()] += 1;
+        linked_locks += 1;
+    }
+    assert_eq!(
+        linked_locks, instance.stats.fixed,
+        "every locked Session must carry its Offering link"
+    );
+
+    for (o, &n) in problem.offerings.iter().zip(&realized) {
         assert_eq!(
             o.required_session_count, n,
-            "offering '{}' requires {} but has {n} placement variables",
+            "offering '{}' requires {} but {n} occurrences realize it",
             o.id, o.required_session_count
         );
     }

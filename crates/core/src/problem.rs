@@ -216,6 +216,17 @@ pub struct OfferingSpec {
 #[derive(Clone, Debug)]
 pub struct FixedSpec {
     pub session_id: String,
+    /// The Offering this Session realizes, when it realizes one.
+    ///
+    /// `None` for ad-hoc Sessions (a `staff_meeting` kind need not realize any
+    /// Offering) and for external Federation occupancy, which belongs to another
+    /// tenant entirely.
+    ///
+    /// Load-bearing, not decorative: without it a locked Session cannot be
+    /// counted toward its Offering's `ExactFrequency`, and a mid-term re-solve
+    /// would schedule the full required count *on top of* the Sessions that
+    /// already exist.
+    pub offering: Option<OfferingIdx>,
     pub kind: String,
     pub room: Option<RoomIdx>,
     pub start: SlotIdx,
@@ -262,6 +273,8 @@ pub struct Offering {
 #[derive(Clone, Debug)]
 pub struct FixedOccupancy {
     pub session_id: String,
+    /// See [`FixedSpec::offering`].
+    pub offering: Option<OfferingIdx>,
     pub kind: String,
     pub room: Option<RoomIdx>,
     pub start: SlotIdx,
@@ -402,6 +415,7 @@ impl Problem {
                 attendees: attendees_of(&f.groups, &f.persons),
                 own_groups: f.groups,
                 session_id: f.session_id,
+                offering: f.offering,
                 kind: f.kind,
                 room: f.room,
                 start: f.start,
