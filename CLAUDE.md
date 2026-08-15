@@ -261,6 +261,32 @@ scale, with a few **named presets** built on top, for performance and solution-
 quality testing. **Kept separate from correctness test fixtures** — the two have
 different purposes and should not share a source of truth.
 
+#### Room tightness is NOT how hard an instance is — read before touching a preset
+The obvious difficulty measure is `demand_blocks / (rooms x slots)`. It is the
+wrong one, and calibrating against it produces instances construction cannot
+solve at all (measured: 565 of 3968 Sessions placed).
+
+The reason is conflict propagation. A Room's row accumulates only the Sessions
+placed in that Room. A **Group's** row accumulates every Session of every Group
+in its conflict closure, so a Cohort is marked busy by its entire subtree.
+Demand that spreads across many Rooms piles onto a *single* Cohort row. The
+generator therefore calibrates the **binding axis**:
+
+```
+saturation = max( demand / (rooms x slots),         // room
+                  max_g blocked_blocks(g) / slots,  // group  <- always binds
+                  max_l taught_blocks(l) / slots )  // lecturer
+```
+
+Target band 0.55..=0.75. At realistic hierarchies the group axis binds in every
+preset and room tightness sits at 0.24–0.38 — that is correct, not a defect.
+
+Cohorts are assigned **round-robin, not at random**. Because the cohort row
+binds, random assignment lets the *busiest* cohort decide feasibility, and the
+max of N draws grows with N — measured saturation overshot the closed form by
+1.28x at school scale and 1.55x at university scale, so no single calibration
+held across the range. Class and seminar choice within a cohort stays random.
+
 ---
 
 ## 3. Non-negotiables checklist
@@ -293,7 +319,7 @@ Separate crates make erosion of that boundary a compile error.
 | `crates/core` | `calendry-solver-core` | Domain model, dense indices, slot tables, evaluators, search | prost, tonic, tokio, I/O, any clock |
 | `crates/proto` | `calendry-solver-proto` | `build.rs` codegen only, no hand-written logic | core |
 | `crates/service` | `calendry-solver` (bin) | tonic server, run registry, **and the proto↔core conversion module** | — |
-| `crates/gen` | `calendry-solver-gen` | Benchmark generator — **placeholder, slice 5** | the service |
+| `crates/gen` | `calendry-solver-gen` | Benchmark generator + `bench` harness | the service |
 
 Conversion is deliberately *not* its own crate yet; promote it when its
 validation logic grows. Correctness fixtures are hand-written in
@@ -344,9 +370,14 @@ breaks that correspondence.
 
 ```bash
 git clone --recurse-submodules …   # or: git submodule update --init --recursive
-cargo test --workspace             # 26 tests
+cargo test --workspace             # 87 tests
 cargo clippy --workspace --all-targets
 CALENDRY_SOLVER_ADDR=127.0.0.1:50051 cargo run -p calendry-solver
+
+# Benchmarks. Release only — a debug build measures the drift assertion, and
+# move budgets only, because a wall-clock-terminated run is not reproducible.
+cargo run --release -p calendry-solver-gen --bin bench -- \
+    [preset...] [--gen-seed N] [--seeds N] [--moves N] [--wall S] [--calibrate]
 ```
 
 Example request payloads live in `examples/`. The service does **not** expose
@@ -434,15 +465,94 @@ tagged `v0.2.0`, and the Nuxt app installing `@mindcollaps/calendry-proto@0.2.0`
 built from that same tag, means "which schema is each side on" has one answer.
 
 ### Implementation status
-**Slices 1-4 complete. All 14 catalogue types are implemented.** There is no
+**Slices 1-5 complete. All 14 catalogue types are implemented.** There is no
 longer an `UNIMPLEMENTED` branch in `convert.rs` — a new type added to the schema
 fails to compile against the match instead, which is the property that mattered.
 
 Search is greedy construction followed by Large Neighborhood Search with
 simulated-annealing acceptance, driving `MoveEvaluator` for real.
 
-Remaining: the benchmark generator (slice 5), and the deferred v2
+Remaining: the two scaling defects slice 5 measured (below), and the deferred v2
 minimize-movement lock policy.
+
+#### MEASURED — where a run's time actually goes
+Slice 5's harness (`cargo run --release -p calendry-solver-gen --bin bench`)
+established this with numbers, not inspection. **Construction dominates, and it
+is not close:**
+
+| preset | construct | evaluate_hard | LNS loop |
+|---|---|---|---|
+| small-school | 40 ms (49%) | 1.2 ms (1%) | 41 ms (50%) |
+| large-school | 129 ms (74%) | 3.7 ms (2%) | 42 ms (24%) |
+| small-university | 834 ms (90%) | 23 ms (2%) | 71 ms (8%) |
+| large-university | **11.13 s (93%)** | 324 ms (3%) | 530 ms (4%) |
+
+`construct` is first-fit: for each placement it scans `slots x eligible_rooms`
+until something is free. The cost is dominated by the placements that **fail** —
+each one scans the entire space and finds nothing. At large-university that is
+2,468 failures x ~87,000 probes. Any work on scaling starts here, not in LNS.
+
+Two further causes, both real but far smaller than the table above suggests at
+first glance:
+
+**H1 — repair materialized a cross product it threw away. FIXED in slice 5.**
+`repair_one` used to build every `(slot, room)` pair into a `Vec<Move>` and then
+sample down to `MAX_CANDIDATES = 512`. Enumeration's measured share of repair
+cost was 25% / 35% / 46% / **65%** across the four presets.
+
+It now addresses the space **by index** via `SlotTable::start_count` /
+`nth_start`, running partial Fisher-Yates over a *virtual* array and recording
+only the positions the shuffle disturbs. The RNG is consumed in the identical
+sequence and index `i` maps to the same candidate, so **output is byte-identical
+for the same seed** — verified by re-running all four presets and matching every
+objective, iteration and acceptance count exactly.
+
+Worth being precise about the payoff: repair is ~1.7% of a large-university run,
+so removing 65% of it is worth well under 1% of wall time. **H1's fix does not
+unblock university scale and was never going to.** It removes waste that would
+otherwise have grown with the grid.
+
+**H2 — every unplaced placement is retried every iteration.** The slice-4 fix
+that made `ruin` retry unplaced placements is load-bearing for correctness
+(without it the `unplaced` term is unoptimizable) and free when construction
+succeeds. When it does not:
+
+| preset | unplaced after construct | iterations in 200k moves | improvements |
+|---|---|---|---|
+| small-school | 0 | 87 | 58 |
+| large-school | 0 | 90 | 58 |
+| small-university | 834 | **1** | 1 |
+| large-university | 2,468 | **1** | 0 |
+
+The harm is **move-budget exhaustion, not time**: one large-university iteration
+scores 2,476 x 512 = 1.27M candidates, so a 200k move budget cannot complete even
+one iteration. LNS therefore never runs — large-university accepted zero moves
+and recorded no improvement. That is a budget-accounting problem, unrelated to
+H1's enumeration waste.
+
+Fixing H2 is not local. Capping the retry list must preserve "every unplaced
+placement is *eventually* retried" or it reintroduces the slice-4 defect — and
+given that construction is 93% of the run and produces the unplaced tail in the
+first place, the retry cap may be treating the symptom.
+
+**The drift assertion does NOT need sampling.** Measured debug-vs-`debug-assertions=off`:
+31% of solve time at small-school, 23% at large-school, 12% at small-university.
+Its share *falls* as instances grow, because enumeration outgrows it. It is
+linear in placements, not a blow-up.
+
+#### DEFECT, found by slice 5, NOT yet fixed: locked Sessions are double-counted
+`Session.offering_id` exists on the wire, but `convert.rs` drops it when building
+a `FixedSpec`, and then creates placement variables for the **full**
+`required_session_count` of every in-scope Offering. So an Offering requiring 12
+Sessions with 3 already locked gets 12 new placements on top of the 3 — 15 total.
+
+This is the ordinary mid-term re-solve, the exact case the lock policy exists
+for. `FixedOccupancy` carries no Offering link either, so `exact_frequency` also
+cannot count locked Sessions toward frequency. Both halves are the same gap: the
+Offering<->locked-Session link is lost at the boundary.
+
+The generator sidesteps it by emitting an already-deducted
+`required_session_count`, which is what a corrected `convert.rs` would produce.
 
 #### BREAKING CHANGE for the Nuxt integration: `GetStatus.best_objective`
 Through slices 1-2 this field carried the **hard-violation count**. Since slice 3
