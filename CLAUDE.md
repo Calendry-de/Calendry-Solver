@@ -546,8 +546,25 @@ scale:
 | small-university | 6,760 | 89 | 77 | 0 |
 | large-university | 27,136 | 80 | 67 | 0 |
 
-Phase timings move as fixes land; the current split is in the two callouts
-below. **H2 is gone, at every preset size.** It was a symptom of infeasibility, not an
+Phase timings move as fixes land — see the corollary above. The current split,
+after 6b-i and the `structural` fix:
+
+| preset | construct | evaluate_hard | LNS | total solve |
+|---|---|---|---|---|
+| small-school | 3.2 ms (8%) | 0.6 ms (1%) | 35.8 ms (90%) | 39.5 ms |
+| large-school | 7.6 ms (16%) | 1.6 ms (3%) | 37.0 ms (80%) | 46.2 ms |
+| small-university | 25.1 ms (33%) | 6.3 ms (8%) | 43.9 ms (58%) | 75.3 ms |
+| large-university | **229 ms (66%)** | 46.8 ms (13%) | 72.9 ms (21%) | 349 ms |
+
+**There is no single bottleneck any more — it is scale-dependent.** At school
+scale LNS dominates, but that is the move budget being spent, not a defect: LNS
+time is roughly constant (36-73 ms) across a 18x range of instance size because
+runs are budget-bound at 200k moves, so its *share* falls as instances grow. Only
+at large-university does construction dominate, at 66%.
+
+Post-fix construction scans 241.7 start slots per placement (of 924) and 238.9
+room probes, at 8.2 us per placement. That cost is now almost entirely the
+room-independent check''s attendee scan. **H2 is gone, at every preset size.** It was a symptom of infeasibility, not an
 independent defect: with 0 unplaced there is nothing to retry, and LNS completes
 80-91 iterations everywhere. **H1 is fixed but was never the lever** — repair
 sits inside a 1% slice at large-university, so its 148x enumeration waste was
@@ -579,26 +596,50 @@ scans an attendee list averaging 65 people, and that scan previously ran once pe
 against 31.1x measured — which is the room-occupancy rate deciding how often the
 expensive path was redundantly re-entered.
 
-#### THE BOTTLENECK IS NOW `evaluate_hard` — read before optimizing construction further
-6b-i moved it. Post-fix attribution:
+#### FIXED — `structural` pair-scanned attendee lists
+`evaluate_hard` was 69% of a large-university run, and `structural` was 99.2% of
+that. Attribution inside it, by successively disabling parts:
 
-| preset | construct | evaluate_hard | LNS | total solve |
-|---|---|---|---|---|
-| small-school | 3.3 ms (8%) | 1.1 ms (3%) | 38.4 ms (90%) | 42.8 ms |
-| large-school | 7.8 ms (15%) | 4.4 ms (8%) | 40.2 ms (77%) | 52.4 ms |
-| small-university | 24.9 ms (21%) | 45.4 ms (38%) | 49.6 ms (41%) | 119.9 ms |
-| large-university | 229 ms (25%) | **636 ms (69%)** | 53.1 ms (6%) | 918 ms |
+| | cost | share |
+|---|---|---|
+| attendee intersection, per pair | 458 ms | 72% |
+| `format!` of the slot label, per pair | 160 ms | 25% |
+| group closure | 6.5 ms | 1% |
+| lecturer + room | 11 ms | 2% |
+| views + bucketing + loop | 3.8 ms | <1% |
 
-`constraints::evaluate_hard` runs **once**, at the end of a run, to produce the
-violation report. Its `structural()` buckets occupancy by slot and then checks
-every **pair** within each slot, and each `check_pair` intersects two attendee
-lists. At large-university that is ~57 occupants per slot, ~1.6M pairs, each
-scanning ~65 attendees — and `collect_views` additionally allocates a `String`
-label per view.
+Both dominant costs were **unconditional**: `check_pair` allocated the location
+string before checking anything, and ran all four clash searches before
+consulting whether any instance covered the pair. Emptying every constraint list
+changed the time by **0.2%**, so none of it was reporting.
 
-It is superlinear: pair count grows 74x from small-school to large-university
-while measured time grows 558x. Any further scaling work belongs here, not in
-construction, which is now a 25% slice.
+Fixed by inverting the person axis — per slot, map each attendee to the Sessions
+holding them and look for one held twice, instead of asking every pair whether
+they intersect — and by making the slot label a `Display` rendered only inside a
+real violation message. `structural` **623 ms -> 40.4 ms (15.2x)**, output
+byte-identical.
+
+It stays independent of `Occupancy`: it reads the same `View` attendee lists the
+pairwise version read, so it remains the authoritative check rather than trusting
+the index the heuristic uses to avoid violations.
+
+#### Structural violations can only involve IMMOVABLE Sessions
+Measured, both universities: **every** structural violation has two immovable
+Sessions; none involves a placed one (80 of 80, and 9 of 9).
+
+That is provable, not incidental. Occupancy is seeded from the immovable input,
+repair only places where `is_free` accepts, `Enforce` is a documented
+*conservative* approximation, and the mark/query semantics match `check_pair`
+exactly on all four axes — group marks the closure and queries by identity, which
+*is* `conflicts(x, y)`; person marks and queries attendees, which *is* set
+intersection.
+
+So the violating set is knowable before the search starts and never changes, and
+~99.75% of the pairwise scan cannot report anything. **This was deliberately NOT
+exploited.** Restricting the scan to immovable pairs would make the authoritative
+check depend on the correctness of the thing it exists to verify — and that
+safety net has already caught two real search defects. Worth revisiting only as a
+debug-gated fast path, never as a replacement.
 
 #### FIXED — locked Sessions used to be double-counted
 Found by slice 5, fixed standalone straight after it. `Session.offering_id`

@@ -9,7 +9,7 @@
 //! it is deliberately conservative about kind scoping; the pairwise rules below
 //! are exact.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::ids::{GroupIdx, PersonIdx, RoomIdx, SlotIdx};
 use crate::problem::{ConstraintInstance, Problem};
@@ -32,6 +32,22 @@ pub const EXACT_FREQUENCY: &str = "ExactFrequency";
 pub const LECTURER_VETO: &str = "LecturerVeto";
 pub const ONLINE_ONSITE_SAME_DAY: &str = "OnlineOnsiteSameDay";
 pub const MAX_ONLINE_SHARE: &str = "MaxOnlineShare";
+
+/// `week W day D block B`, rendered on demand.
+///
+/// `Display` rather than a `String` so the allocation happens only inside the
+/// `format!` that builds a real violation message.
+struct SlotLabel<'a>(&'a crate::slots::SlotFlags);
+
+impl std::fmt::Display for SlotLabel<'_> {
+    fn fmt(&self, w: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            w,
+            "week {} day {} block {}",
+            self.0.week, self.0.iso_weekday, self.0.block
+        )
+    }
+}
 
 /// A Session occupying slots, whether immovable or placed by this run.
 struct View<'a> {
@@ -245,15 +261,92 @@ pub fn structural(problem: &Problem, solution: &Solution, out: &mut Vec<Violatio
     // block.
     let mut seen: HashSet<(usize, usize, &'static str, &str)> = HashSet::new();
 
+    // Scratch for the person axis, allocated once and reused per slot.
+    // `clear()` keeps each bucket's capacity, so after the first few slots this
+    // stops allocating entirely.
+    let check_persons = !problem.constraints.person_double_booking.is_empty();
+    let mut by_person: Vec<Vec<usize>> = if check_persons {
+        vec![Vec::new(); problem.persons.len()]
+    } else {
+        Vec::new()
+    };
+    let mut touched: Vec<usize> = Vec::new();
+    let mut person_clash: HashMap<(usize, usize), usize> = HashMap::new();
+
     for (slot, occupants) in by_slot.iter().enumerate() {
         if occupants.len() < 2 {
             continue;
         }
         let slot = SlotIdx(slot as u32);
 
+        // Person double-booking, bucketed rather than pair-scanned.
+        //
+        // Asking "do these two Sessions share an attendee" for every pair costs
+        // `pairs x attendee-list scan`, which measured at 72% of this function.
+        // Inverting it — map each attendee to the Sessions holding them, then
+        // look for an attendee held twice — costs the sum of the attendee list
+        // lengths instead. At university scale that is ~3.7k operations per slot
+        // against ~600k.
+        //
+        // This stays entirely independent of `Occupancy`: it reads the same
+        // `View` attendee lists the pairwise version read, so it remains the
+        // authoritative check rather than trusting the heuristic's index.
+        person_clash.clear();
+        if check_persons {
+            for &vi in occupants {
+                for p in views[vi].attendees {
+                    let bucket = &mut by_person[p.get()];
+                    if bucket.is_empty() {
+                        touched.push(p.get());
+                    }
+                    bucket.push(vi);
+                }
+            }
+            for &p in &touched {
+                let bucket = &by_person[p];
+                if bucket.len() < 2 {
+                    continue;
+                }
+                // `occupants` is ascending, so each bucket is too, and (i, j)
+                // with i < j is already the canonical pair order.
+                for (i, &a) in bucket.iter().enumerate() {
+                    for &b in &bucket[i + 1..] {
+                        // The pairwise version reported the FIRST shared
+                        // attendee of `x`, and attendee lists are sorted, so
+                        // that is the lowest shared index. Keep the minimum here
+                        // to reproduce the same message.
+                        person_clash
+                            .entry((a, b))
+                            .and_modify(|e| {
+                                if p < *e {
+                                    *e = p;
+                                }
+                            })
+                            .or_insert(p);
+                    }
+                }
+            }
+            for &p in &touched {
+                by_person[p].clear();
+            }
+            touched.clear();
+        }
+
+        // Almost every slot has no person clash at all, and a hash lookup per
+        // pair is not free at ~1.6M pairs. Hoisting the emptiness test out of
+        // the pair loop keeps the common case to a single branch.
+        let any_clash = !person_clash.is_empty();
+
         for (ai, &a) in occupants.iter().enumerate() {
             for &b in &occupants[ai + 1..] {
-                check_pair(problem, &views[a], &views[b], a, b, slot, &mut seen, out);
+                let shared = if any_clash {
+                    person_clash.get(&(a, b)).copied()
+                } else {
+                    None
+                };
+                check_pair(
+                    problem, &views[a], &views[b], a, b, slot, shared, &mut seen, out,
+                );
             }
         }
     }
@@ -267,12 +360,18 @@ fn check_pair<'p>(
     xi: usize,
     yi: usize,
     slot: SlotIdx,
+    // The lowest attendee index shared by this pair, precomputed in
+    // `structural` by bucketing. `None` = they share nobody.
+    shared_attendee: Option<usize>,
     seen: &mut HashSet<(usize, usize, &'static str, &'p str)>,
     out: &mut Vec<Violation>,
 ) {
     let c = &problem.constraints;
     let f = problem.slots.flags(slot);
-    let at = format!("week {} day {} block {}", f.week, f.iso_weekday, f.block);
+    // Formatted only when a violation is actually built. Allocating this string
+    // for every pair up front — before any check had run — measured at 25% of
+    // `structural`, and the overwhelming majority of pairs report nothing.
+    let at = SlotLabel(f);
 
     let mut report =
         |instance: &'p ConstraintInstance, ty: &'static str, detail: String, out: &mut Vec<Violation>| {
@@ -360,14 +459,14 @@ fn check_pair<'p>(
     //
     // Catches what the group check structurally cannot: a Person who belongs to
     // two Groups unrelated in the nesting tree, both scheduled at once.
-    if let Some(p) = x.attendees.iter().find(|p| y.attendees.binary_search(p).is_ok()) {
+    if let Some(p) = shared_attendee {
         for i in c.person_double_booking.iter().filter(|i| both(i)) {
             report(
                 i,
                 PERSON_DOUBLE_BOOKING,
                 format!(
                     "person '{}' attends '{}' and '{}' at {at}",
-                    problem.persons[p.get()].id, x.label, y.label
+                    problem.persons[p].id, x.label, y.label
                 ),
                 out,
             );
