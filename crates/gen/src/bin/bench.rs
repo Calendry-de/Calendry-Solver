@@ -51,6 +51,10 @@ struct Args {
     /// Generate and report only. Used to calibrate presets without paying for
     /// a search on an instance whose shape is still being tuned.
     calibrate: bool,
+    /// Attribute construction failures to axes, over this many unplaced
+    /// placements. 0 = skip. Implies skipping the solve.
+    diagnose: usize,
+    elective: Option<f64>,
 }
 
 fn parse_args() -> Args {
@@ -62,6 +66,8 @@ fn parse_args() -> Args {
         probe: 32,
         gen_seed: 1,
         calibrate: false,
+        diagnose: 0,
+        elective: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -77,6 +83,16 @@ fn parse_args() -> Args {
             "--probe" => a.probe = num("--probe") as usize,
             "--gen-seed" => a.gen_seed = num("--gen-seed"),
             "--calibrate" => a.calibrate = true,
+            "--diagnose" => a.diagnose = num("--diagnose") as usize,
+            // Override the one parameter under test, so a sweep does not need a
+            // preset edit and a rebuild per point.
+            "--elective" => {
+                a.elective = Some(
+                    it.next()
+                        .and_then(|v| v.parse::<f64>().ok())
+                        .expect("--elective needs a ratio"),
+                )
+            }
             other => match Preset::parse(other) {
                 Some(p) => a.presets.push(p),
                 None => {
@@ -106,7 +122,10 @@ fn main() {
     );
 
     for preset in &args.presets {
-        let params = preset.params();
+        let mut params = preset.params();
+        if let Some(e) = args.elective {
+            params.elective_ratio = e;
+        }
         println!("\n{:=<78}", "");
         println!("{}", preset.name());
         println!("{:=<78}", "");
@@ -153,9 +172,21 @@ fn report_instance(s: &InstanceStats, gen_time: Duration) {
         s.saturation, s.predicted_saturation, band, TARGET_SATURATION
     );
     println!(
-        "    by axis    group {:.3}   lecturer {:.3}   room {:.3}",
-        s.max_group_load, s.max_lecturer_load, s.room_tightness
+        "    by axis    group {:.3}   lecturer {:.3}   room {:.3}   \
+         person-clique {:.3} (|C|={})",
+        s.max_group_load,
+        s.max_lecturer_load,
+        s.room_tightness,
+        s.person_clique_load,
+        s.person_clique_size
     );
+    if s.person_clique_load > 1.0 {
+        println!(
+            "               ^^ PROVABLY INFEASIBLE: {} pairwise-conflicting Offerings \
+             need more slots than the term has",
+            s.person_clique_size
+        );
+    }
     println!(
         "  eligible   mean {:.1} rooms, max {}",
         s.mean_eligible_rooms, s.max_eligible_rooms
@@ -192,6 +223,13 @@ fn run_phases(problem: &Problem, stats: &InstanceStats, seed: u64, args: &Args) 
         stats.mean_candidates,
         (unplaced as f64 + 4.5) * stats.mean_candidates
     );
+
+    if args.diagnose > 0 {
+        let t = Instant::now();
+        let d = calendry_solver_gen::diagnose::diagnose(problem, &solution, &state, args.diagnose);
+        report_diagnosis(&d, t.elapsed());
+        return;
+    }
 
     // --- repair probe -------------------------------------------------------
     probe_repair(problem, &solution, &mut state, args.probe, seed);
@@ -453,4 +491,110 @@ fn probe_repair(
         pct(score)
     );
     println!("  total     {:>10.2?}/repair", total / n as u32);
+}
+
+// ---------------------------------------------------------------------------
+// Construction failure diagnosis
+// ---------------------------------------------------------------------------
+
+fn report_diagnosis(d: &calendry_solver_gen::diagnose::ConstructionFailure, took: Duration) {
+    let pool = if d.pool_was_unplaced { "unplaced" } else { "placed" };
+    println!(
+        "\ndiagnose   {:.2?}   {} {pool} placements examined ({} unplaced in total)",
+        took, d.sampled, d.total_unplaced
+    );
+    if d.slots_examined > 0 {
+        let share = 100.0 * d.slots_blocked_room_independent as f64 / d.slots_examined as f64;
+        println!(
+            "  scan cost  {} of {} start slots ({share:.1}%) rejected by a room-INDEPENDENT axis",
+            d.slots_blocked_room_independent, d.slots_examined
+        );
+        println!(
+            "             {} of {} probes wasted re-testing them per room ({:.1}%)",
+            d.wasted_probes,
+            d.totals.candidates,
+            100.0 * d.wasted_probes as f64 / d.totals.candidates.max(1) as f64
+        );
+    }
+    if d.total_unplaced == 0 {
+        println!("  (construction placed everything; no failure to attribute)");
+        return;
+    }
+    println!(
+        "  profile    mean {:.1} eligible rooms, kinds {:?}",
+        d.mean_eligible_rooms, d.by_kind
+    );
+
+    let t = &d.totals;
+    let pct = |v: u64| 100.0 * v as f64 / t.candidates.max(1) as f64;
+    println!(
+        "  space      {} candidates examined, {} free ({:.4}%)",
+        t.candidates,
+        t.free,
+        pct(t.free)
+    );
+    println!("  blocked by (a candidate may be blocked by several at once):");
+    for (name, v) in [
+        ("group", t.blocked_group),
+        ("person", t.blocked_person),
+        ("room", t.blocked_room),
+        ("lecturer", t.blocked_lecturer),
+        ("veto", t.blocked_veto),
+        ("day_mix", t.blocked_day_mix),
+    ] {
+        println!("    {name:<9} {v:>12}  {:>6.2}%", pct(v));
+    }
+
+    println!(
+        "  free space {} of {} sampled placements have somewhere to go",
+        d.with_free_space, d.sampled
+    );
+    let labels = ["0", "1-9", "10-99", "100-999", "1000+"];
+    print!("    histogram");
+    for (l, n) in labels.iter().zip(&d.free_buckets) {
+        print!("  {l}={n}");
+    }
+    println!();
+
+    if let Some(c) = &d.clique {
+        report_clique(c);
+    }
+
+    if d.with_free_space > 0 {
+        println!(
+            "    free ratio min {:.5}%, median {:.5}%",
+            100.0 * d.min_free_ratio,
+            100.0 * d.median_free_ratio
+        );
+        // The number that decides whether LNS can ever recover these: repair
+        // samples MAX_CANDIDATES out of the space uniformly, so the chance of
+        // even seeing a free candidate is 1 - (1 - ratio)^MAX_CANDIDATES.
+        let hit = |r: f64| 100.0 * (1.0 - (1.0 - r).powi(tuning::MAX_CANDIDATES as i32));
+        println!(
+            "    P(repair's {}-sample sees a free candidate): min {:.1}%, median {:.1}%",
+            tuning::MAX_CANDIDATES,
+            hit(d.min_free_ratio),
+            hit(d.median_free_ratio)
+        );
+    }
+}
+
+fn report_clique(c: &calendry_solver_gen::diagnose::CliqueEvidence) {
+    println!(
+        "  clique     kind '{}': {:.1}% of {} sampled Offering pairs share an attendee",
+        c.kind,
+        100.0 * c.conflict_density,
+        c.pairs_sampled
+    );
+    println!(
+        "             {} Sessions of this kind vs {} non-overlapping slots",
+        c.sessions, c.capacity
+    );
+    if c.conflict_density > 0.9 && c.sessions > c.capacity {
+        println!(
+            "             => INFEASIBLE BY COUNTING: near-clique needs one slot each,\n\
+             \x20            so at most {} of {} can ever be placed. Not an algorithm problem.",
+            c.capacity, c.sessions
+        );
+    }
 }

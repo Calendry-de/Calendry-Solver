@@ -95,6 +95,7 @@ impl Preset {
                 seminars_per_class: 2,
                 students_per_seminar: 10,
                 elective_ratio: 0.10,
+                elective_offerings_per_group: 1,
 
                 lecturers: 10,
                 blackout_ratio: 0.25,
@@ -128,6 +129,7 @@ impl Preset {
                 seminars_per_class: 2,
                 students_per_seminar: 10,
                 elective_ratio: 0.15,
+                elective_offerings_per_group: 1,
 
                 lecturers: 19,
                 blackout_ratio: 0.25,
@@ -162,6 +164,7 @@ impl Preset {
                 seminars_per_class: 3,
                 students_per_seminar: 12,
                 elective_ratio: 0.25,
+                elective_offerings_per_group: 1,
 
                 lecturers: 43,
                 blackout_ratio: 0.30,
@@ -195,6 +198,7 @@ impl Preset {
                 seminars_per_class: 3,
                 students_per_seminar: 14,
                 elective_ratio: 0.30,
+                elective_offerings_per_group: 1,
 
                 lecturers: 118,
                 blackout_ratio: 0.30,
@@ -239,9 +243,23 @@ pub struct InstanceParams {
     pub classes_per_cohort: u32,
     pub seminars_per_class: u32,
     pub students_per_seminar: u32,
-    /// Fraction of students additionally enrolled in a seminar under a
-    /// *different* cohort, making the two groups tree-unrelated.
+    /// Fraction of students additionally enrolled in an **elective group**.
+    ///
+    /// Elective groups are **roots** — parented to no Cohort — which is what
+    /// keeps them tree-unrelated to the student's home Seminar and therefore
+    /// makes `PersonDoubleBooking` do work the Group check cannot.
+    ///
+    /// They deliberately do **not** sit under another Cohort. An earlier model
+    /// enrolled the student into a seminar belonging to a different Cohort,
+    /// which put them in that Cohort's subtree and so made them an attendee of
+    /// its entire cohort-wide lecture series. Two Cohorts sharing one student
+    /// then made their lectures mutually exclusive, and at a 30% elective rate
+    /// **94.8% of lecture pairs conflicted** — a near-clique needing one slot
+    /// each, 1146 Sessions against 350 slots. The instances were infeasible by
+    /// counting, and no solver could have placed them.
     pub elective_ratio: f64,
+    /// Offerings attached to each elective group.
+    pub elective_offerings_per_group: u32,
 
     // --- Staff --------------------------------------------------------------
     pub lecturers: u32,
@@ -287,8 +305,28 @@ impl InstanceParams {
         self.cohorts * self.classes_per_cohort * self.seminars_per_class
     }
 
+    /// Derived, not configured: enough elective groups that each is about the
+    /// size of a Class.
+    ///
+    /// Class-sized rather than seminar-sized because an elective gathers
+    /// students from across the institution into one reasonably large teaching
+    /// group. Sizing them at seminar scale instead produced 360 elective groups
+    /// at large-university, and their Offerings then added 56% to total demand
+    /// — an elective programme larger than the core curriculum.
+    pub fn elective_groups(&self) -> u32 {
+        if self.elective_ratio <= 0.0 {
+            return 0;
+        }
+        let class_size = (self.seminars_per_class * self.students_per_seminar).max(1);
+        let enrolled = self.student_count() as f64 * self.elective_ratio;
+        ((enrolled / class_size as f64).round() as u32).max(1)
+    }
+
     pub fn group_count(&self) -> u32 {
-        self.cohorts + self.cohorts * self.classes_per_cohort + self.seminar_count()
+        self.cohorts
+            + self.cohorts * self.classes_per_cohort
+            + self.seminar_count()
+            + self.elective_groups()
     }
 
     pub fn student_count(&self) -> u32 {
@@ -299,8 +337,22 @@ impl InstanceParams {
         (self.duration_blocks.0 + self.duration_blocks.1) as f64 / 2.0
     }
 
-    pub fn demand_blocks(&self) -> f64 {
+    /// Demand from Offerings attached inside the Cohort hierarchy.
+    pub fn core_demand_blocks(&self) -> f64 {
         self.offerings as f64 * self.sessions_per_offering as f64 * self.mean_duration()
+    }
+
+    /// Demand from elective Offerings, which hang off root groups and so land
+    /// on no Cohort's row.
+    pub fn elective_demand_blocks(&self) -> f64 {
+        self.elective_groups() as f64
+            * self.elective_offerings_per_group as f64
+            * self.sessions_per_offering as f64
+            * self.mean_duration()
+    }
+
+    pub fn demand_blocks(&self) -> f64 {
+        self.core_demand_blocks() + self.elective_demand_blocks()
     }
 
     pub fn predicted_room_tightness(&self) -> f64 {
@@ -312,9 +364,10 @@ impl InstanceParams {
     /// A Cohort is blocked by its **entire subtree**, so its row carries that
     /// cohort's whole share of demand regardless of which level the Sessions
     /// were attached at. Cohorts are therefore always the busiest rows, and
-    /// this reduces to demand-per-cohort.
+    /// this reduces to core demand per cohort — elective groups are roots with
+    /// no descendants, so their demand lands on their own row instead.
     pub fn predicted_group_load(&self) -> f64 {
-        self.demand_blocks() / self.cohorts.max(1) as f64 / self.slots() as f64
+        self.core_demand_blocks() / self.cohorts.max(1) as f64 / self.slots() as f64
     }
 
     pub fn predicted_lecturer_load(&self) -> f64 {

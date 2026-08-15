@@ -21,8 +21,9 @@
 //! The `bench` binary drives this: `cargo run --release -p calendry-solver-gen
 //! --bin bench -- small-school`.
 
+pub mod diagnose;
 pub mod generate;
 pub mod params;
 
-pub use generate::{GeneratedInstance, InstanceStats, digest, generate};
+pub use generate::{GeneratedInstance, InstanceStats, digest, generate, person_clique};
 pub use params::{InstanceParams, Preset, TARGET_SATURATION};

@@ -1,0 +1,341 @@
+//! Why construction fails: attribute every rejected `(slot, room)` to an axis.
+//!
+//! Slice 5 measured that construction is 93% of a large-university run and leaves
+//! 2,468 of 25,520 Sessions unplaced. That is *what* happens. This module is for
+//! *why*, because the fix depends entirely on the shape of the failure:
+//!
+//! * If failed placements have **zero** free `(slot, room)` pairs in the final
+//!   state, the greedy ordering painted itself into a corner and the answer is
+//!   about ordering or backtracking.
+//! * If they have **some** free pairs, construction's first-fit scan should have
+//!   found them — so the failure is in *when* it looked, not whether space
+//!   exists, and LNS repair should be able to recover them.
+//! * Which axis does the blocking — room, group, lecturer, person, veto, day-mix
+//!   — decides whether the answer is more rooms, better group packing, or
+//!   something else entirely.
+//!
+//! Attribution works by exploiting the fact that [`Occupant::enforce`] is public:
+//! a probe with a single axis enabled isolates that axis exactly, using the same
+//! `is_free` the search uses. No parallel reimplementation of the rule, and
+//! nothing added to core for the sake of measurement.
+
+use calendry_solver_core::ids::PlacementIdx;
+use calendry_solver_core::problem::{Enforce, Problem};
+use calendry_solver_core::solution::{Occupant, SearchState, Solution};
+
+/// Enables exactly one axis on an [`Enforce`], isolating it for attribution.
+type AxisProbe = fn(&mut Enforce);
+
+/// Per-axis rejection counts for one unplaced placement.
+#[derive(Clone, Debug, Default)]
+pub struct Attribution {
+    pub candidates: u64,
+    /// Candidates that pass **every** check — space the placement could occupy
+    /// right now.
+    pub free: u64,
+    pub blocked_room: u64,
+    pub blocked_lecturer: u64,
+    pub blocked_group: u64,
+    pub blocked_person: u64,
+    pub blocked_veto: u64,
+    pub blocked_day_mix: u64,
+}
+
+/// Aggregate over the sampled unplaced placements.
+#[derive(Clone, Debug, Default)]
+pub struct ConstructionFailure {
+    pub sampled: usize,
+    pub total_unplaced: usize,
+    pub totals: Attribution,
+    /// How many sampled placements had at least one free `(slot, room)`.
+    pub with_free_space: usize,
+    /// Free-space histogram, bucketed: 0, 1-9, 10-99, 100-999, 1000+.
+    pub free_buckets: [usize; 5],
+    /// Free candidates as a fraction of the candidate space, for placements
+    /// that have any. Drives the sampling-hit-rate question.
+    pub min_free_ratio: f64,
+    pub median_free_ratio: f64,
+    /// Unplaced placements by Offering kind.
+    pub by_kind: Vec<(String, usize)>,
+    pub mean_eligible_rooms: f64,
+    /// Pairwise person-axis conflict density among Offerings of the dominant
+    /// unplaced kind, and what it implies for feasibility.
+    pub clique: Option<CliqueEvidence>,
+    /// Whether the sample came from unplaced placements or, when construction
+    /// succeeded, from placed ones.
+    pub pool_was_unplaced: bool,
+    /// Start slots examined across the sample.
+    pub slots_examined: u64,
+    /// Of those, slots rejected by a **room-independent** axis — lecturer,
+    /// group, person or veto. At such a slot `construct`'s inner room loop is
+    /// pure waste: it re-tests the same room-independent state once per eligible
+    /// Room and can never succeed.
+    pub slots_blocked_room_independent: u64,
+    /// Candidate probes that hoisting the room-independent checks out of the
+    /// room loop would avoid.
+    pub wasted_probes: u64,
+}
+
+/// Evidence that a set of Sessions is **mutually exclusive in time**.
+///
+/// Per-entity load metrics — group row, lecturer row, room tightness — cannot
+/// see this. Each individual is lightly loaded; what makes the set unplaceable
+/// is that its members pairwise share an attendee, so no two can ever share a
+/// slot no matter how light each one is.
+#[derive(Clone, Debug)]
+pub struct CliqueEvidence {
+    pub kind: String,
+    pub pairs_sampled: usize,
+    /// Fraction of sampled pairs sharing at least one attendee.
+    pub conflict_density: f64,
+    /// Sessions of this kind that must be placed.
+    pub sessions: u64,
+    /// Non-overlapping slots available for them, at this kind's duration.
+    pub capacity: u64,
+}
+
+fn single(axis: fn(&mut Enforce), base: Enforce) -> Enforce {
+    // Only probe axes the problem actually enforces for this kind: a disabled
+    // check can never be the reason a placement failed, and counting it would
+    // invent a cause.
+    let mut e = Enforce::default();
+    let mut probe = Enforce {
+        room: true,
+        lecturer: true,
+        group: true,
+        person: true,
+        lecturer_veto: true,
+        day_mix: true,
+    };
+    axis(&mut e);
+    axis(&mut probe);
+    Enforce {
+        room: e.room && base.room,
+        lecturer: e.lecturer && base.lecturer,
+        group: e.group && base.group,
+        person: e.person && base.person,
+        lecturer_veto: e.lecturer_veto && base.lecturer_veto,
+        day_mix: e.day_mix && base.day_mix,
+    }
+}
+
+/// Scan the whole candidate space of each unplaced placement and record which
+/// axis rejects each `(slot, room)`.
+///
+/// `limit` caps how many unplaced placements are examined — the full scan is
+/// `unplaced x starts x rooms x axes`, which is far too much at university
+/// scale.
+pub fn diagnose(
+    problem: &Problem,
+    solution: &Solution,
+    state: &SearchState,
+    limit: usize,
+) -> ConstructionFailure {
+    let unplaced: Vec<PlacementIdx> = problem
+        .placement_ids()
+        .filter(|&p| solution.get(p).is_none())
+        .collect();
+
+    let mut out = ConstructionFailure {
+        total_unplaced: unplaced.len(),
+        pool_was_unplaced: !unplaced.is_empty(),
+        ..Default::default()
+    };
+
+    // When construction succeeded there is no failure to explain, but the
+    // *scan cost* question is still open and is answered on placed placements:
+    // how much of first-fit's inner room loop was wasted on slots that a
+    // room-independent axis had already ruled out.
+    let pool: Vec<PlacementIdx> = if unplaced.is_empty() {
+        problem.placement_ids().collect()
+    } else {
+        unplaced.clone()
+    };
+    if pool.is_empty() {
+        return out;
+    }
+
+    // Even stride, so the sample spans the whole run of construction rather
+    // than only the placements it gave up on first.
+    let stride = (pool.len() / limit.max(1)).max(1);
+    let sample: Vec<PlacementIdx> = pool.iter().copied().step_by(stride).collect();
+
+    let axes: [AxisProbe; 6] = [
+        |e| e.room = true,
+        |e| e.lecturer = true,
+        |e| e.group = true,
+        |e| e.person = true,
+        |e| e.lecturer_veto = true,
+        |e| e.day_mix = true,
+    ];
+
+    let mut ratios: Vec<f64> = Vec::new();
+    let mut kinds: Vec<(String, usize)> = Vec::new();
+    let mut rooms_sum = 0u64;
+
+    for &p in &sample {
+        let offering = problem.offering_of(p);
+        let base = Occupant::of_offering(offering);
+        let enforce = offering.enforce;
+        let mut a = Attribution::default();
+        rooms_sum += offering.eligible_rooms.len() as u64;
+
+        match kinds.iter_mut().find(|(k, _)| *k == offering.kind) {
+            Some((_, n)) => *n += 1,
+            None => kinds.push((offering.kind.clone(), 1)),
+        }
+
+        let n_starts = problem.slots.start_count(offering.duration_blocks);
+        for i in 0..n_starts {
+            let start = problem
+                .slots
+                .nth_start(offering.duration_blocks, i)
+                .expect("index below start_count");
+            // One allocation per start slot rather than per candidate.
+            let Some(span) = problem.slots.span(start, offering.duration_blocks) else {
+                continue;
+            };
+
+            // Room-independent axes, tested ONCE for this slot. If they reject,
+            // every probe the room loop is about to make is wasted.
+            out.slots_examined += 1;
+            let mut ri = base.with_room(offering.eligible_rooms[0]);
+            ri.enforce = Enforce {
+                room: false,
+                day_mix: false,
+                ..enforce
+            };
+            if ri.enforce != Enforce::default() && !state.is_free(problem, &ri, &span) {
+                out.slots_blocked_room_independent += 1;
+                out.wasted_probes += offering.eligible_rooms.len() as u64;
+            }
+
+            for &room in &offering.eligible_rooms {
+                a.candidates += 1;
+                let candidate = base.with_room(room);
+                if state.is_free(problem, &candidate, &span) {
+                    a.free += 1;
+                    continue;
+                }
+                // Blocked — find every axis that would reject it on its own.
+                // Not "the first one": knowing a candidate is blocked by three
+                // axes at once is the difference between "free a room" and
+                // "nothing here will help".
+                for (n, axis) in axes.iter().enumerate() {
+                    let mut probe = candidate;
+                    probe.enforce = single(*axis, enforce);
+                    if probe.enforce == Enforce::default() {
+                        continue; // this axis is switched off for this kind
+                    }
+                    if !state.is_free(problem, &probe, &span) {
+                        match n {
+                            0 => a.blocked_room += 1,
+                            1 => a.blocked_lecturer += 1,
+                            2 => a.blocked_group += 1,
+                            3 => a.blocked_person += 1,
+                            4 => a.blocked_veto += 1,
+                            _ => a.blocked_day_mix += 1,
+                        }
+                    }
+                }
+            }
+        }
+
+        let bucket = match a.free {
+            0 => 0,
+            1..=9 => 1,
+            10..=99 => 2,
+            100..=999 => 3,
+            _ => 4,
+        };
+        out.free_buckets[bucket] += 1;
+        if a.free > 0 {
+            out.with_free_space += 1;
+            ratios.push(a.free as f64 / a.candidates.max(1) as f64);
+        }
+
+        out.totals.candidates += a.candidates;
+        out.totals.free += a.free;
+        out.totals.blocked_room += a.blocked_room;
+        out.totals.blocked_lecturer += a.blocked_lecturer;
+        out.totals.blocked_group += a.blocked_group;
+        out.totals.blocked_person += a.blocked_person;
+        out.totals.blocked_veto += a.blocked_veto;
+        out.totals.blocked_day_mix += a.blocked_day_mix;
+    }
+
+    // If one kind dominates the failures, ask whether that kind's Sessions can
+    // coexist at all.
+    if let Some((kind, _)) = kinds.iter().max_by_key(|(_, n)| *n) {
+        out.clique = Some(clique_evidence(problem, kind));
+    }
+
+    ratios.sort_by(f64::total_cmp);
+    out.sampled = sample.len();
+    out.min_free_ratio = ratios.first().copied().unwrap_or(0.0);
+    out.median_free_ratio = ratios.get(ratios.len() / 2).copied().unwrap_or(0.0);
+    kinds.sort_by_key(|k| std::cmp::Reverse(k.1));
+    out.by_kind = kinds;
+    out.mean_eligible_rooms = rooms_sum as f64 / sample.len().max(1) as f64;
+    out
+}
+
+/// Sample Offering pairs of one kind and ask how often they share an attendee.
+///
+/// Two Offerings sharing even one attendee can never occupy the same slot under
+/// `PersonDoubleBooking`. If that is true of *most* pairs, the whole kind forms a
+/// near-clique in the conflict graph, and its Sessions need one distinct slot
+/// each — a hard capacity bound that no search or ordering can get around.
+fn clique_evidence(problem: &Problem, kind: &str) -> CliqueEvidence {
+    let of_kind: Vec<usize> = problem
+        .offerings
+        .iter()
+        .enumerate()
+        .filter(|(_, o)| o.kind == kind)
+        .map(|(i, _)| i)
+        .collect();
+
+    // Deterministic stride-sampled pairs; enough to estimate a density without
+    // paying O(n^2) on thousands of Offerings.
+    let mut sampled = 0usize;
+    let mut conflicting = 0usize;
+    'outer: for (a_pos, &a) in of_kind.iter().enumerate() {
+        for &b in of_kind.iter().skip(a_pos + 1).step_by(7) {
+            let (x, y) = (&problem.offerings[a], &problem.offerings[b]);
+            // Attendee lists are sorted and deduplicated by `Problem::build`.
+            let shares = x
+                .attendees
+                .iter()
+                .any(|p| y.attendees.binary_search(p).is_ok());
+            sampled += 1;
+            if shares {
+                conflicting += 1;
+            }
+            if sampled >= 4000 {
+                break 'outer;
+            }
+        }
+    }
+
+    let sessions: u64 = problem
+        .placement_ids()
+        .filter(|&p| problem.offering_of(p).kind == kind)
+        .count() as u64;
+
+    // How many of this kind could be placed even in an empty grid, if every one
+    // of them conflicts with every other: one per non-overlapping slot.
+    let duration = of_kind
+        .first()
+        .map(|&i| problem.offerings[i].duration_blocks)
+        .unwrap_or(1)
+        .max(1);
+    let capacity = (problem.slots.len() as u64) / duration as u64;
+
+    CliqueEvidence {
+        kind: kind.to_string(),
+        pairs_sampled: sampled,
+        conflict_density: conflicting as f64 / sampled.max(1) as f64,
+        sessions,
+        capacity,
+    }
+}

@@ -287,6 +287,40 @@ max of N draws grows with N — measured saturation overshot the closed form by
 1.28x at school scale and 1.55x at university scale, so no single calibration
 held across the range. Class and seminar choice within a cohort stays random.
 
+#### A load metric CANNOT certify feasibility — the person-clique bound
+Group, lecturer and room load all ask *"how busy is one row"*. There is a whole
+class of infeasibility they structurally cannot see, and slice 5 shipped four
+presets that were **provably unplaceable** while every axis read "in band".
+
+Two Offerings sharing even one attendee can never occupy the same slot under
+`PersonDoubleBooking`. A set that **pairwise** conflicts therefore needs one
+distinct slot per Session. Every individual can be lightly loaded while the
+attendee *sets* pairwise intersect — that is a graph-colouring bound, not a load
+bound.
+
+So `InstanceStats` carries `person_clique_load`: a greedy maximum-clique lower
+bound over the Offering conflict graph, times its Sessions' block demand, over
+the term. **Above 1.0 is a certificate of infeasibility.** Greedy understates the
+true clique, so it can miss infeasibility but never invent it — below 1.0 is
+*not* a proof of feasibility. It is part of `saturation`, and
+`presets_are_calibrated_into_the_saturation_band` asserts it stays under 1.0.
+
+#### Electives are their own root-level Groups — never another Cohort's seminar
+The original model enrolled a student into a Seminar belonging to a *different*
+Cohort. That put them in the other Cohort's subtree, which made them an attendee
+of its entire cohort-wide lecture series. One shared student then made two
+Cohorts' lectures mutually exclusive, and with 30% cross-enrolment across 80
+cohorts **94.8% of lecture pairs conflicted** — 1,146 Sessions needing at most
+350 slots. Construction left 2,468 of 25,520 unplaced and no solver could have
+done better.
+
+Electives are now **root-level Groups with their own Offerings**, which is what
+an elective actually is. They stay tree-unrelated to the student's home Seminar,
+so `PersonDoubleBooking` still has work the Group check cannot do, without
+welding two Cohorts together. Elective groups are **Class-sized**: seminar-sized
+produced 360 groups at large-university whose Offerings added 56% to total
+demand — an elective programme larger than the core curriculum.
+
 ---
 
 ## 3. Non-negotiables checklist
@@ -370,7 +404,7 @@ breaks that correspondence.
 
 ```bash
 git clone --recurse-submodules …   # or: git submodule update --init --recursive
-cargo test --workspace             # 93 tests
+cargo test --workspace             # 96 tests
 cargo clippy --workspace --all-targets
 CALENDRY_SOLVER_ADDR=127.0.0.1:50051 cargo run -p calendry-solver
 
@@ -476,69 +510,53 @@ Remaining: the two scaling defects slice 5 measured (below), and the deferred v2
 minimize-movement lock policy.
 
 #### MEASURED — where a run's time actually goes
-Slice 5's harness (`cargo run --release -p calendry-solver-gen --bin bench`)
-established this with numbers, not inspection. **Construction dominates, and it
-is not close:**
+Numbers from `cargo run --release -p calendry-solver-gen --bin bench`, taken
+against **corrected** instances (slice 6a). The slice-5 figures were measured on
+infeasible instances and are superseded.
 
-| preset | construct | evaluate_hard | LNS loop |
-|---|---|---|---|
-| small-school | 40 ms (49%) | 1.2 ms (1%) | 41 ms (50%) |
-| large-school | 129 ms (74%) | 3.7 ms (2%) | 42 ms (24%) |
-| small-university | 834 ms (90%) | 23 ms (2%) | 71 ms (8%) |
-| large-university | **11.13 s (93%)** | 324 ms (3%) | 530 ms (4%) |
+All four presets now place **every** Session, and LNS runs properly at every
+scale:
 
-`construct` is first-fit: for each placement it scans `slots x eligible_rooms`
-until something is free. The cost is dominated by the placements that **fail** —
-each one scans the entire space and finds nothing. At large-university that is
-2,468 failures x ~87,000 probes. Any work on scaling starts here, not in LNS.
+| preset | placements | construct | evaluate_hard | LNS | iterations | improvements |
+|---|---|---|---|---|---|---|
+| small-school | 1,497 | 31 ms (44%) | 1.1 ms (2%) | 38 ms (54%) | 91 | 82 |
+| large-school | 3,167 | 108 ms (70%) | 5.8 ms (4%) | 40 ms (26%) | 84 | 76 |
+| small-university | 6,760 | 560 ms (81%) | 46 ms (7%) | 83 ms (12%) | 89 | 77 |
+| large-university | 27,136 | **7.12 s (91%)** | 625 ms (8%) | 47 ms (1%) | 80 | 67 |
 
-Two further causes, both real but far smaller than the table above suggests at
-first glance:
+**Construction is the scaling problem, and it is the only one left.** First-fit
+scans `slots x eligible_rooms` per placement, and the per-candidate cost is
+constant across a 15x range of candidate-space size — 3.67 / 3.24 / 3.18 / 3.11
+ns — which is the signature of scanning essentially the whole space every time.
 
-**H1 — repair materialized a cross product it threw away. FIXED in slice 5.**
-`repair_one` used to build every `(slot, room)` pair into a `Vec<Move>` and then
-sample down to `MAX_CANDIDATES = 512`. Enumeration's measured share of repair
-cost was 25% / 35% / 46% / **65%** across the four presets.
+`evaluate_hard` is now second at 8%; it is the end-of-run violation report, once
+per run.
 
-It now addresses the space **by index** via `SlotTable::start_count` /
-`nth_start`, running partial Fisher-Yates over a *virtual* array and recording
-only the positions the shuffle disturbs. The RNG is consumed in the identical
-sequence and index `i` maps to the same candidate, so **output is byte-identical
-for the same seed** — verified by re-running all four presets and matching every
-objective, iteration and acceptance count exactly.
+**H2 is gone, at every preset size.** It was a symptom of infeasibility, not an
+independent defect: with 0 unplaced there is nothing to retry, and LNS completes
+80-91 iterations everywhere. **H1 is fixed but was never the lever** — repair
+sits inside a 1% slice at large-university, so its 148x enumeration waste was
+worth well under 1% of wall time.
 
-Worth being precise about the payoff: repair is ~1.7% of a large-university run,
-so removing 65% of it is worth well under 1% of wall time. **H1's fix does not
-unblock university scale and was never going to.** It removes waste that would
-otherwise have grown with the grid.
+#### 60% of construction's inner loop is provably wasted
+Measured by the `--diagnose` mode, consistently across all four presets:
 
-**H2 — every unplaced placement is retried every iteration.** The slice-4 fix
-that made `ruin` retry unplaced placements is load-bearing for correctness
-(without it the `unplaced` term is unoptimizable) and free when construction
-succeeds. When it does not:
+| preset | start slots rejected by a room-INDEPENDENT axis | probes wasted |
+|---|---|---|
+| small-school | 58.9% | 58.4% |
+| large-school | 59.0% | 58.4% |
+| small-university | 62.7% | 61.9% |
+| large-university | 60.2% | 59.7% |
 
-| preset | unplaced after construct | iterations in 200k moves | improvements |
-|---|---|---|---|
-| small-school | 0 | 87 | 58 |
-| large-school | 0 | 90 | 58 |
-| small-university | 834 | **1** | 1 |
-| large-university | 2,468 | **1** | 0 |
+Of the six axes only **room occupancy** and **day-mix** (via virtual-vs-physical)
+depend on which Room is being tried. Lecturer, group, person and veto do not —
+yet `construct` re-tests them once per eligible Room at every slot. At a slot
+already rejected by one of them, the entire room loop cannot succeed.
 
-The harm is **move-budget exhaustion, not time**: one large-university iteration
-scores 2,476 x 512 = 1.27M candidates, so a 200k move budget cannot complete even
-one iteration. LNS therefore never runs — large-university accepted zero moves
-and recorded no improvement. That is a budget-accounting problem, unrelated to
-H1's enumeration waste.
-
-Fixing H2 is not local. Capping the retry list must preserve "every unplaced
-placement is *eventually* retried" or it reintroduces the slice-4 defect — and
-given that construction is 93% of the run and produces the unplaced tail in the
-first place, the retry cap may be treating the symptom.
-
-**The drift assertion does NOT need sampling.** Measured debug-vs-`debug-assertions=off`:
-31% of solve time at small-school, 23% at large-school, 12% at small-university.
-Its share *falls* as instances grow, because enumeration outgrows it. It is
-linear in placements, not a blow-up.
+The waste is worse than the probe count suggests: the room check is one bit test
+and exits early, while the room-*independent* path scans the attendee list (mean
+65, max ~300). So the expensive scan currently runs once per *free* Room per
+slot instead of once per slot.
 
 #### FIXED — locked Sessions used to be double-counted
 Found by slice 5, fixed standalone straight after it. `Session.offering_id`
@@ -566,13 +584,27 @@ so `Occupancy::from_fixed`, `SearchState::from_fixed` and `collect_views` were
 untouched, and there was **no schema change** — the field already existed on the
 wire.
 
-**Known limitation, deliberately left:** `exact_frequency` uses "has placement
-variables" as its proxy for "in scope". Deducting locks is the first thing that
-can drive an in-scope Offering's placement count to zero, so an **over-supplied**
-Offering (4 locked against 2 required) now reports nothing rather than a
-mismatch. Reporting it means carrying real scope membership into `Problem`, which
-is a semantic change to core rather than a fix at the conversion boundary. A test
-asserts the current behaviour so that changing it has to be deliberate.
+It left one gap open, tracked immediately below.
+
+#### KNOWN GAP — over-supplied Offerings report no violation
+**Over-supplied Offerings — locked Sessions exceeding `required_session_count` —
+currently report no violation.** An Offering requiring 2 with 4 locked Sessions
+against it passes silently.
+
+The cause is that `constraints::exact_frequency` uses **placement-variable
+presence as its proxy for "in scope"**, and the locks-deduction added by the fix
+above can now drive that count to zero. An over-supplied Offering therefore looks
+identical to an out-of-scope one, and is skipped.
+
+**Fixing it requires carrying real scope membership into `Problem` — a core
+semantic change, not a boundary fix.** That is why it was not bundled into the
+double-counting fix, which stayed entirely at the conversion layer.
+
+What *is* guaranteed: the deduction uses `saturating_sub`, so over-supply yields
+zero placements rather than a `u32` underflow. A test in `convert.rs`
+(`more_locks_than_required_saturates_instead_of_underflowing`) asserts today's
+behaviour, so changing it has to be deliberate — but the decision lives here, not
+only in that test's comments.
 
 #### BREAKING CHANGE for the Nuxt integration: `GetStatus.best_objective`
 Through slices 1-2 this field carried the **hard-violation count**. Since slice 3

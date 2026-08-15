@@ -25,6 +25,7 @@ use crate::params::InstanceParams;
 const KIND_LECTURE: &str = "lecture";
 const KIND_SEMINAR: &str = "seminar";
 const KIND_LAB: &str = "lab";
+const KIND_ELECTIVE: &str = "elective";
 
 /// Tenant-defined equipment vocabulary.
 const FEATURES: [&str; 2] = ["projector", "lab_bench"];
@@ -58,7 +59,18 @@ pub struct InstanceStats {
     /// in its conflict closure, over the length of the term.
     pub max_group_load: f64,
     pub max_lecturer_load: f64,
-    /// The binding axis — `max` of the three above. This, not room tightness,
+    /// Demand of a **mutually-conflicting set** of Offerings, over the term.
+    ///
+    /// A load metric cannot see this class of infeasibility, and one silently
+    /// certified impossible instances as "in band" before slice 6a. Group,
+    /// lecturer and room load each ask "how busy is one row"; here every row is
+    /// lightly loaded and the failure is that the attendee *sets pairwise
+    /// intersect*, so no two members can ever share a slot. That is a
+    /// graph-colouring bound, not a load bound. Above 1.0 the instance is
+    /// **provably** unplaceable.
+    pub person_clique_load: f64,
+    pub person_clique_size: usize,
+    /// The binding axis — `max` of everything above. This, not room tightness,
     /// is what decides whether an instance is hard-but-feasible.
     pub saturation: f64,
     pub predicted_saturation: f64,
@@ -280,6 +292,14 @@ fn seminar_idx(params: &InstanceParams, c: u32, k: u32, s: u32) -> u32 {
         + s
 }
 
+/// Elective groups occupy the indices after every Seminar.
+fn elective_idx(params: &InstanceParams, e: u32) -> u32 {
+    params.cohorts
+        + params.cohorts * params.classes_per_cohort
+        + params.seminar_count()
+        + e
+}
+
 fn build_groups(params: &InstanceParams) -> Vec<Group> {
     let sizes = group_sizes(params);
     let mut groups = Vec::with_capacity(params.group_count() as usize);
@@ -314,6 +334,22 @@ fn build_groups(params: &InstanceParams) -> Vec<Group> {
             }
         }
     }
+
+    // Elective groups are ROOTS. Parenting them under a Cohort would put every
+    // enrolled student into that Cohort's subtree, making them an attendee of
+    // its cohort-wide lectures — which is exactly what made these instances
+    // infeasible before. As roots they stay tree-unrelated to the student's home
+    // Seminar, so PersonDoubleBooking still has real work to do, without
+    // welding two Cohorts' lecture series together.
+    for e in 0..params.elective_groups() {
+        groups.push(Group {
+            id: format!("elective-{e}"),
+            parent: None,
+            name: format!("Elective {e}"),
+            size: sizes.class,
+        });
+    }
+
     groups
 }
 
@@ -346,22 +382,21 @@ fn build_persons(params: &InstanceParams, rng: &mut Rng) -> Vec<Person> {
                     let home = GroupIdx(seminar_idx(params, c, k, s));
                     let mut groups = vec![home];
 
-                    // An elective places the student in a seminar under a
-                    // DIFFERENT cohort, so the two groups are guaranteed
-                    // unrelated in the nesting tree — neither an ancestor nor a
-                    // descendant of the other. That is the only configuration
+                    // An elective adds a ROOT-level group, unrelated to the
+                    // home Seminar in the nesting tree — neither an ancestor
+                    // nor a descendant. That is the only configuration
                     // PersonDoubleBooking catches and GroupDoubleBooking
-                    // structurally cannot.
-                    if params.cohorts > 1
+                    // structurally cannot, so the type still earns its keep.
+                    //
+                    // Crucially it does NOT enrol the student in another
+                    // Cohort's subtree, which would make them an attendee of
+                    // that Cohort's lectures too.
+                    let n_elective = params.elective_groups();
+                    if n_elective > 0
                         && (rng.next_u64() % 1000) < (params.elective_ratio * 1000.0) as u64
                     {
-                        let other_c = {
-                            let offset = 1 + rng.below((params.cohorts - 1) as usize) as u32;
-                            (c + offset) % params.cohorts
-                        };
-                        let other_k = rng.below(params.classes_per_cohort as usize) as u32;
-                        let other_s = rng.below(params.seminars_per_class as usize) as u32;
-                        groups.push(GroupIdx(seminar_idx(params, other_c, other_k, other_s)));
+                        let e = rng.below(n_elective as usize) as u32;
+                        groups.push(GroupIdx(elective_idx(params, e)));
                     }
 
                     persons.push(Person {
@@ -465,6 +500,56 @@ fn build_offerings(
 
         for n in 0..params.sessions_per_offering {
             occurrences.push(Occurrence { offering: i, index: n });
+        }
+    }
+
+    // Elective Offerings, attached to the root-level elective groups.
+    //
+    // These are what an elective actually is: its own teaching, with its own
+    // cohort of students drawn from across the institution. They conflict with
+    // their attendees' home Sessions — which is real, and is what
+    // PersonDoubleBooking exists for — but they do not couple two Cohorts'
+    // lecture series to each other.
+    let n_elective = params.elective_groups();
+    for e in 0..n_elective {
+        for j in 0..params.elective_offerings_per_group {
+            let i = specs.len() as u32;
+            let group = elective_idx(params, e);
+
+            let required_feature =
+                if (rng.next_u64() % 1000) < (params.feature_demand_ratio * 1000.0) as u64 {
+                    Some(FEATURES[rng.below(FEATURES.len())])
+                } else {
+                    None
+                };
+            let eligible_rooms: Vec<RoomIdx> = rooms
+                .iter()
+                .enumerate()
+                .filter(|(_, r)| r.capacity >= sizes.class)
+                .filter(|(_, r)| {
+                    required_feature.is_none_or(|f| r.features.iter().any(|rf| rf == f))
+                })
+                .map(|(n, _)| RoomIdx(n as u32))
+                .collect();
+
+            let span = params.duration_blocks.1 - params.duration_blocks.0 + 1;
+            let duration = params.duration_blocks.0 + rng.below(span as usize) as u32;
+            let lecturer = PersonIdx(i % params.lecturers);
+
+            specs.push(OfferingSpec {
+                id: format!("elective-offering-{e}-{j}"),
+                kind: KIND_ELECTIVE.to_string(),
+                required_session_count: params.sessions_per_offering,
+                duration_blocks: duration,
+                lecturers: vec![lecturer],
+                groups: vec![GroupIdx(group)],
+                participants: vec![],
+                eligible_rooms,
+            });
+
+            for n in 0..params.sessions_per_offering {
+                occurrences.push(Occurrence { offering: i, index: n });
+            }
         }
     }
 
@@ -636,7 +721,12 @@ fn build_constraints(params: &InstanceParams, slots: &SlotTable) -> ConstraintSe
         lecturer_veto: vec![all("c-veto")],
         online_onsite_same_day: vec![ConstraintInstance {
             id: "c-day-mix".into(),
-            kinds: vec![KIND_LECTURE.into(), KIND_SEMINAR.into(), KIND_LAB.into()],
+            kinds: vec![
+                KIND_LECTURE.into(),
+                KIND_SEMINAR.into(),
+                KIND_LAB.into(),
+                KIND_ELECTIVE.into(),
+            ],
         }],
         max_online_share: params
             .max_online_share
@@ -700,7 +790,14 @@ fn measure(params: &InstanceParams, problem: &Problem) -> InstanceStats {
         group_blocks.iter().copied().max().unwrap_or(0) as f64 / slots_f;
     let max_lecturer_load =
         lecturer_blocks.iter().copied().max().unwrap_or(0) as f64 / slots_f;
-    let saturation = room_tightness.max(max_group_load).max(max_lecturer_load);
+
+    let (person_clique_size, clique_blocks) = person_clique(problem);
+    let person_clique_load = clique_blocks as f64 / slots_f;
+
+    let saturation = room_tightness
+        .max(max_group_load)
+        .max(max_lecturer_load)
+        .max(person_clique_load);
 
     let n_off = problem.offerings.len().max(1) as f64;
     let eligible: Vec<usize> = problem.offerings.iter().map(|o| o.eligible_rooms.len()).collect();
@@ -722,6 +819,8 @@ fn measure(params: &InstanceParams, problem: &Problem) -> InstanceStats {
         room_tightness,
         max_group_load,
         max_lecturer_load,
+        person_clique_load,
+        person_clique_size,
         saturation,
         predicted_saturation: params.predicted_saturation(),
 
@@ -732,4 +831,77 @@ fn measure(params: &InstanceParams, problem: &Problem) -> InstanceStats {
 
         mean_candidates: n_slots as f64 * mean_eligible,
     }
+}
+
+/// A greedy lower bound on the largest set of Offerings that pairwise share an
+/// attendee, and the block-demand of every Session realizing them.
+///
+/// # Why a clique and not a load figure
+///
+/// Two Offerings sharing even one attendee can never occupy the same slot under
+/// `PersonDoubleBooking`. A set that pairwise conflicts therefore needs one
+/// distinct slot per Session, so `sum(sessions x duration)` over that set must
+/// fit inside the term. If it does not, the instance is **provably** unplaceable
+/// — no ordering, no backtracking, no metaheuristic.
+///
+/// No per-entity load metric can detect this: every individual can be lightly
+/// loaded while the sets still pairwise intersect.
+///
+/// Greedy gives a *lower* bound on the maximum clique, so this can understate
+/// infeasibility but never invent it — a reported value above 1.0 is a genuine
+/// certificate, and a value below 1.0 is not a proof of feasibility.
+pub fn person_clique(problem: &Problem) -> (usize, u64) {
+    // Sessions realizing each Offering: placements plus locked Sessions.
+    let mut sessions = vec![0u64; problem.offerings.len()];
+    for p in problem.placement_ids() {
+        sessions[problem.placement(p).offering.get()] += 1;
+    }
+    for f in &problem.fixed {
+        if let Some(o) = f.offering {
+            sessions[o.get()] += 1;
+        }
+    }
+
+    // Biggest attendee sets first: they are the ones that conflict widely, and
+    // a greedy clique grown from them is the tightest bound for the effort.
+    // Capped so this stays O(cap x clique x intersect) rather than O(n^2).
+    const CANDIDATE_CAP: usize = 400;
+    let mut order: Vec<usize> = (0..problem.offerings.len()).collect();
+    order.sort_by_key(|&i| {
+        (
+            std::cmp::Reverse(problem.offerings[i].attendees.len()),
+            i, // deterministic tie-break
+        )
+    });
+    order.truncate(CANDIDATE_CAP);
+
+    let shares = |a: usize, b: usize| {
+        let (x, y) = (&problem.offerings[a], &problem.offerings[b]);
+        // `Problem::build` leaves attendee lists sorted and deduplicated.
+        let (small, large) = if x.attendees.len() <= y.attendees.len() {
+            (x, y)
+        } else {
+            (y, x)
+        };
+        small
+            .attendees
+            .iter()
+            .any(|p| large.attendees.binary_search(p).is_ok())
+    };
+
+    let mut clique: Vec<usize> = Vec::new();
+    for &i in &order {
+        if problem.offerings[i].attendees.is_empty() {
+            continue;
+        }
+        if clique.iter().all(|&j| shares(i, j)) {
+            clique.push(i);
+        }
+    }
+
+    let blocks = clique
+        .iter()
+        .map(|&i| sessions[i] * problem.offerings[i].duration_blocks as u64)
+        .sum();
+    (clique.len(), blocks)
 }
