@@ -24,8 +24,24 @@ use crate::slots::{SlotFlags, SlotTable, WeekKind};
 /// interpreter: tenant-supplied logic never executes.
 #[derive(Clone, Debug, PartialEq)]
 pub enum SoftParams {
+    /// DEPRECATED on the wire, superseded by `MinimizeBlockUsage { first: true }`.
+    /// Kept because a peer on the old schema can still send it.
     MinimizeFirstBlock,
+    /// DEPRECATED on the wire, superseded by `MinimizeBlockUsage { last: true }`.
     MinimizeLastBlock,
+    /// Penalize the listed block positions. Does for the BLOCK axis what
+    /// `MinimizeDayUsage` did for the day axis.
+    ///
+    /// `blocks` are ABSOLUTE 0-based indices; `first`/`last` are RELATIVE and
+    /// track `blocks_per_day`. Both exist because they mean different things: a
+    /// grid that grows from 6 blocks to 8 leaves "avoid index 5" pointing at
+    /// mid-afternoon, while `last` still means the last block. Absolute indices
+    /// alone would lose an intent the deprecated variants could express.
+    ///
+    /// An index at or beyond `blocks_per_day` simply never matches — inert
+    /// rather than an error, because the app lets a grid shrink under its own
+    /// configuration and a stale index must not fail a whole run.
+    MinimizeBlockUsage { blocks: Vec<u32>, first: bool, last: bool },
     /// Penalize the listed ISO weekdays (1 = Monday). Generalizes the
     /// prototype's hardcoded "minimize Saturday": with tenant-configured
     /// `active_days`, Saturday is not structurally special.
@@ -42,6 +58,7 @@ impl SoftParams {
         match self {
             SoftParams::MinimizeFirstBlock => "MinimizeFirstBlock",
             SoftParams::MinimizeLastBlock => "MinimizeLastBlock",
+            SoftParams::MinimizeBlockUsage { .. } => "MinimizeBlockUsage",
             SoftParams::MinimizeDayUsage { .. } => "MinimizeDayUsage",
             SoftParams::MinimizeRoomRank { .. } => "MinimizeRoomRank",
             SoftParams::MinimizeExamWeek => "MinimizeExamWeek",
@@ -56,6 +73,11 @@ impl SoftParams {
         match self {
             SoftParams::MinimizeFirstBlock => f.is_first_block,
             SoftParams::MinimizeLastBlock => f.is_last_block,
+            SoftParams::MinimizeBlockUsage { blocks, first, last } => {
+                (*first && f.is_first_block)
+                    || (*last && f.is_last_block)
+                    || blocks.contains(&f.block)
+            }
             SoftParams::MinimizeDayUsage { days } => days.contains(&f.iso_weekday),
             SoftParams::MinimizeRoomRank { rank_threshold } => room.rank >= *rank_threshold,
             SoftParams::MinimizeExamWeek => f.week_kind == WeekKind::Exam,
@@ -267,6 +289,74 @@ mod tests {
             ],
         )
         .unwrap()
+    }
+
+    #[test]
+    fn block_usage_selects_by_index_and_by_relative_position() {
+        // 3 blocks/day, so index 0 is first and index 2 is last.
+        let g = grid();
+        let plain = room_at(1, false);
+        let at = |b: u32| g.flags(g.resolve(0, 1, b).unwrap());
+
+        // Absolute index, and nothing else.
+        let middle = SoftParams::MinimizeBlockUsage { blocks: vec![1], first: false, last: false };
+        assert!(!middle.applies(at(0), &plain));
+        assert!(middle.applies(at(1), &plain));
+        assert!(!middle.applies(at(2), &plain));
+
+        // Relative flags, with no indices at all.
+        let ends = SoftParams::MinimizeBlockUsage { blocks: vec![], first: true, last: true };
+        assert!(ends.applies(at(0), &plain));
+        assert!(!ends.applies(at(1), &plain));
+        assert!(ends.applies(at(2), &plain));
+
+        // The two compose rather than override each other.
+        let both = SoftParams::MinimizeBlockUsage { blocks: vec![1], first: true, last: false };
+        assert!(both.applies(at(0), &plain));
+        assert!(both.applies(at(1), &plain));
+        assert!(!both.applies(at(2), &plain));
+    }
+
+    #[test]
+    fn block_usage_reproduces_the_two_deprecated_variants() {
+        // The supersession claim, asserted rather than assumed: anything the old
+        // messages could express, the new one expresses identically. If this
+        // drifts, senders migrating off MinimizeFirstBlock/MinimizeLastBlock get
+        // a different timetable for what they were told is the same rule.
+        let g = grid();
+        let plain = room_at(1, false);
+
+        for b in 0..3 {
+            let f = g.flags(g.resolve(0, 1, b).unwrap());
+
+            assert_eq!(
+                SoftParams::MinimizeFirstBlock.applies(f, &plain),
+                SoftParams::MinimizeBlockUsage { blocks: vec![], first: true, last: false }
+                    .applies(f, &plain),
+                "first-block parity at block {b}"
+            );
+            assert_eq!(
+                SoftParams::MinimizeLastBlock.applies(f, &plain),
+                SoftParams::MinimizeBlockUsage { blocks: vec![], first: false, last: true }
+                    .applies(f, &plain),
+                "last-block parity at block {b}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_block_index_past_the_end_of_the_day_is_inert() {
+        // The grid has 3 blocks; index 9 is what a rule looks like after the
+        // tenant shrank the day under it. Inert, never a panic and never a
+        // match — the solver tolerates input the app's warn-and-allow UX can
+        // produce.
+        let g = grid();
+        let plain = room_at(1, false);
+        let stale = SoftParams::MinimizeBlockUsage { blocks: vec![9], first: false, last: false };
+
+        for b in 0..3 {
+            assert!(!stale.applies(g.flags(g.resolve(0, 1, b).unwrap()), &plain));
+        }
     }
 
     #[test]

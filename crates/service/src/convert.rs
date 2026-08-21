@@ -543,13 +543,48 @@ fn build_constraints(input: &pb::SolverInput) -> Result<ConstraintSet, Status> {
                 });
             }
 
-            // The six soft types. Weight is meaningful only here — hard types
-            // ignore it, because hard-vs-soft is a property of the TYPE.
+            // The soft types. Weight is meaningful only here — hard types ignore
+            // it, because hard-vs-soft is a property of the TYPE.
+            //
+            // The two block variants below are DEPRECATED on the wire and must
+            // still be accepted: deprecation removes them from what senders
+            // should emit, not from what a peer on the old schema may already be
+            // sending. Refusing them would turn a schema upgrade on one side
+            // into a rejected run on the other.
+            #[allow(deprecated)]
             Some(Params::MinimizeFirstBlock(_)) => {
                 set.soft.push(soft_instance(c, SoftParams::MinimizeFirstBlock)?)
             }
+            #[allow(deprecated)]
             Some(Params::MinimizeLastBlock(_)) => {
                 set.soft.push(soft_instance(c, SoftParams::MinimizeLastBlock)?)
+            }
+            Some(Params::MinimizeBlockUsage(p)) => {
+                // Deliberately NOT validated against blocks_per_day. A grid may
+                // shrink under a constraint that named a higher index, and this
+                // repo's rule is that the solver tolerates input the app's
+                // warn-and-allow UX can produce; a stale index is inert in
+                // `applies`, not a rejected run.
+                //
+                // A rule that selects nothing at all IS rejected, because it can
+                // only be a configuration mistake: it carries a weight, costs
+                // scoring time, and can never fire.
+                if p.blocks.is_empty() && !p.first && !p.last {
+                    return Err(Status::invalid_argument(format!(
+                        "constraint '{}': MinimizeBlockUsage selects no blocks — \
+                         set at least one index, or `first`/`last`",
+                        c.id
+                    )));
+                }
+
+                set.soft.push(soft_instance(
+                    c,
+                    SoftParams::MinimizeBlockUsage {
+                        blocks: p.blocks.clone(),
+                        first: p.first,
+                        last: p.last,
+                    },
+                )?)
             }
             Some(Params::MinimizeDayUsage(p)) => {
                 for d in &p.days {
