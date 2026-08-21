@@ -8,10 +8,12 @@
 //! demonstrates the clash is real before showing the person check catches it.
 
 use calendry_solver_core::constraints::{
-    GROUP_DOUBLE_BOOKING, LECTURER_DOUBLE_BOOKING, PERSON_DOUBLE_BOOKING, evaluate_hard,
+    GROUP_DOUBLE_BOOKING, LECTURER_DOUBLE_BOOKING, PERSON_DOUBLE_BOOKING, ROOM_DOUBLE_BOOKING,
+    evaluate_hard,
 };
 use calendry_solver_core::ids::PlacementIdx;
 use calendry_solver_core::search::{Budget, NeverHalt, solve};
+use calendry_solver_core::solution::Solution;
 use calendry_solver_core::{Problem, SolveOutcome, testing};
 
 const SEED: u64 = 0xC0FFEE;
@@ -228,6 +230,72 @@ fn person_double_booking_separates_the_two_sessions() {
 }
 
 // ---------------------------------------------------------------------------
+// Test 5 — a virtual Room is not an exclusive resource
+// ---------------------------------------------------------------------------
+//
+// Online delivery is modeled AS a Room so that room-assignment logic stays
+// uniform (see the proto), not to make concurrency scarce. There is one virtual
+// room per delivery mode, so treating it as capacity-1 caps ALL online teaching
+// at a single Session per slot, institution-wide.
+//
+// Both LAYERS are covered, on the same pair of instances, because they are
+// separate code paths that must agree: `Occupancy` decides what the search may
+// place, `check_pair` decides what gets reported. If they drift, the solver
+// refuses placements it then declines to report, or the reverse — and either
+// direction is caught below.
+//
+// Each virtual case is paired with the identical physical instance. Asserting
+// only that virtual rooms permit concurrency would pass just as well against a
+// build where room checking was broken outright.
+
+#[test]
+fn the_search_packs_a_virtual_room_but_not_a_physical_one() {
+    // Physical: the room is exclusive, so only one of the two can be placed.
+    let physical = run(&testing::two_sessions_one_room(false));
+    assert_eq!(
+        physical.solution.placed_count(),
+        1,
+        "one physical room, one slot — the second Session has nowhere to go"
+    );
+
+    // Virtual: both fit, in the same room, in the same slot.
+    let virt = run(&testing::two_sessions_one_room(true));
+    assert_eq!(
+        virt.solution.placed_count(),
+        2,
+        "a virtual room hosts unlimited concurrent Sessions"
+    );
+    assert!(
+        virt.hard_violations.is_empty(),
+        "two streamed Sessions at one hour are not a clash, got {:?}",
+        virt.hard_violations
+    );
+
+    let a = virt.solution.get(PlacementIdx(0)).unwrap();
+    let b = virt.solution.get(PlacementIdx(1)).unwrap();
+    assert_eq!((a.room, a.start), (b.room, b.start), "same room, same slot");
+}
+
+#[test]
+fn a_shared_room_is_reported_only_when_the_room_is_exclusive() {
+    // The search can never create a room clash, so both Sessions are pinned by
+    // the caller — the "warn and allow" path that makes reporting reachable.
+    let physical = testing::two_fixed_sessions_one_room(false);
+    let reported = evaluate_hard(&physical, &Solution::empty(&physical));
+    assert!(
+        reported.iter().any(|v| v.constraint_type == ROOM_DOUBLE_BOOKING),
+        "two pinned Sessions in one physical room must be reported, got {reported:?}"
+    );
+
+    let virt = testing::two_fixed_sessions_one_room(true);
+    let quiet = evaluate_hard(&virt, &Solution::empty(&virt));
+    assert!(
+        !quiet.iter().any(|v| v.constraint_type == ROOM_DOUBLE_BOOKING),
+        "the same pair in a virtual room is not a double booking, got {quiet:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Determinism, carried forward
 // ---------------------------------------------------------------------------
 
@@ -238,6 +306,8 @@ fn slice2_fixtures_are_deterministic() {
         testing::deep_chain(),
         testing::lecturer_clash(),
         testing::cross_tree_person(testing::all_constraints()),
+        testing::two_sessions_one_room(true),
+        testing::two_sessions_one_room(false),
     ] {
         let a = run(&problem);
         let b = run(&problem);

@@ -24,6 +24,32 @@ pub struct Room {
     pub federation_owned: bool,
 }
 
+impl Room {
+    /// Whether this Room can host only ONE Session per slot.
+    ///
+    /// True for a physical room, where two Sessions in the same place at the
+    /// same time is the definition of a double booking. False for a virtual
+    /// one: online delivery is modeled AS a Room so that room-assignment logic
+    /// stays uniform, not to make concurrency a scarce resource. Two lectures
+    /// streaming at the same hour are not a clash, and there is exactly one
+    /// virtual room per delivery mode — so treating it as exclusive caps ALL
+    /// online teaching at one Session per slot, institution-wide.
+    ///
+    /// This is the single definition of that policy. `Occupancy` decides
+    /// whether to claim a room's slot bit through it, and `constraints::
+    /// check_pair` decides whether to report a shared room through it, so the
+    /// search and the report cannot disagree about which rooms are exclusive.
+    ///
+    /// Note what this is NOT: a virtual room with a genuine concurrency limit
+    /// (a single meeting licence, say) cannot be expressed today at all —
+    /// `capacity` means seats, and it still gates ELIGIBILITY in `convert`.
+    /// Expressing a real cap needs its own field, not an overload of this flag.
+    #[inline]
+    pub fn is_exclusive(&self) -> bool {
+        !self.is_virtual
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Group {
     pub id: String,

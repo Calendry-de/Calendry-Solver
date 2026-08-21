@@ -157,6 +157,26 @@ Nuxt **polls `GetStatus`** and persists progress into its own `solver_run` table
 **This repo does not persist run state beyond an in-progress run's lifetime** —
 no database, no on-disk run journal. Run state dies with the process.
 
+#### KNOWN GAP — the run registry grows without bound
+`runs.rs` keeps every run in an in-memory `HashMap` with **no TTL and no
+eviction**, so every run ever started stays resident until the process restarts.
+Not urgent at current volumes, but it is an unbounded growth path in a
+long-running service.
+
+Recorded here at the Nuxt side's request: the app had been carrying this note in
+its own CLAUDE.md, which meant the one repo that can fix it was the one repo that
+did not know about it.
+
+Two consequences the app already depends on, so changing the registry means
+changing them together:
+- the app captures a run's result **the moment it goes terminal** rather than
+  when someone asks to apply it, because "I'll fetch it later" is a promise a
+  restart breaks;
+- the app treats `NOT_FOUND` as **terminal and unrecoverable** (the solver
+  restarted and lost the run) while `UNAVAILABLE` is transient and leaves its row
+  untouched. An eviction policy would make `NOT_FOUND` mean two different things,
+  and the app cannot tell them apart.
+
 ### Termination
 **Both** a time budget **and** an iteration/move-count budget; **whichever hits
 first** ends the run. Both configurable **per request**.
@@ -281,6 +301,17 @@ saturation = max( demand / (rooms x slots),         // room
 Target band 0.55..=0.75. At realistic hierarchies the group axis binds in every
 preset and room tightness sits at 0.24–0.38 — that is correct, not a defect.
 
+**`rooms()` counts virtual rooms, and that overstates exclusive capacity.** The
+room axis divides by `physical_rooms + virtual_rooms`, which was right while
+every room was capacity-1 and is wrong now that virtual rooms host unlimited
+concurrent Sessions — they belong in neither the numerator nor the denominator of
+a *contention* measure. At large-university that is 10 of 140 rooms, so the room
+axis reads about **7% slacker than it should**. It has not been changed, because
+the group axis binds in every preset and the room axis is not what calibration
+turns on; recalibrating presets on the back of it would move every benchmark
+number for no measured gain. Worth correcting if the room axis ever becomes the
+binding one.
+
 Cohorts are assigned **round-robin, not at random**. Because the cohort row
 binds, random assignment lets the *busiest* cohort decide feasibility, and the
 max of N draws grows with N — measured saturation overshot the closed form by
@@ -404,7 +435,7 @@ breaks that correspondence.
 
 ```bash
 git clone --recurse-submodules …   # or: git submodule update --init --recursive
-cargo test --workspace             # 96 tests
+cargo test --workspace             # 98 tests
 cargo clippy --workspace --all-targets
 CALENDRY_SOLVER_ADDR=127.0.0.1:50051 cargo run -p calendry-solver
 
@@ -598,6 +629,99 @@ independent defect: with 0 unplaced there is nothing to retry, and LNS completes
 80-91 iterations everywhere. **H1 is fixed but was never the lever** — repair
 sits inside a 1% slice at large-university, so its 148x enumeration waste was
 worth well under 1% of wall time.
+
+#### FIXED — a virtual Room was treated as an exclusive resource
+
+Found by a targeted audit from the Nuxt side, not by a failing test — nothing
+here exercised concurrent online delivery, so it had been silently capping it
+since slice 1.
+
+`Occupancy.room` is a `BitMatrix` over (rooms x slots): binary, with no capacity
+dimension. Neither `is_free` nor the `RoomDoubleBooking` branch of `check_pair`
+consulted `is_virtual`, so once any Session occupied the virtual room at slot S,
+**no other Session could be placed there during construction OR LNS** — one
+online Session per slot, institution-wide. That constrained the SEARCH, not just
+the report, which makes it worse than the app-side equivalent (fixed there
+first): it changed the placements produced, not merely how they were described.
+
+That this was an oversight rather than a stance: `is_virtual` was already
+consulted by `MinimizeOnline` (`soft.rs`), the `allow_online` gate (`convert.rs`)
+and `SearchState::is_online`. The proto states the intent outright — *"Online
+delivery is modeled as a virtual Room rather than a boolean flag on the Session,
+so room-assignment logic stays uniform."* Uniform room handling was the design;
+the occupancy layer just never got the exemption everything else already had.
+The generator says the same thing in its own comment ("Unbounded capacity")
+while the occupancy layer capped each virtual room at one.
+
+**One predicate, two layers, no room to drift.** `Room::is_exclusive()` is the
+single definition. `Occupancy::exclusive_room()` is the only expression the
+search consults, and `mark`, `unmark` and `is_free` all go through it — so they
+cannot claim a bit the others do not test. `check_pair` calls `is_exclusive()`
+directly. Had the two disagreed, the solver would refuse placements it then
+declined to report, or free a bit it never set.
+
+Threading `problem` into the three `Occupancy` methods was free: every caller
+(`SearchState::{is_free,mark,unmark}`, `Occupancy::from_fixed`) already held it.
+
+**Key on the FLAG, never on a well-known "online" room** — nothing restricts a
+tenant to one virtual room, and the presets ship 2 to 10 of them.
+
+Audited and found genuinely isolated to `RoomDoubleBooking`: the `lecturer`,
+`attendee` and `group` matrices are marked and queried without reference to
+`who.room` at all, and `check_pair`'s other three branches key on persons and
+groups. That is also right on the merits — a person cannot attend two things at
+once whether or not one of them is online.
+
+**`capacity` still gates ELIGIBILITY** in `convert.rs` and was deliberately left
+alone. A virtual room with a genuine concurrency limit (a single meeting licence)
+cannot be expressed today at all — `capacity` means seats — and would need an
+explicit `concurrent_capacity`, not an overload of this flag.
+
+One fixture depended on the bug and was rebuilt, not patched:
+`group_day_with_both_room_types` pinned a Session into the virtual room to make
+it unavailable at one block, which only worked while virtual rooms were
+capacity-1. It now produces its mixed day from **eligibility** — one Offering
+permitted online, one not — so it cannot regress the same way.
+
+#### KNOWN GAP — the online cap was being enforced by that bug, and now is not
+
+Measured, not predicted. Fixing the above **more than doubled `MaxOnlineShare`
+violations at large-university, 180 -> 455**, and the whole objective regression
+is that one constraint type:
+
+| preset | aggregate before -> after | soft before -> after | unplaced |
+|---|---|---|---|
+| small-school | 4 -> 5 | 1,254 -> 1,288 | 0 -> 0 |
+| large-school | 23-24 -> 32-33 | ~3,400 -> ~3,470 | 0 -> 0 |
+| small-university | 60-63 -> 62-69 | ~7,200 -> ~7,300 | 0 -> 0 |
+| large-university | **167-180 -> 448-461** | ~26,100 -> ~29,200 | 0 -> 0 |
+
+Structural violations are **unchanged at exactly 80** (14 group + 66 person) at
+large-university, before and after, and `unplaced` stays 0 at every preset — so
+the fix moved nothing it should not have. Objective totals rose 25-49% at school
+scale and 153-176% at large-university, entirely through the hard penalty applied
+to that aggregate count.
+
+The mechanism: virtual rooms are the overflow valve when physical rooms are full
+at a slot (they sort last in `eligible_rooms`, so construction reaches them
+last). The capacity-1 bug held that valve almost shut, which incidentally kept
+online usage down. `MaxOnlineShare` is deliberately **not** a construction filter
+— it is a ratio whose denominator has not grown yet, so filtering dead-ends
+construction — so with the valve open, nothing bounds online usage until LNS,
+and 200k moves does not recover it.
+
+So the presets were calibrated in slice 5/6 against a solver whose online
+capacity was accidentally limited. **This is a real solution-quality gap that the
+fix exposed rather than caused**, and it is the honest read of the numbers above:
+the model is now correct and the search is now visibly worse at respecting a
+constraint it was never actually respecting on its own.
+
+Two candidate directions, neither started, and **do not pick one without first
+measuring which**: bias construction against virtual rooms when a group's share
+is already near its cap (cheap, heuristic, no dead-end risk since it is a
+preference not a filter), or give LNS a ruin operator that targets share-breaching
+groups. Note the repo's own recurring-mistake rule applies — measure the
+end-to-end impact before optimizing either.
 
 #### FIXED — construction re-tested room-independent axes once per Room
 Of the six axes only **room occupancy** and **day-mix** (via virtual-vs-physical)

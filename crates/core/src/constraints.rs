@@ -393,8 +393,15 @@ fn check_pair<'p>(
     let both = |i: &ConstraintInstance| i.covers(x.kind) && i.covers(y.kind);
 
     // 1. Room double-booking.
+    //
+    // Only EXCLUSIVE rooms clash. A virtual room hosts unlimited concurrent
+    // Sessions, and the exemption is keyed on the same `Room::is_exclusive`
+    // predicate `Occupancy::exclusive_room` uses to decide whether to claim the
+    // slot bit at all — so the search cannot refuse a placement this then
+    // declines to report, or the reverse.
     if let (Some(rx), Some(ry)) = (x.room, y.room)
         && rx == ry
+        && problem.rooms[rx.get()].is_exclusive()
     {
         for i in c.room_double_booking.iter().filter(|i| both(i)) {
             report(

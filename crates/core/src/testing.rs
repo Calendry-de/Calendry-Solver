@@ -297,6 +297,47 @@ pub fn sibling_classes() -> Problem {
     )
 }
 
+/// Two Sessions, one slot, and exactly ONE room — so the room is the only thing
+/// that could keep them apart.
+///
+/// `virtual_room` selects which kind of room it is, and that is the whole point:
+/// a virtual room hosts unlimited concurrent Sessions, a physical one hosts one.
+/// The two groups are unrelated roots, so no group rule interferes.
+pub fn two_sessions_one_room(virtual_room: bool) -> Problem {
+    assemble(
+        grid(1, 1),
+        vec![room_with("R", 1, virtual_room)],
+        vec![group("A", None), group("B", None)],
+        vec![],
+        vec![
+            with_groups(offering("a", 1, &[0]), &[0]),
+            with_groups(offering("b", 1, &[0]), &[1]),
+        ],
+        vec![],
+        all_constraints(),
+    )
+}
+
+/// The same collision, but already present in IMMOVABLE input.
+///
+/// The search can never *create* a room clash, so the reporting path is only
+/// reachable through Sessions the caller pinned there — which "warn and allow"
+/// permits. Nothing is placeable here; the instance exists to be evaluated.
+pub fn two_fixed_sessions_one_room(virtual_room: bool) -> Problem {
+    assemble(
+        grid(1, 1),
+        vec![room_with("R", 1, virtual_room)],
+        vec![group("A", None)],
+        vec![],
+        vec![],
+        vec![
+            fixed_session("pinned-a", Some(0), 0),
+            fixed_session("pinned-b", Some(0), 0),
+        ],
+        all_constraints(),
+    )
+}
+
 /// Cohort A(0) -> class B(1). One of them is already fixed at slot 0; the other
 /// must be placed. Two rooms and two slots, so only the nested-group rule can
 /// force them apart.
@@ -565,23 +606,33 @@ pub fn lecturer_blacked_out_on_first_block(constraints: ConstraintSet) -> Proble
     )
 }
 
-/// One Group, two Sessions on a single day, with the virtual room available for
-/// only one of the two blocks.
+/// One Group, two Sessions on a single day, one of which cannot go online.
 ///
-/// GroupDoubleBooking already forces the two Sessions into different blocks, and
-/// greedy reaches for the virtual room first — so without the day-mix rule the
-/// result is one online plus one on-site: a mixed day. With the rule, both must
-/// end up on-site, which is reachable because the on-site room is free all day.
+/// GroupDoubleBooking forces the two into different blocks, and greedy reaches
+/// for the virtual room first (`online_first_rooms` lists it first) — so without
+/// the day-mix rule the free Session goes online and the on-site-only one does
+/// not: a mixed day. With the rule, both end up on-site, which is reachable
+/// because the on-site room is free all day.
+///
+/// The mix comes from **eligibility**, not from occupancy. An earlier version
+/// pinned a Session into the virtual room to make it unavailable at one block,
+/// which only worked because virtual rooms were wrongly treated as capacity-1;
+/// once that bug was fixed the virtual room was free at both blocks and greedy
+/// put *both* Sessions online. A fixture must not depend on the defect its
+/// neighbours are testing around.
 pub fn group_day_with_both_room_types(constraints: ConstraintSet) -> Problem {
-    let mut block_virtual = fixed_session("occupies-virtual", Some(0), 1);
-    block_virtual.kind = "other".to_string();
     assemble(
         grid(2, 1), // one day, two blocks
         online_first_rooms(),
         vec![group("G", None)],
         vec![],
-        vec![with_groups(offering("S", 2, &[0, 1]), &[0])],
-        vec![block_virtual],
+        vec![
+            // Free to go either way; greedy takes the virtual room.
+            with_groups(offering("either", 1, &[0, 1]), &[0]),
+            // Not permitted online at all — the on-site room only.
+            with_groups(offering("onsite-only", 1, &[1]), &[0]),
+        ],
+        vec![],
         constraints,
     )
 }

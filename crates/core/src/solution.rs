@@ -120,6 +120,25 @@ pub struct Occupancy {
 }
 
 impl Occupancy {
+    /// The room whose slot bit this Session claims, if any.
+    ///
+    /// `None` when the Session is unplaced, when `RoomDoubleBooking` is not
+    /// configured for its kind, or when the room is **not exclusive** — see
+    /// [`Problem`]'s `Room::is_exclusive`. A virtual room's row therefore stays
+    /// permanently clear, which is what lets any number of Sessions run online
+    /// in the same slot.
+    ///
+    /// `mark`, `unmark` and `is_free` all go through here rather than reading
+    /// `who.room` directly. That is deliberate: if one of them claimed a bit the
+    /// others did not test, the search would refuse placements it then declined
+    /// to report, or free a bit it never set. There is one expression, so there
+    /// is one answer.
+    #[inline]
+    fn exclusive_room(problem: &Problem, who: &Occupant<'_>) -> Option<RoomIdx> {
+        who.room
+            .filter(|&r| problem.rooms[r.get()].is_exclusive())
+    }
+
     pub fn new(problem: &Problem) -> Self {
         let slots = problem.slots.len();
         Self {
@@ -137,7 +156,7 @@ impl Occupancy {
         let mut occ = Self::new(problem);
         for f in &problem.fixed {
             if let Some(span) = problem.slots.span(f.start, f.duration_blocks) {
-                occ.mark(&Occupant::of_fixed(f), &span);
+                occ.mark(problem, &Occupant::of_fixed(f), &span);
             }
         }
         occ
@@ -148,10 +167,11 @@ impl Occupancy {
     /// Groups are marked through their **conflict closure** — a cohort-level
     /// Session blocks every descendant class, and a seminar Session blocks its
     /// ancestors. Only one side expands; see [`crate::groups`].
-    pub fn mark(&mut self, who: &Occupant<'_>, span: &[SlotIdx]) {
+    pub fn mark(&mut self, problem: &Problem, who: &Occupant<'_>, span: &[SlotIdx]) {
+        let room = Self::exclusive_room(problem, who);
         for &s in span {
             let c = s.get();
-            if who.enforce.room && let Some(r) = who.room {
+            if who.enforce.room && let Some(r) = room {
                 self.room.set(r.get(), c);
             }
             if who.enforce.lecturer {
@@ -172,10 +192,11 @@ impl Occupancy {
         }
     }
 
-    pub fn unmark(&mut self, who: &Occupant<'_>, span: &[SlotIdx]) {
+    pub fn unmark(&mut self, problem: &Problem, who: &Occupant<'_>, span: &[SlotIdx]) {
+        let room = Self::exclusive_room(problem, who);
         for &s in span {
             let c = s.get();
-            if who.enforce.room && let Some(r) = who.room {
+            if who.enforce.room && let Some(r) = room {
                 self.room.clear(r.get(), c);
             }
             if who.enforce.lecturer {
@@ -201,11 +222,12 @@ impl Occupancy {
     /// Groups are queried by **identity**, never expanded. That is what keeps
     /// siblings from colliding: two classes under one cohort share an ancestor,
     /// but neither is in the other's closure.
-    pub fn is_free(&self, who: &Occupant<'_>, span: &[SlotIdx]) -> bool {
+    pub fn is_free(&self, problem: &Problem, who: &Occupant<'_>, span: &[SlotIdx]) -> bool {
+        let room = Self::exclusive_room(problem, who);
         for &s in span {
             let c = s.get();
             if who.enforce.room
-                && let Some(r) = who.room
+                && let Some(r) = room
                 && self.room.get(r.get(), c)
             {
                 return false;
@@ -272,7 +294,7 @@ impl SearchState {
     /// without dead-ending construction, so it is scored on the objective
     /// instead. See [`crate::aggregates`].
     pub fn is_free(&self, problem: &Problem, who: &Occupant<'_>, span: &[SlotIdx]) -> bool {
-        if !self.occupancy.is_free(who, span) {
+        if !self.occupancy.is_free(problem, who, span) {
             return false;
         }
 
@@ -298,12 +320,12 @@ impl SearchState {
     }
 
     pub fn mark(&mut self, problem: &Problem, who: &Occupant<'_>, span: &[SlotIdx]) {
-        self.occupancy.mark(who, span);
+        self.occupancy.mark(problem, who, span);
         self.apply_aggregates(problem, who, span, true);
     }
 
     pub fn unmark(&mut self, problem: &Problem, who: &Occupant<'_>, span: &[SlotIdx]) {
-        self.occupancy.unmark(who, span);
+        self.occupancy.unmark(problem, who, span);
         self.apply_aggregates(problem, who, span, false);
     }
 
