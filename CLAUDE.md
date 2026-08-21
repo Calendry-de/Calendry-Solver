@@ -563,6 +563,11 @@ is too slow in practice.**
    immovable precisely so this is a policy change rather than a rewrite: v2
    relaxes `OutOfScope` and no other variant.
 2. **The over-supply reporting gap** — see its own callout below.
+3. **`MaxOnlineShare` is not enforced by the search** — see its own callout
+   below, which carries a measured move-budget sweep, the `ruin_worst`
+   objective-blindness finding, and two things NOT to do. Note this one is
+   solution quality, not correctness: the constraint is evaluated and
+   reported correctly, the search simply does little to satisfy it.
 
 **Outside this repo entirely:** the Nuxt (`calendry`) integration session,
 deferred since before slice 1. See "STILL TO DO" above — the submodule pin, the
@@ -683,11 +688,11 @@ it unavailable at one block, which only worked while virtual rooms were
 capacity-1. It now produces its mixed day from **eligibility** — one Offering
 permitted online, one not — so it cannot regress the same way.
 
-#### KNOWN GAP — the online cap was being enforced by that bug, and now is not
+#### KNOWN GAP — MaxOnlineShare is not enforced by the search, and never was
 
-Measured, not predicted. Fixing the above **more than doubled `MaxOnlineShare`
-violations at large-university, 180 -> 455**, and the whole objective regression
-is that one constraint type:
+Fixing the virtual-room bug above **more than doubled `MaxOnlineShare` violations
+at large-university, 180 -> 455**, and that one constraint type is the whole
+objective regression:
 
 | preset | aggregate before -> after | soft before -> after | unplaced |
 |---|---|---|---|
@@ -697,31 +702,151 @@ is that one constraint type:
 | large-university | **167-180 -> 448-461** | ~26,100 -> ~29,200 | 0 -> 0 |
 
 Structural violations are **unchanged at exactly 80** (14 group + 66 person) at
-large-university, before and after, and `unplaced` stays 0 at every preset — so
+large-university before and after, and `unplaced` stays 0 at every preset — so
 the fix moved nothing it should not have. Objective totals rose 25-49% at school
-scale and 153-176% at large-university, entirely through the hard penalty applied
-to that aggregate count.
+scale and 153-176% at large-university, entirely through the hard penalty
+(379,905 per violation) applied to that aggregate count.
 
-The mechanism: virtual rooms are the overflow valve when physical rooms are full
-at a slot (they sort last in `eligible_rooms`, so construction reaches them
-last). The capacity-1 bug held that valve almost shut, which incidentally kept
+The mechanism: virtual rooms are the **overflow valve** when physical rooms are
+full at a slot — they sort last in `eligible_rooms`, so construction reaches them
+last. The capacity-1 bug held that valve nearly shut, which incidentally kept
 online usage down. `MaxOnlineShare` is deliberately **not** a construction filter
-— it is a ratio whose denominator has not grown yet, so filtering dead-ends
-construction — so with the valve open, nothing bounds online usage until LNS,
-and 200k moves does not recover it.
+(a ratio whose denominator has not grown yet dead-ends construction — see the
+constraint-shapes section), so with the valve open nothing bounds online usage
+until LNS.
 
-So the presets were calibrated in slice 5/6 against a solver whose online
-capacity was accidentally limited. **This is a real solution-quality gap that the
-fix exposed rather than caused**, and it is the honest read of the numbers above:
-the model is now correct and the search is now visibly worse at respecting a
-constraint it was never actually respecting on its own.
+**The honest framing: this is a pre-existing weakness the fix REVEALED, not one
+it caused.** The search was never enforcing that cap; a room-occupancy accident
+was. The presets were calibrated in slice 5/6 against a solver whose online
+capacity was accidentally limited.
 
-Two candidate directions, neither started, and **do not pick one without first
-measuring which**: bias construction against virtual rooms when a group's share
-is already near its cap (cheap, heuristic, no dead-end risk since it is a
-preference not a filter), or give LNS a ruin operator that targets share-breaching
-groups. Note the repo's own recurring-mistake rule applies — measure the
-end-to-end impact before optimizing either.
+Four findings below, all measured this session. **Do not act on any of them
+without re-measuring** — the repo's recurring-mistake rule applies, and finding 1
+is a worked example of exactly why.
+
+##### 1. Move budget: the annealer never cools at 200k moves
+
+Sweep at large-university, seed 1, varying `--moves` only:
+
+| moves | iterations | aggregate | soft | solve |
+|---|---|---|---|---|
+| 200k (bench default) | 85 | **455** | 29,181 | 339 ms |
+| 1M | 444 | **386** | 25,622 | 627 ms |
+| 5M | 2,181 | **219** | 15,093 | 2.28 s |
+
+Construction ends at ~478. The curve is **monotone and still falling steeply at
+5M** (10%=159.2M -> 100%=83.2M); no plateau anywhere in the range. Wall cost
+scales far better than linearly — 25x the moves for 6.7x the time — because
+construction is a fixed 230 ms and iterations/second *improves* with run length
+(251 -> 955/s). Per-iteration yield does decay: 0.27 -> 0.21 -> 0.12 violations
+removed per iteration.
+
+Why so few iterations, and why that is the whole story:
+
+- **`k = 1 + rng.below(8)`** — a ruin touches ~4.5 placements.
+- **`MAX_CANDIDATES = 512`** scored per repaired placement, so ~2,300 moves per
+  iteration. **Moves buy candidate BREADTH, not coverage.**
+- 200k moves therefore repairs roughly **380 of 27,136 placements — 1.4% of the
+  instance**.
+- **`COOLING = 0.999` is per ITERATION.** At ~86 iterations the temperature is
+  still x0.918 of initial. Only the 5M run (2,181 iterations, x0.113) completes
+  anything resembling an annealing schedule.
+
+**This is NOT scale-dependent, which was the surprise.** Every preset lands at
+85-88 iterations at 200k moves, because iteration cost is `k x MAX_CANDIDATES`
+and is independent of instance size. So the 200k-move budget is an essentially
+isothermal walk at *every* scale.
+
+**Recorded as a wrong prediction, deliberately:** reasoning from the cooling
+schedule alone, the expectation before measuring was that extra budget merely
+extends a near-zero-temperature hill-climb and plateaus. The opposite is true —
+extra budget buys the *first actual annealing*. This was not knowable without
+running it, and the same will be true of the other three.
+
+The cost of using this lever: it re-opens a performance envelope slice 6
+deliberately closed (7.79 s -> 349 ms). **Spending 2.28 s where 349 ms was
+celebrated must be a conscious decision, not drift.**
+
+##### 2. `ruin_worst` is blind to 99.98% of the objective
+
+`ruin_worst` is documented as "the placements contributing the most soft
+penalty", and that was right in slice 3, when soft *was* the objective. **Slice 4
+moved `unplaced` and `aggregate` onto the hard side and the operator was never
+updated.** At large-university soft is 29,181 of an objective of 172,885,956 —
+**0.017%** — so the arm whose job is "ruin the worst thing" is steering by a
+rounding error, and the other two arms are random and related.
+
+So LNS does not merely fail to *stumble onto* share breaches; one third of its
+selection is actively aimed at the wrong quantity.
+
+**The better fix is to correct `ruin_worst`, not to add a fourth arm.** Scoring
+total objective contribution is a smaller change, removes an inconsistency rather
+than working around it, and fixes the same problem for any future aggregate type.
+A share-targeting fourth arm would work too and is cheap — `ruin` already takes
+`state: &mut SearchState`, and `SearchState.aggregates` holds the share counters,
+so the data is already in hand and dispatch is `rng.below(3)` -> `below(4)`.
+
+Repair itself needs no change either way: resolving a breach is worth 379,905
+against soft deltas of a few units, so scoring already prefers a free physical
+room overwhelmingly.
+
+**The one piece of genuine design work**: a share breach is a property of a
+*group's ratio*, not of any single placement, so "which placement is responsible"
+needs a convention (every online placement in a breaching group, most likely).
+That is the part to think about rather than assume.
+
+##### 3. Recalibrating the presets would re-create the same masking
+
+Lowering `max_online_share`, or adding virtual rooms, until the numbers resemble
+the pre-fix ones would tune the benchmark to what the solver currently does.
+**That is the same failure mode as the bug just fixed** — a cap enforced by
+accident rather than by the search — with the accident relocated from the
+occupancy layer into the preset file.
+
+**A falling violation count must never be the justification for a preset change.**
+If a preset moves, it moves because the instance became more realistic, and the
+number is an outcome.
+
+##### 4. The generator lets EVERY Offering go online, including labs
+
+`generate.rs`'s eligible-room filter is capacity + features only, and virtual
+rooms are built with `capacity: u32::MAX` and **every feature**. So every virtual
+room is eligible for every Offering — lectures, seminars and `KIND_LAB` alike.
+There is no `allow_online` concept in the generator at all, though the wire and
+`convert.rs` both have one.
+
+That models an institution where **100% of teaching could be delivered online**,
+bounded solely by a 30% share rule. No real tenant looks like that; labs are the
+obvious counterexample, and the generator already labels them.
+
+Giving the generator per-kind online eligibility is a **modelling correction**,
+categorically different from finding 3 — but it would also reduce the violation
+count, so it must be argued on realism and the number treated as a side effect.
+
+##### Not a "pick one"
+
+Findings 1 and 2 are complementary and 4 is orthogonal. Budget buys the annealing
+that currently never happens without making the search smarter; ruin-selection
+correctness is the right long-term fix and **stands on its own merits regardless
+of this bug**. What to resist is doing 3 *instead of* 1 and 2 — the option that
+makes the symptom disappear while improving nothing.
+
+##### NOT DEFERRED, and NOT this repo: the app's default move budget
+
+Separated from the four above because it is live rather than tracked, and because
+the change belongs in **`calendry`**, not here.
+
+The app sends `maxMoves: 50_000` with `maxWallMillis: 10_000`
+(`server/api/solver/runs/index.post.ts`). That is a **quarter of the bench default
+that produced every number above** — roughly 21 iterations, ~95 placements
+repaired, **0.35% of a large instance**. The move budget binds long before the
+wall budget, so about **9.7 of the 10 granted seconds go unused**, and 5M moves
+(2.28 s at the largest preset) would fit inside the existing allowance with room
+to spare.
+
+Raising `max_moves` is also the **determinism-safe** axis: only move-budget
+termination is reproducible, so spending the budget there preserves the guarantee
+while leaning on the wall clock destroys it.
 
 #### FIXED — construction re-tested room-independent axes once per Room
 Of the six axes only **room occupancy** and **day-mix** (via virtual-vs-physical)
