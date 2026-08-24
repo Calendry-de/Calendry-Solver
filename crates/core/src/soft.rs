@@ -100,6 +100,75 @@ impl SoftParams {
             SoftParams::MinimizeOnline => room.is_virtual,
         }
     }
+
+    /// How STRONGLY this instance penalizes `room`, in `0.0..=1.0`.
+    ///
+    /// `applies` decides whether a room is penalized at all; this decides by how
+    /// much, and returns 0.0 exactly when `applies` is false — so the two can
+    /// never disagree about which rooms are affected.
+    ///
+    /// ONLY `MinimizeRoomRank` GRADES. Every other type is a property a slot
+    /// either has or does not ("this is the last block", "this week is an exam
+    /// week"), with no meaningful notion of degree, so they return 1.0 and cost
+    /// exactly their weight as before.
+    ///
+    /// WHY THE RESULT IS CAPPED AT 1.0, WHICH IS NOT A STYLE CHOICE.
+    /// `Problem` derives `hard_penalty = sum(weights) * placements + 1` and
+    /// relies on it dominating "any achievable soft total", which is what makes
+    /// the scalar objective order lexicographically — hard constraints first,
+    /// soft ones only as a tie-break. That bound holds precisely because each
+    /// instance contributes AT MOST its weight per placement. A raw distance
+    /// multiplier (rank 10 costing ten times rank 1) would break it, and a soft
+    /// preference could then outrank a hard constraint. Normalising against the
+    /// room set's own rank span keeps the gradient while preserving the bound,
+    /// and also keeps this rule's weight comparable to every other soft rule the
+    /// tenant has tuned against it.
+    #[inline]
+    pub fn severity(&self, f: &SlotFlags, room: &Room, ranks: RankSpan) -> f64 {
+        if !self.applies(f, room) {
+            return 0.0;
+        }
+
+        match self {
+            SoftParams::MinimizeRoomRank { rank_threshold, invert } => {
+                // Distance PAST the threshold, and the largest such distance any
+                // room in this problem reaches. `+1` on both so a room exactly at
+                // the threshold still costs something — it is penalized, just
+                // least — and so the span being zero cannot divide by zero.
+                let (distance, span) = if *invert {
+                    (rank_threshold.saturating_sub(room.rank),
+                     rank_threshold.saturating_sub(ranks.min))
+                } else {
+                    (room.rank.saturating_sub(*rank_threshold),
+                     ranks.max.saturating_sub(*rank_threshold))
+                };
+
+                (distance as f64 + 1.0) / (span as f64 + 1.0)
+            }
+            _ => 1.0,
+        }
+    }
+}
+
+/// The rank extremes of a problem's rooms, so a graded penalty can be
+/// normalised against the building it is actually scheduling.
+///
+/// Derived from the room set rather than configured: "how premium is premium"
+/// is a property of the estate, and a tenant-supplied maximum would be a second
+/// number to keep in step with the rooms themselves.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RankSpan {
+    pub min: u32,
+    pub max: u32,
+}
+
+impl RankSpan {
+    pub fn of(rooms: &[Room]) -> Self {
+        Self {
+            min: rooms.iter().map(|r| r.rank).min().unwrap_or(0),
+            max: rooms.iter().map(|r| r.rank).max().unwrap_or(0),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -143,6 +212,7 @@ impl SoftModel {
     ) -> Self {
         let total_weight = instances.iter().map(|i| i.weight).sum();
         let n_rooms = rooms.len();
+        let ranks = RankSpan::of(rooms);
 
         // One profile per distinct set of applicable instances. Kinds sharing a
         // profile share a table.
@@ -188,9 +258,10 @@ impl SoftModel {
                         // f64 addition is not associative.
                         let mut c = 0.0;
                         for &m in members {
-                            if instances[m].params.applies(f, room) {
-                                c += instances[m].weight;
-                            }
+                            // `severity` is 0.0 when the instance does not apply,
+                            // so this is the same gate as before plus a magnitude.
+                            c += instances[m].weight
+                                * instances[m].params.severity(f, room, ranks);
                         }
                         t[slot.get() * n_rooms + r] = c;
                     }

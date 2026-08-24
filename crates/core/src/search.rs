@@ -41,7 +41,7 @@ use crate::evaluator::{CpuEvaluator, Move, MoveEvaluator, Score};
 use crate::ids::{PlacementIdx, RoomIdx};
 use crate::problem::{Enforce, Problem};
 use crate::rng::Rng;
-use crate::soft::{Objective, SoftComponent};
+use crate::soft::{Objective, RankSpan, SoftComponent};
 use crate::solution::{Occupant, Placement, SearchState, Solution};
 
 /// Search hyperparameters.
@@ -663,24 +663,44 @@ pub fn soft_breakdown(problem: &Problem, solution: &Solution) -> Vec<SoftCompone
         .iter()
         .map(|inst| {
             let mut count = 0u64;
+            let mut weighted = 0.0f64;
+            let ranks = RankSpan::of(&problem.rooms);
+
             for p in problem.placement_ids() {
                 let Some(pl) = solution.get(p) else { continue };
                 let o = problem.offering_of(p);
                 if !inst.covers(&o.kind) {
                     continue;
                 }
-                if inst
-                    .params
-                    .applies(problem.slots.flags(pl.start), &problem.rooms[pl.room.get()])
-                {
+                let flags = problem.slots.flags(pl.start);
+                let room = &problem.rooms[pl.room.get()];
+
+                if inst.params.applies(flags, room) {
                     count += 1;
                 }
+
+                /*
+                 * ACCUMULATED, not `count * weight`.
+                 *
+                 * `MinimizeRoomRank` now grades its penalty by how far past the
+                 * threshold a room sits, so a flat multiplication would report a
+                 * number the objective does not contain — and this breakdown is
+                 * what the app shows a human to explain the score. `severity`
+                 * returns 0.0 where the rule does not apply, so this sums exactly
+                 * the same cells the cost table charged for.
+                 *
+                 * `raw_count` deliberately stays a COUNT: "sessions in
+                 * discouraged rooms" is the question a person asks, and it is
+                 * still answered by the same predicate.
+                 */
+                weighted += inst.weight * inst.params.severity(flags, room, ranks);
             }
+
             SoftComponent {
                 constraint_id: inst.id.clone(),
                 constraint_type: inst.params.type_name(),
                 raw_count: count,
-                weighted: count as f64 * inst.weight,
+                weighted,
             }
         })
         .collect()
