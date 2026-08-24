@@ -267,7 +267,7 @@ fn move_budget_stops_the_run_early() {
         testing::with_soft(vec![testing::soft(
             "rank",
             3.0,
-            SoftParams::MinimizeRoomRank { rank_threshold: 1 },
+            SoftParams::MinimizeRoomRank { rank_threshold: 1, invert: false },
         )]),
     );
 

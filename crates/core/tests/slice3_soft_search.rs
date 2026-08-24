@@ -192,7 +192,7 @@ fn minimize_room_rank_steers_away_from_premium_rooms() {
                 testing::room_with("R0", 9, false),
                 testing::room_with("R1", 1, false),
             ],
-            vec![testing::soft("r", w, SoftParams::MinimizeRoomRank { rank_threshold: 5 })],
+            vec![testing::soft("r", w, SoftParams::MinimizeRoomRank { rank_threshold: 5, invert: false })],
         )
     });
     assert_eq!(off, 0, "unweighted, greedy takes the premium room");

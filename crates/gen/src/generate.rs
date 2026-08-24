@@ -694,7 +694,7 @@ fn build_constraints(params: &InstanceParams, slots: &SlotTable) -> ConstraintSe
             id: "soft-room-rank".into(),
             kinds: vec![],
             weight: 2.0 * w,
-            params: SoftParams::MinimizeRoomRank { rank_threshold: PREMIUM_RANK },
+            params: SoftParams::MinimizeRoomRank { rank_threshold: PREMIUM_RANK, invert: false },
         },
         SoftInstance {
             id: "soft-exam-week".into(),

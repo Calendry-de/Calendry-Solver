@@ -540,7 +540,7 @@ pub fn seeded_instance(seed: u64) -> Problem {
         soft("first", 1.0 + rng.below(4) as f64, SoftParams::MinimizeFirstBlock),
         soft("last", 1.0 + rng.below(4) as f64, SoftParams::MinimizeLastBlock),
         soft("sat", 1.0 + rng.below(4) as f64, SoftParams::MinimizeDayUsage { days: vec![6] }),
-        soft("rank", 1.0 + rng.below(4) as f64, SoftParams::MinimizeRoomRank { rank_threshold: 5 }),
+        soft("rank", 1.0 + rng.below(4) as f64, SoftParams::MinimizeRoomRank { rank_threshold: 5, invert: false }),
         soft("online", 1.0 + rng.below(4) as f64, SoftParams::MinimizeOnline),
     ];
 

@@ -46,9 +46,21 @@ pub enum SoftParams {
     /// prototype's hardcoded "minimize Saturday": with tenant-configured
     /// `active_days`, Saturday is not structurally special.
     MinimizeDayUsage { days: Vec<u32> },
-    /// `Room.rank` is ordered **higher = more premium/scarce**; rooms at or
-    /// above the threshold are penalized.
-    MinimizeRoomRank { rank_threshold: u32 },
+    /// `Room.rank` is ordered **higher = more premium/scarce**.
+    ///
+    /// `invert` selects which side of the threshold is penalized:
+    ///   false — `rank >= rank_threshold`, sparing the best rooms
+    ///   true  — `rank <= rank_threshold`, preferring them
+    ///
+    /// Both are real policies. An institution may want its best halls kept free
+    /// for events, or may want them USED for teaching rather than standing empty
+    /// while lessons go into the cheap rooms.
+    ///
+    /// A flag rather than a second variant, mirroring MinimizeBlockUsage
+    /// replacing MinimizeFirstBlock/MinimizeLastBlock: two directions of one
+    /// axis over one field. Two variants would also be separately instantiable,
+    /// so a tenant could enable both and penalize rooms from both ends at once.
+    MinimizeRoomRank { rank_threshold: u32, invert: bool },
     MinimizeExamWeek,
     MinimizeOnline,
 }
@@ -79,7 +91,11 @@ impl SoftParams {
                     || blocks.contains(&f.block)
             }
             SoftParams::MinimizeDayUsage { days } => days.contains(&f.iso_weekday),
-            SoftParams::MinimizeRoomRank { rank_threshold } => room.rank >= *rank_threshold,
+            SoftParams::MinimizeRoomRank { rank_threshold, invert } => if *invert {
+                room.rank <= *rank_threshold
+            } else {
+                room.rank >= *rank_threshold
+            },
             SoftParams::MinimizeExamWeek => f.week_kind == WeekKind::Exam,
             SoftParams::MinimizeOnline => room.is_virtual,
         }
@@ -382,7 +398,7 @@ mod tests {
         assert!(SoftParams::MinimizeExamWeek.applies(exam, &plain));
         assert!(!SoftParams::MinimizeExamWeek.applies(first, &plain));
 
-        let rank = SoftParams::MinimizeRoomRank { rank_threshold: 5 };
+        let rank = SoftParams::MinimizeRoomRank { rank_threshold: 5, invert: false };
         assert!(rank.applies(first, &room_at(5, false)));
         assert!(rank.applies(first, &room_at(9, false)));
         assert!(!rank.applies(first, &room_at(4, false)));

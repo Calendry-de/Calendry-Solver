@@ -602,7 +602,7 @@ fn build_constraints(input: &pb::SolverInput) -> Result<ConstraintSet, Status> {
             }
             Some(Params::MinimizeRoomRank(p)) => set.soft.push(soft_instance(
                 c,
-                SoftParams::MinimizeRoomRank { rank_threshold: p.rank_threshold },
+                SoftParams::MinimizeRoomRank { rank_threshold: p.rank_threshold, invert: p.invert },
             )?),
             Some(Params::MinimizeExamWeek(_)) => {
                 set.soft.push(soft_instance(c, SoftParams::MinimizeExamWeek)?)
