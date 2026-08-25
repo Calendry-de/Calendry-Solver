@@ -320,6 +320,19 @@ pub struct Objective {
     /// because it is an aggregate ratio that cannot be enforced as a filter.
     pub aggregate: u32,
     pub soft: f64,
+    /// Mixed `(group, day)` cells, already multiplied by the configured weight.
+    ///
+    /// SEPARATE FROM `soft`, and the split is about how each is maintained
+    /// rather than about what they mean. `soft` is a per-placement unary cost
+    /// the search accumulates as a delta; this is read whole off the counters,
+    /// like `aggregate`, because a mixed cell belongs to no single placement.
+    /// Adding it into `soft` would mix an accumulated total with an assigned
+    /// one in one field, and the drift assertion that keeps the incremental
+    /// objective honest could no longer tell the two apart.
+    ///
+    /// Stored pre-multiplied so `total()` keeps its signature and every caller
+    /// does not have to carry the weight around.
+    pub day_mix_cost: f64,
 }
 
 impl Objective {
@@ -336,7 +349,7 @@ impl Objective {
 
     #[inline]
     pub fn total(&self, hard_penalty: f64) -> f64 {
-        self.hard() as f64 * hard_penalty + self.soft
+        self.hard() as f64 * hard_penalty + self.soft + self.day_mix_cost
     }
 }
 
@@ -535,8 +548,48 @@ mod tests {
     fn total_is_lexicographic_under_a_derived_penalty() {
         // Any single unplaced session must outrank every soft configuration.
         let hard_penalty = 7.0 * 4.0 + 1.0; // total_weight * placements + 1
-        let all_soft_bad = Objective { unplaced: 0, aggregate: 0, soft: 7.0 * 4.0 };
-        let one_unplaced = Objective { unplaced: 1, aggregate: 0, soft: 0.0 };
+        let all_soft_bad = Objective {
+            unplaced: 0,
+            aggregate: 0,
+            soft: 7.0 * 4.0,
+            day_mix_cost: 0.0,
+        };
+        let one_unplaced = Objective {
+            unplaced: 1,
+            aggregate: 0,
+            soft: 0.0,
+            day_mix_cost: 0.0,
+        };
         assert!(one_unplaced.total(hard_penalty) > all_soft_bad.total(hard_penalty));
+    }
+
+    #[test]
+    fn the_day_mix_term_stays_under_the_hard_penalty_too() {
+        /*
+         * The bound day-mix needs is NOT `weight * placements` — a mixed cell
+         * belongs to a (group, day), and one placement can create several while
+         * two are needed before any exists. `Problem::build` multiplies by the
+         * CELL COUNT for that reason, and this pins the property that
+         * multiplier exists to protect: even with every cell mixed, one unplaced
+         * Session still outranks the lot.
+         */
+        let cells = 30.0; // 6 groups x 5 days
+        let day_mix_weight = 5.0;
+        let hard_penalty = 7.0 * 4.0 + day_mix_weight * cells + 1.0;
+
+        let everything_mixed = Objective {
+            unplaced: 0,
+            aggregate: 0,
+            soft: 7.0 * 4.0,
+            day_mix_cost: day_mix_weight * cells,
+        };
+        let one_unplaced = Objective {
+            unplaced: 1,
+            aggregate: 0,
+            soft: 0.0,
+            day_mix_cost: 0.0,
+        };
+
+        assert!(one_unplaced.total(hard_penalty) > everything_mixed.total(hard_penalty));
     }
 }

@@ -288,11 +288,18 @@ impl SearchState {
 
     /// Whether this Session could occupy `span`.
     ///
-    /// Covers the four structural types, `LecturerVeto` (a unary slot mask) and
-    /// `OnlineOnsiteSameDay` (day-granularity). `MaxOnlineShare` is deliberately
-    /// absent — it is a ratio with a moving denominator and cannot be a filter
-    /// without dead-ending construction, so it is scored on the objective
-    /// instead. See [`crate::aggregates`].
+    /// Covers the four structural types and `LecturerVeto` (a unary slot mask).
+    ///
+    /// TWO TYPES ARE DELIBERATELY ABSENT, for the same underlying reason:
+    /// neither is a question about the candidate alone.
+    ///
+    /// * `MaxOnlineShare` is a ratio with a moving denominator and cannot be a
+    ///   filter without dead-ending construction.
+    /// * `OnlineOnsiteSameDay` COULD be one — it is monotone-safe, and it was
+    ///   one until the reclassification — but it is now SOFT, so a mixed day is
+    ///   priced rather than forbidden.
+    ///
+    /// Both are scored on the objective instead. See [`crate::aggregates`].
     pub fn is_free(&self, problem: &Problem, who: &Occupant<'_>, span: &[SlotIdx]) -> bool {
         if !self.occupancy.is_free(problem, who, span) {
             return false;
@@ -305,18 +312,45 @@ impl SearchState {
             return false;
         }
 
-        if who.enforce.day_mix && !who.subtree_groups.is_empty() {
-            let days = Self::days_of(problem, span);
-            let online = Self::is_online(problem, who.room);
-            if !self
-                .aggregates
-                .day_mix_allows(who.subtree_groups, &days, online)
-            {
-                return false;
-            }
+        true
+    }
+
+    /// Would placing this Session here make a `(group, day)` cell mix delivery
+    /// modes that currently does not?
+    ///
+    /// The day-mix counterpart of [`Self::would_worsen_share`], and used the
+    /// same way: the evaluator adds a penalty rather than rejecting the move.
+    /// `day_mix_allows` is the same predicate that used to gate `is_free`;
+    /// only what the caller does with the answer changed.
+    pub fn would_worsen_day_mix(
+        &self,
+        problem: &Problem,
+        who: &Occupant<'_>,
+        span: &[SlotIdx],
+    ) -> bool {
+        if !who.enforce.day_mix || who.subtree_groups.is_empty() || span.is_empty() {
+            return false;
         }
 
-        true
+        let days = Self::days_of(problem, span);
+        let online = Self::is_online(problem, who.room);
+
+        !self
+            .aggregates
+            .day_mix_allows(who.subtree_groups, &days, online)
+    }
+
+    /// What the currently mixed days cost, at the configured weight.
+    ///
+    /// Read off the counters rather than accumulated per placement — a mixed
+    /// cell belongs to no single Session, so there is no delta to add when one
+    /// moves. Same treatment `share_violations` already gets.
+    pub fn day_mix_cost(&self, problem: &Problem) -> f64 {
+        if problem.day_mix_weight == 0.0 {
+            return 0.0;
+        }
+
+        self.aggregates.day_mix_violations() as f64 * problem.day_mix_weight
     }
 
     pub fn mark(&mut self, problem: &Problem, who: &Occupant<'_>, span: &[SlotIdx]) {

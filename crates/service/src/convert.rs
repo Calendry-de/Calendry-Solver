@@ -17,7 +17,7 @@ use calendry_solver_core::problem::{
     ConstraintInstance, ConstraintSet, FixedSpec, Immovable, OfferingSpec, PlacementVar, Problem,
     Unavailability, classify_immovable,
 };
-use calendry_solver_core::aggregates::{ShareInstance, ShareWindow};
+use calendry_solver_core::aggregates::{DayMixInstance, ShareInstance, ShareWindow};
 use calendry_solver_core::slots::{SlotTable, WeekKind, WeekSpec};
 use calendry_solver_core::soft::{SoftInstance, SoftParams};
 use calendry_solver_proto::v1 as pb;
@@ -516,7 +516,27 @@ fn build_constraints(input: &pb::SolverInput) -> Result<ConstraintSet, Status> {
             Some(Params::ExactFrequency(_)) => set.exact_frequency.push(instance),
 
             Some(Params::LecturerVeto(_)) => set.lecturer_veto.push(instance),
-            Some(Params::OnlineOnsiteSameDay(_)) => set.online_onsite_same_day.push(instance),
+            /*
+             * SOFT since the reclassification, so it reads `weight` like every
+             * other soft type and lands in its own list rather than in the
+             * filter set. A tenant that has not been backfilled sends weight 0,
+             * which the solver treats as "count it, do not steer" — the same
+             * reading every soft type gives a zero weight, and the reason the
+             * app's rollout order puts the backfill before the deploy.
+             */
+            Some(Params::OnlineOnsiteSameDay(_)) => {
+                if c.weight < 0.0 || c.weight.is_nan() {
+                    return Err(Status::invalid_argument(format!(
+                        "constraint '{}' has weight {}; a penalty must be non-negative",
+                        c.id, c.weight
+                    )));
+                }
+                set.online_onsite_same_day.push(DayMixInstance {
+                    id: c.id.clone(),
+                    kinds: c.applies_to_kinds.clone(),
+                    weight: c.weight,
+                });
+            }
             Some(Params::MaxOnlineShare(p)) => {
                 if !(0.0..=1.0).contains(&p.max_ratio) || p.max_ratio.is_nan() {
                     return Err(Status::invalid_argument(format!(

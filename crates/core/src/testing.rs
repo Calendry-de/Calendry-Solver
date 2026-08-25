@@ -4,6 +4,7 @@
 //! parametrized benchmark generator in `calendry-solver-gen`. A generator bug
 //! that produced a wrong fixture would be a bug that silently validates itself.
 
+use crate::aggregates::DayMixInstance;
 use crate::ids::{GroupIdx, OfferingIdx, PersonIdx, RoomIdx, SlotIdx};
 use crate::problem::{
     ConstraintInstance, ConstraintSet, FixedSpec, Group, Immovable, OfferingSpec, Person,
@@ -101,6 +102,10 @@ fn inst(id: &str) -> Vec<ConstraintInstance> {
     vec![ConstraintInstance { id: id.to_string(), kinds: vec![] }]
 }
 
+fn day_mix(id: &str, weight: f64) -> Vec<DayMixInstance> {
+    vec![DayMixInstance { id: id.to_string(), kinds: vec![], weight }]
+}
+
 /// Every implemented constraint type, applying to all kinds.
 pub fn all_constraints() -> ConstraintSet {
     ConstraintSet {
@@ -110,7 +115,9 @@ pub fn all_constraints() -> ConstraintSet {
         person_double_booking: inst("c-person"),
         exact_frequency: inst("c-freq"),
         lecturer_veto: inst("c-veto"),
-        online_onsite_same_day: inst("c-mix"),
+        // Weight 5 mirrors the app catalogue's `defaultWeight` for this type,
+        // so a fixture's day-mix cost reads the same as a real tenant's.
+        online_onsite_same_day: day_mix("c-mix", 5.0),
         max_online_share: Vec::new(),
         soft: Vec::new(),
     }
@@ -635,6 +642,29 @@ pub fn group_day_with_both_room_types(constraints: ConstraintSet) -> Problem {
         vec![],
         constraints,
     )
+}
+
+/// A hand-built Solution for [`group_day_with_both_room_types`] that DOES mix:
+/// the flexible Session online, the on-site-only one beside it, same day.
+///
+/// Constructed rather than searched for, because the point of the test using it
+/// is what a mixed day COSTS — and a test that first has to coax the search into
+/// producing one would be measuring the search instead of the price.
+pub fn solution_mixing_one_day(problem: &Problem) -> crate::solution::Solution {
+    use crate::solution::{Placement, Solution};
+
+    let mut solution = Solution::empty(problem);
+
+    for p in problem.placement_ids() {
+        let offering = problem.offering_of(p);
+        // Room 0 is virtual in `online_first_rooms`, room 1 is physical.
+        let room = if offering.id == "either" { RoomIdx(0) } else { RoomIdx(1) };
+        let start = if offering.id == "either" { SlotIdx(0) } else { SlotIdx(1) };
+
+        solution.set(p, Some(Placement { start, room }));
+    }
+
+    solution
 }
 
 /// One Group with four Sessions across four blocks of one day, with an online

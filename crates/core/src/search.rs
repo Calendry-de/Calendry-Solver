@@ -199,6 +199,10 @@ pub fn solve(problem: &Problem, seed: u64, budget: Budget, halt: &dyn Halt) -> S
         // running state — but they can still drift, which is what the assertion
         // below and the aggregate-drift test exist to catch.
         trial_obj.aggregate = state.share_violations();
+        // Same treatment, same reason: the counters ARE the running state, so
+        // there is no delta to accumulate for a cost that belongs to a cell
+        // rather than to any one placement.
+        trial_obj.day_mix_cost = state.day_mix_cost(problem);
 
         // Delta drift is the classic metaheuristic bug: the search optimizes a
         // number that has quietly diverged from the real objective. Checked on
@@ -631,8 +635,14 @@ pub fn recompute_objective(problem: &Problem, solution: &Solution) -> Objective 
     // Aggregate violations are recomputed by replaying the whole solution into
     // a fresh counter set — the from-scratch counterpart to the incremental
     // counters the search maintains.
-    let aggregate = rebuild_state(problem, solution).share_violations();
-    Objective { unplaced, aggregate, soft }
+    let state = rebuild_state(problem, solution);
+
+    Objective {
+        unplaced,
+        aggregate: state.share_violations(),
+        soft,
+        day_mix_cost: state.day_mix_cost(problem),
+    }
 }
 
 /// Replay a solution into a fresh [`SearchState`]. Used by the from-scratch
@@ -657,7 +667,33 @@ pub fn rebuild_state(problem: &Problem, solution: &Solution) -> SearchState {
 /// cost table was built from, so the fast path and the reported counts cannot
 /// disagree.
 pub fn soft_breakdown(problem: &Problem, solution: &Solution) -> Vec<SoftComponent> {
-    problem
+    /*
+     * The day-mix instances come first and separately, because they are not in
+     * `problem.soft` — see `ConstraintSet::online_onsite_same_day`. Reported
+     * here rather than as a hard violation: since the reclassification a mixed
+     * day is a priced outcome, and the breakdown is the place a human is shown
+     * what the score is made of.
+     *
+     * `raw_count` is the mixed CELL count, which is the question somebody
+     * actually asks ("how many group-days ended up mixed?"), and `weighted` is
+     * exactly what the objective charged for them.
+     */
+    let state = rebuild_state(problem, solution);
+    let mixed_cells = state.aggregates.day_mix_violations() as u64;
+
+    let day_mix = problem
+        .constraints
+        .online_onsite_same_day
+        .iter()
+        .map(|inst| SoftComponent {
+            constraint_id: inst.id.clone(),
+            constraint_type: crate::constraints::ONLINE_ONSITE_SAME_DAY,
+            raw_count: mixed_cells,
+            weighted: mixed_cells as f64 * inst.weight,
+        })
+        .collect::<Vec<_>>();
+
+    day_mix.into_iter().chain(problem
         .soft
         .instances
         .iter()
@@ -702,7 +738,7 @@ pub fn soft_breakdown(problem: &Problem, solution: &Solution) -> Vec<SoftCompone
                 raw_count: count,
                 weighted,
             }
-        })
+        }))
         .collect()
 }
 
@@ -715,6 +751,7 @@ pub fn objectives_agree(a: Objective, b: Objective) -> bool {
     a.unplaced == b.unplaced
         && a.aggregate == b.aggregate
         && (a.soft - b.soft).abs() <= 1e-9 * (1.0 + a.soft.abs())
+        && (a.day_mix_cost - b.day_mix_cost).abs() <= 1e-9 * (1.0 + a.day_mix_cost.abs())
 }
 
 /// Set so a move worsening the objective by the average instance weight is

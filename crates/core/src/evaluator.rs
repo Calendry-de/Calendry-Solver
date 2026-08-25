@@ -104,7 +104,29 @@ fn score_one(
         0.0
     };
 
-    Score(problem.soft.cost(offering.soft_profile, mv.to.start, mv.to.room) + share_penalty)
+    /*
+     * OnlineOnsiteSameDay is soft, so it is priced here at its CONFIGURED
+     * WEIGHT rather than at `hard_penalty` like the share cap above. That
+     * difference is the whole reclassification: a mix is now something the
+     * search pays for and will accept when the alternative costs more, instead
+     * of a candidate `is_free` threw away.
+     *
+     * Charged once for the move even when it would mix several cells. The exact
+     * cell delta is what the counters report after `mark`, and the objective
+     * reads it from there — this is a ranking signal for choosing between
+     * candidates, and it only has to point the right way.
+     */
+    let day_mix_penalty = if state.would_worsen_day_mix(problem, &candidate, &span) {
+        problem.day_mix_weight
+    } else {
+        0.0
+    };
+
+    Score(
+        problem.soft.cost(offering.soft_profile, mv.to.start, mv.to.room)
+            + share_penalty
+            + day_mix_penalty,
+    )
 }
 
 #[cfg(test)]

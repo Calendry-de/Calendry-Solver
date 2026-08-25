@@ -131,35 +131,24 @@ pub fn lecturer_veto(problem: &Problem, solution: &Solution, out: &mut Vec<Viola
     }
 }
 
-/// The two Group-scoped aggregate types, evaluated by replaying the whole
-/// solution into a fresh counter set.
+/// The Group-scoped aggregate types that are still HARD.
 ///
-/// `OnlineOnsiteSameDay` is a filter the search can never violate, so anything
-/// reported here came from the caller's immovable input — which the "warn and
-/// allow" manual-edit UX can legitimately produce. `MaxOnlineShare` lives on the
-/// objective and CAN survive into a returned solution.
+/// `MaxOnlineShare` lives on the objective and CAN survive into a returned
+/// solution, so it is reported from here.
+///
+/// `OnlineOnsiteSameDay` USED TO BE REPORTED HERE AND DELIBERATELY IS NOT ANY
+/// MORE. It was a filter the search could never violate, so a mixed day could
+/// only have arrived in the caller's immovable input — which made it a hard
+/// violation worth naming. Now that it is soft the search produces mixed days
+/// on purpose when the alternative costs more, and listing those as hard
+/// violations would report the objective doing its job as a defect. They are
+/// carried in the objective breakdown instead, where every other soft type's
+/// breaches are, with the count and the weighted cost.
 pub fn aggregates(problem: &Problem, solution: &Solution, out: &mut Vec<Violation>) {
-    if problem.constraints.online_onsite_same_day.is_empty()
-        && problem.constraints.max_online_share.is_empty()
-    {
+    if problem.constraints.max_online_share.is_empty() {
         return;
     }
     let state = crate::search::rebuild_state(problem, solution);
-
-    for instance in &problem.constraints.online_onsite_same_day {
-        for (group, day) in state.aggregates.mixed_days() {
-            out.push(Violation {
-                constraint_id: instance.id.clone(),
-                constraint_type: ONLINE_ONSITE_SAME_DAY,
-                session_ids: Vec::new(),
-                offering_ids: Vec::new(),
-                detail: format!(
-                    "group '{}' has both online and on-site sessions on day {day}",
-                    problem.groups[group.get()].id
-                ),
-            });
-        }
-    }
 
     for (rule_idx, group, window, online, total) in state.aggregates.violated_cells() {
         let rule = &problem.constraints.max_online_share[rule_idx];
