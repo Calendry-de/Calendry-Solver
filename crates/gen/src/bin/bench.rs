@@ -275,12 +275,38 @@ fn run_phases(problem: &Problem, stats: &InstanceStats, seed: u64, args: &Args) 
         "  per iter   {per_iter:.3e} candidates enumerated  (mean_candidates x {:.1})",
         per_iter / stats.mean_candidates.max(1.0)
     );
+    let total = outcome.objective.total(problem.hard_penalty);
+
     println!(
-        "  objective  total {:.1}  = unplaced {} + aggregate {} + soft {:.1}",
-        outcome.objective.total(problem.hard_penalty),
+        "  objective  total {:.1}  = unplaced {} + aggregate {} + soft {:.1} + day_mix {:.1}",
+        total,
         outcome.objective.unplaced,
         outcome.objective.aggregate,
         outcome.objective.soft,
+        outcome.objective.day_mix_cost,
+    );
+
+    /*
+     * WHAT `ruin_worst` CAN SEE, printed because it is now a smaller share than
+     * it was.
+     *
+     * `ruin_worst` ranks placements by `problem.soft.cost(...)` alone — the
+     * unary table. That already missed the hard side of the objective (a
+     * tracked issue: it scores soft while `aggregate x hard_penalty` dominates
+     * the total). OnlineOnsiteSameDay becoming soft ADDS a term it also cannot
+     * see, because a mixed day belongs to a (group, day) cell and not to any
+     * one placement, so there is nothing to rank a placement by.
+     *
+     * Printed as a ratio rather than described in a comment somewhere, so the
+     * number moves when the code does.
+     */
+    let visible = outcome.objective.soft;
+    println!(
+        "  ruin_worst sees {:.1} of {:.1}  ({:.4}% of the objective; day_mix {:.1} is invisible to it)",
+        visible,
+        total,
+        if total > 0.0 { visible / total * 100.0 } else { 0.0 },
+        outcome.objective.day_mix_cost,
     );
     println!("  violations {}", outcome.hard_violations.len());
 
@@ -548,10 +574,17 @@ fn report_diagnosis(d: &calendry_solver_gen::diagnose::ConstructionFailure, took
         ("room", t.blocked_room),
         ("lecturer", t.blocked_lecturer),
         ("veto", t.blocked_veto),
-        ("day_mix", t.blocked_day_mix),
     ] {
         println!("    {name:<9} {v:>12}  {:>6.2}%", pct(v));
     }
+    // Separate line, separate meaning: since OnlineOnsiteSameDay became soft it
+    // never blocks a candidate, it prices one. Printed under "blocked by" it
+    // would read as a filter that never binds.
+    println!(
+        "  priced (not blocked):\n    day_mix   {:>12}  {:>6.2}%",
+        t.day_mix_priced,
+        pct(t.day_mix_priced)
+    );
 
     println!(
         "  free space {} of {} sampled placements have somewhere to go",
