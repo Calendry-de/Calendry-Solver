@@ -630,6 +630,24 @@ fn build_constraints(input: &pb::SolverInput) -> Result<ConstraintSet, Status> {
             Some(Params::MinimizeOnline(_)) => {
                 set.soft.push(soft_instance(c, SoftParams::MinimizeOnline)?)
             }
+            // Accepted by the schema, not yet evaluated here. REFUSED rather
+            // than ignored: a caller that enables this rule and receives a
+            // successful run would reasonably conclude the solver honoured it,
+            // and a preference silently priced at nothing is the exact failure
+            // the app side spent a design pass avoiding. Same shape as
+            // LockPolicy::MINIMIZE_MOVEMENT, which returns UNIMPLEMENTED for the
+            // same reason.
+            //
+            // The app does not send this yet — its catalogue entry deliberately
+            // has no wire field — so this branch is unreachable from the current
+            // client and exists for any peer that gets ahead of it.
+            Some(Params::PersonPreferenceFit(_)) => {
+                return Err(Status::unimplemented(format!(
+                    "constraint '{}': person_preference_fit is in the schema but not yet \
+                     evaluated by this solver",
+                    c.id
+                )));
+            }
             None => {
                 return Err(Status::invalid_argument(format!(
                     "constraint '{}' has no params set",
@@ -639,10 +657,15 @@ fn build_constraints(input: &pb::SolverInput) -> Result<ConstraintSet, Status> {
         }
     }
 
-    // Every one of the 14 catalogue types is now implemented, so there is no
-    // longer an UNIMPLEMENTED branch here. A new type added to the schema will
-    // fail to compile against this match rather than being silently ignored —
-    // which is the property that mattered about the old branch.
+    // Every one of the 14 catalogue types is implemented. The one UNIMPLEMENTED
+    // branch that remains is `PersonPreferenceFit`, which the schema carries
+    // from 0.7.0 and this service does not yet evaluate.
+    //
+    // The property that matters is unchanged: a new type added to the schema
+    // fails to COMPILE against this match rather than being silently ignored.
+    // That is what produced the branch above — the 0.7.0 pin would not build
+    // until the variant was handled explicitly, which is the intended way to
+    // learn that the contract grew.
     Ok(set)
 }
 
@@ -829,6 +852,9 @@ mod locked_frequency_tests {
                 role_tags: vec!["Lecturer".into()],
                 group_ids: vec![],
                 blackouts: vec![],
+                // Schema 0.7.0. `None` is the "no stated preference" case, which
+                // is what this fixture means and what nothing here reads yet.
+                preferred: None,
             }],
             groups: vec![pb::Group {
                 id: "g1".into(),
