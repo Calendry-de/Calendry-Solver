@@ -1,23 +1,11 @@
 # calendry-solver — the service image.
 #
-# WHY THIS FILE MOVED HERE. It used to live in the calendry repo as
-# `.config/Dockerfile.solver`, on the reasoning that one place should describe
-# the whole stack. That held while nothing but calendry's dev compose built it.
-# It stopped holding the moment this repository needed to publish its own image:
-# a workflow here cannot reach into another repository for its Dockerfile, so
-# the alternative was a second copy — two build definitions for one binary,
-# which is the "two implementations of one concept" drift that has already bitten
-# this project three times (paramField, weekCountOf, blockTime).
+# Lives here rather than in calendry's .config/ because this repo publishes its
+# own image and a workflow cannot reach into another repo for a Dockerfile. The
+# calendry dev compose builds ./vendor/calendry-solver with this file, so there
+# is still one definition and one checkout.
 #
-# The one-place property survives, because calendry vendors this repo as a git
-# submodule: its `docker-compose.dev.yml` builds `vendor/calendry-solver` with
-# this file, so `docker compose up` still brings up app, database and solver
-# from a single checkout. There is exactly one Dockerfile and both consumers
-# read it.
-#
-# Build context is this repository's root. `.dockerignore` keeps `target/` out —
-# 1.4 GB of Rust build artifacts that would otherwise be uploaded on every
-# build.
+# Context is this repo's root; .dockerignore keeps target/ out.
 
 # rust-version = "1.90" and edition 2024 in the workspace manifest, so the
 # toolchain floor is real rather than incidental.
