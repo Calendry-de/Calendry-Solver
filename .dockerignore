@@ -1,0 +1,17 @@
+# The Rust build directory: 1.4 GB of artifacts on a warm checkout, and every
+# byte of it would be uploaded into the build context on each build only to be
+# ignored by a `cargo build` that runs inside the image anyway.
+target
+
+# Not inputs to the binary.
+.git
+.github
+*.md
+.gitignore
+.dockerignore
+Dockerfile
+
+# The nested proto submodule's own tooling; `build.rs` needs `proto/` and the
+# generated bindings, not the TypeScript package or the buf config.
+vendor/calendry-proto/packages
+vendor/calendry-proto/.git

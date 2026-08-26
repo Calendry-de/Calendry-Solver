@@ -1,0 +1,224 @@
+name: docker
+
+# Builds the solver service image and publishes it to GHCR under the name
+# calendry's docker-compose.yml already expects:
+# ghcr.io/mindcollaps/calendry-solver.
+#
+# THE ONE THING THIS WORKFLOW MUST NOT GET WRONG: the proto contract is a NESTED
+# submodule (vendor/calendry-proto), and `crates/proto/build.rs` resolves the
+# `.proto` files from `vendor/calendry-proto/proto` at compile time. A plain
+# checkout, or even `submodules: true`, leaves that directory empty and the
+# build fails inside build.rs. It needs `submodules: recursive`.
+#
+# The image is a two-stage build: a `rust:1.90-slim-bookworm` compile stage with
+# protoc, and a `debian:bookworm-slim` runtime carrying nothing but the stripped
+# binary and ca-certificates. See the Dockerfile for why it moved into this
+# repository from calendry.
+on:
+  push:
+    branches: [main]
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      push_image:
+        description: 'Publish the image to GHCR (off = build and smoke-test only)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  # A superseded push has nothing worth finishing — except on a tag, where
+  # cancelling leaves a release tag with no image behind it.
+  group: docker-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+env:
+  IMAGE: ghcr.io/mindcollaps/calendry-solver
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # The gate. A release image should not be publishable over a red suite, and
+  # the determinism guarantee this solver makes — same (input, seed, move
+  # budget) produces byte-identical output — is exactly the kind of property
+  # that breaks silently and is only caught by tests.
+  #
+  # NOTE: this suite has not been run in CI before, so its wall-clock cost here
+  # is unmeasured. If it turns out to dominate the run, narrow the `needs:`
+  # below to tag pushes rather than deleting the job.
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install protoc
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq protobuf-compiler
+          protoc --version
+
+      # Rust is preinstalled on the runner; pinning the toolchain to the
+      # workspace floor keeps CI honest about `rust-version = "1.90"`.
+      - name: Pin the toolchain
+        run: |
+          rustup toolchain install 1.90 --profile minimal --no-self-update
+          rustup default 1.90
+          cargo --version
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-test-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-test-${{ runner.os }}-
+
+      - run: cargo test --workspace --locked
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # RECURSIVE. See the header: build.rs reads vendor/calendry-proto/proto,
+          # which is a submodule of a submodule.
+          submodules: recursive
+
+      - name: Confirm the proto contract is actually checked out
+        run: |
+          set -euo pipefail
+          SENTINEL=vendor/calendry-proto/proto/calendry/solver/v1/service.proto
+
+          if [ ! -f "$SENTINEL" ]; then
+            echo "::error::$SENTINEL is missing — the nested calendry-proto submodule did not check out, and build.rs will fail. Confirm 'submodules: recursive'."
+            exit 1
+          fi
+
+          echo "::notice::proto contract present: $(ls vendor/calendry-proto/proto/calendry/solver/v1 | tr '\n' ' ')"
+
+      - name: Decide whether this run publishes
+        id: mode
+        run: |
+          set -euo pipefail
+
+          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
+            PUSH=false
+          elif [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            PUSH="${{ inputs.push_image }}"
+          else
+            PUSH=true
+          fi
+
+          echo "push=$PUSH" >> "$GITHUB_OUTPUT"
+          echo "::notice::event=${GITHUB_EVENT_NAME} push=$PUSH"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: steps.mode.outputs.push == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # `latest` follows semver tags only, never main: calendry's
+      # docker-compose.yml pins `:latest`, so a branch-tracking `latest` would
+      # put an unreviewed commit into a production `docker compose pull`.
+      - name: Derive image tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=ref,event=branch
+            type=ref,event=pr
+            type=sha,format=long
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/') }}
+          labels: |
+            org.opencontainers.image.title=calendry-solver
+            org.opencontainers.image.description=Stateless Rust gRPC timetabling optimizer for Calendry
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          # amd64 only: a release Rust compile under QEMU is punishing, and
+          # nothing deploys this on arm64 today. The Dockerfile is
+          # architecture-neutral, so adding linux/arm64 here is the only change
+          # needed when something does.
+          platforms: linux/amd64
+          push: ${{ steps.mode.outputs.push == 'true' }}
+          load: ${{ steps.mode.outputs.push != 'true' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: true
+          sbom: true
+
+      # Compiling proves it links; it does not prove the binary serves. The
+      # runtime stage runs as an unprivileged user with no shell utilities, so
+      # this checks the two things that can actually be checked from outside:
+      # the process stays up, and something is listening on the gRPC port.
+      #
+      # Not a gRPC call: that would need reflection enabled on the server or a
+      # generated client in the job, and neither is a property this workflow
+      # should assume. A TCP accept plus a live container catches the failures
+      # that matter here — a crash on startup, and the loopback-bind mistake
+      # that made a containerised solver unreachable in the first place.
+      - name: Smoke-test the image
+        run: |
+          set -euo pipefail
+
+          FIRST_TAG="$(printf '%s\n' '${{ steps.meta.outputs.tags }}' | head -n1)"
+
+          if [ "${{ steps.mode.outputs.push }}" = "true" ]; then
+            docker pull "$FIRST_TAG"
+          fi
+
+          docker run -d --name solver-smoke -p 50051:50051 "$FIRST_TAG"
+
+          for attempt in $(seq 1 30); do
+            if timeout 1 bash -c 'cat < /dev/null > /dev/tcp/127.0.0.1/50051' 2>/dev/null; then
+              echo "::notice::gRPC port accepted a connection after ${attempt}s"
+              READY=1
+              break
+            fi
+            sleep 1
+          done
+
+          if [ "${READY:-0}" != "1" ]; then
+            echo "::error::nothing accepted a connection on 50051 — the solver did not start, or bound to its own loopback instead of 0.0.0.0"
+            docker logs solver-smoke || true
+            exit 1
+          fi
+
+          # Still alive, i.e. it did not accept once and then exit.
+          if [ "$(docker inspect -f '{{ .State.Running }}' solver-smoke)" != "true" ]; then
+            echo "::error::the container exited after starting"
+            docker logs solver-smoke
+            exit 1
+          fi
+
+          docker logs solver-smoke
+
+      - name: Tear down
+        if: always()
+        run: docker rm -f solver-smoke 2>/dev/null || true
