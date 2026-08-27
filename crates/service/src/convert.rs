@@ -246,6 +246,19 @@ fn build_groups(input: &pb::SolverInput) -> Result<GroupBuild, ConvertError> {
             parent,
             name: g.name.clone(),
             size: g.size,
+            // Verbatim, exactly like `Person.blackouts`: an empty axis means
+            // "every value on that axis" and the grid resolves it in
+            // `Problem::build`. The app sends the COMPLEMENT of when the Group
+            // is available, so nothing here needs to know about dates.
+            blackouts: g
+                .blackouts
+                .iter()
+                .map(|b| Unavailability {
+                    days: b.days.clone(),
+                    blocks: b.blocks.clone(),
+                    weeks: b.weeks.clone(),
+                })
+                .collect(),
         })
         .collect();
 
@@ -613,6 +626,9 @@ fn build_constraints(input: &pb::SolverInput) -> Result<ConstraintSet, ConvertEr
             Some(Params::ExactFrequency(_)) => set.exact_frequency.push(instance),
 
             Some(Params::LecturerVeto(_)) => set.lecturer_veto.push(instance),
+            // The Group counterpart. Same empty message, same "values live on
+            // the entity, this switches enforcement on" split.
+            Some(Params::GroupVeto(_)) => set.group_veto.push(instance),
             /*
              * SOFT since the reclassification, so it reads `weight` like every
              * other soft type and lands in its own list rather than in the

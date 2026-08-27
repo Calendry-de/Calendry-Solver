@@ -4,10 +4,28 @@ Status, not decisions. The decision this records is
 [ADR-0003](adr/0003-proto-schema-as-a-pinned-submodule.md) — the schema lives in
 a separate repo, consumed as a pinned submodule.
 
-## Current pin: `v0.7.0`
+## Current pin: `992563f`, awaiting the `v0.8.0` tag
 
-Submodule `vendor/calendry-proto` is pinned to `6107eb2` = **`v0.7.0`**, up from
-`v0.2.0`. What arrived between them that this repo cares about:
+Submodule `vendor/calendry-proto` is pinned to `992563f` — the `Group.blackouts`
+/ `GroupVeto` commit — which is **not yet tagged**. That is a deliberate,
+temporary state and the only one of its kind in this repo's history: the schema
+change and the evaluator that reads it were built together, so there was no
+version to pin to while the work was in flight. Tag `v0.8.0` on that commit and
+re-pin; until then this repo is pinned to a commit rather than a release, which
+the "a TAG, not a branch tip" rule in `CLAUDE.md` otherwise forbids.
+
+Previously `6107eb2` = **`v0.7.0`**, up from `v0.2.0`. What arrived across those
+that this repo cares about:
+
+* **`Group.blackouts`** and the **`GroupVeto`** constraint (`v0.8.0`). A Group can
+  be away for part of a Term — the cohort that runs only the first six weeks. It
+  reuses `Unavailability`, so absence keeps one convention across `Person` and
+  `Group`, and the app sends the COMPLEMENT of the availability window it stores.
+  The one thing here that is a real decision rather than plumbing is the
+  DIRECTION: a window binds the Group and its descendants, so the query walks up
+  — [ADR-0027](adr/0027-group-blackouts-inherit-downward.md). No
+  `UNIMPLEMENTED` phase, because unlike `PersonPreferenceFit` the field and its
+  evaluator shipped in the same change.
 
 * **`MinimizeBlockUsage`** and an `invert` flag on `MinimizeRoomRank`, replacing
   `MinimizeFirstBlock` / `MinimizeLastBlock` — see

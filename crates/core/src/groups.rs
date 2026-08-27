@@ -50,6 +50,21 @@ pub struct GroupClosure {
     conflict: Vec<BitSet>,
     /// `{g} ∪ descendants(g)` — for attendance resolution.
     subtree: Vec<BitSet>,
+    /// `{g} ∪ ancestors(g)` — for BLACKOUT inheritance.
+    ///
+    /// The third direction, and it is not either of the two above. A blackout
+    /// declared on a Group binds that Group and its DESCENDANTS: a programme
+    /// away for a period takes its cohorts with it. So the question a placement
+    /// asks is the mirror of that — "does this Session's own Group, or anything
+    /// ABOVE it, declare a blackout here?" — which is the ancestor chain.
+    ///
+    /// Neither existing table answers it. `subtree` points the wrong way and
+    /// would let a leaf seminar's break veto its parent's lecture, which the
+    /// parent's other children still attend. `conflict` contains the ancestors
+    /// but also every descendant, which would do the same thing plus more. Both
+    /// are indistinguishable from this one on a flat hierarchy, which is exactly
+    /// why the distinction is a table and a test rather than a comment.
+    ancestry: Vec<BitSet>,
 }
 
 impl GroupClosure {
@@ -88,7 +103,19 @@ impl GroupClosure {
             }
         }
 
-        Ok(Self { conflict, subtree })
+        // Ancestry ({g} ∪ ancestors) — the same walk the conflict closure does,
+        // kept separately because conflict has the subtree unioned in.
+        let mut ancestry: Vec<BitSet> = (0..n).map(|_| BitSet::new(n)).collect();
+        for i in 0..n {
+            ancestry[i].insert(i);
+            let mut cur = parent_of[i];
+            while let Some(p) = cur {
+                ancestry[i].insert(p.get());
+                cur = parent_of[p.get()];
+            }
+        }
+
+        Ok(Self { conflict, subtree, ancestry })
     }
 
     pub fn len(&self) -> usize {
@@ -108,6 +135,13 @@ impl GroupClosure {
     /// Expand groups to the subtree used for attendance resolution.
     pub fn expand_subtree(&self, groups: &[GroupIdx]) -> Vec<GroupIdx> {
         self.expand(groups, &self.subtree)
+    }
+
+    /// Expand groups upward — each group plus its ancestors — for blackout
+    /// inheritance. See the `ancestry` field for why this is not `expand_subtree`
+    /// or `expand_conflict`.
+    pub fn expand_ancestry(&self, groups: &[GroupIdx]) -> Vec<GroupIdx> {
+        self.expand(groups, &self.ancestry)
     }
 
     fn expand(&self, groups: &[GroupIdx], table: &[BitSet]) -> Vec<GroupIdx> {

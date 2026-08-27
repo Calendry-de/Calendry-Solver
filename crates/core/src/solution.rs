@@ -64,6 +64,9 @@ pub struct Occupant<'a> {
     /// Slots blocked by this Session's lecturers' blackouts. `None` for
     /// immovable occupancy, which is never re-placed.
     pub veto_slots: Option<&'a crate::bitset::BitSet>,
+    /// The same, for the blackouts of this Session's Groups and their
+    /// ancestors. `None` for the same reason.
+    pub group_veto_slots: Option<&'a crate::bitset::BitSet>,
     pub enforce: Enforce,
 }
 
@@ -78,6 +81,7 @@ impl<'a> Occupant<'a> {
             attendees: &o.attendees,
             subtree_groups: &o.subtree_groups,
             veto_slots: Some(&o.veto_slots),
+            group_veto_slots: Some(&o.group_veto_slots),
             enforce: o.enforce,
         }
     }
@@ -94,6 +98,7 @@ impl<'a> Occupant<'a> {
             // Immovable occupancy is never re-placed, so its own blackout mask
             // is irrelevant; it still contributes to every other counter.
             veto_slots: None,
+            group_veto_slots: None,
             enforce: f.enforce,
         }
     }
@@ -440,6 +445,15 @@ impl SearchState {
 
         if who.enforce.lecturer_veto
             && let Some(veto) = who.veto_slots
+            && span.iter().any(|s| veto.contains(s.get()))
+        {
+            return false;
+        }
+
+        // Same shape, separate switch: a tenant may enforce one of the two
+        // vetoes without the other, so these cannot share a mask or a flag.
+        if who.enforce.group_veto
+            && let Some(veto) = who.group_veto_slots
             && span.iter().any(|s| veto.contains(s.get()))
         {
             return false;

@@ -107,6 +107,7 @@ fn single(axis: fn(&mut Enforce), base: Enforce) -> Enforce {
         group: true,
         person: true,
         lecturer_veto: true,
+        group_veto: true,
         day_mix: true,
     };
     axis(&mut e);
@@ -117,6 +118,7 @@ fn single(axis: fn(&mut Enforce), base: Enforce) -> Enforce {
         group: e.group && base.group,
         person: e.person && base.person,
         lecturer_veto: e.lecturer_veto && base.lecturer_veto,
+        group_veto: e.group_veto && base.group_veto,
         day_mix: e.day_mix && base.day_mix,
     }
 }

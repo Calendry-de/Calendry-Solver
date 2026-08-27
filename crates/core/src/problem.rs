@@ -57,6 +57,15 @@ pub struct Group {
     pub parent: Option<GroupIdx>,
     pub name: String,
     pub size: u32,
+    /// Windows in which this Group is unavailable, enforced by `GroupVeto`.
+    ///
+    /// INHERITS DOWNWARD: this binds the Group and its descendants, never its
+    /// ancestors — see [`crate::groups::GroupClosure::expand_ancestry`]. Same
+    /// `Unavailability` and the same "empty axis = every value on that axis"
+    /// rule as [`Person::blackouts`], so a Group away for weeks 6..14 of a Term
+    /// is `{days: [], blocks: [], weeks: [6..14]}`. The app stores the
+    /// complement (when the Group IS available) and inverts at assembly.
+    pub blackouts: Vec<Unavailability>,
 }
 
 #[derive(Clone, Debug)]
@@ -184,6 +193,10 @@ pub struct ConstraintSet {
     /// The blackout VALUES live on `Person.blackouts`; this list only switches
     /// enforcement on.
     pub lecturer_veto: Vec<ConstraintInstance>,
+    /// HARD, unary: a Session is never placed during a blackout of a Group
+    /// attending it. Exactly `lecturer_veto` one entity across — the windows
+    /// live on `Group.blackouts`, this list only switches enforcement on.
+    pub group_veto: Vec<ConstraintInstance>,
     /// SOFT, day-granularity. Was a HARD feasibility filter until the
     /// reclassification: the tenant asked for "no switching between online and
     /// in-person for a group on one day" to be a preference the solver may
@@ -232,6 +245,7 @@ pub struct Enforce {
     pub group: bool,
     pub person: bool,
     pub lecturer_veto: bool,
+    pub group_veto: bool,
     pub day_mix: bool,
 }
 
@@ -243,6 +257,7 @@ impl ConstraintSet {
             group: any_covers(&self.group_double_booking, kind),
             person: any_covers(&self.person_double_booking, kind),
             lecturer_veto: any_covers(&self.lecturer_veto, kind),
+            group_veto: any_covers(&self.group_veto, kind),
             // Own predicate: `DayMixInstance` is not a `ConstraintInstance`
             // any more, since it carries a weight.
             day_mix: self.online_onsite_same_day.iter().any(|c| c.covers(kind)),
@@ -318,6 +333,11 @@ pub struct Offering {
     /// Slots blocked by the blackouts of this Offering's lecturers. Unary, so
     /// it precomputes into a mask exactly like the soft costs do.
     pub veto_slots: BitSet,
+    /// Slots blocked by the blackouts of this Offering's own Groups and their
+    /// ANCESTORS. Separate mask from `veto_slots` rather than one union,
+    /// because the two are separately enableable (`Enforce`) and a violation
+    /// has to name which entity was unavailable.
+    pub group_veto_slots: BitSet,
     /// `own_groups` expanded DOWNWARD only. Used by the two Group-scoped
     /// aggregate types, matching attendance semantics: a cohort Session is
     /// attended by its classes, but a class Session does not implicate the
@@ -469,8 +489,8 @@ impl ProblemSpec {
 /// # use calendry_solver_core::slots::{SlotTable, WeekKind, WeekSpec};
 /// # let slots = SlotTable::build(2, &[1], &[WeekSpec { kind: WeekKind::Teaching, holiday_weekdays: vec![] }]).unwrap();
 /// let mut b = ProblemBuilder::new(slots);
-/// let cohort = b.group(Group { id: "C".into(), parent: None, name: "C".into(), size: 0 });
-/// let class = b.group(Group { id: "K".into(), parent: Some(cohort), name: "K".into(), size: 0 });
+/// let cohort = b.group(Group { id: "C".into(), parent: None, name: "C".into(), size: 0, blackouts: vec![] });
+/// let class = b.group(Group { id: "K".into(), parent: Some(cohort), name: "K".into(), size: 0, blackouts: vec![] });
 /// let _student = b.person(Person {
 ///     id: "s".into(),
 ///     role_tags: vec![],
@@ -665,11 +685,32 @@ impl Problem {
             mask
         };
 
+        // The Group counterpart, walking UP from each attached Group so a
+        // parent's absence reaches its children. `expand_ancestry`, not
+        // `expand_subtree`: the wrong one lets one seminar veto a faculty.
+        let group_veto_mask = |own: &[GroupIdx]| -> BitSet {
+            let mut mask = BitSet::new(slots.len());
+            for g in closure.expand_ancestry(own) {
+                let blackouts = &groups[g.get()].blackouts;
+                if blackouts.is_empty() {
+                    continue;
+                }
+                for slot in slots.all() {
+                    let f = slots.flags(slot);
+                    if blackouts.iter().any(|b| b.matches(f)) {
+                        mask.insert(slot.get());
+                    }
+                }
+            }
+            mask
+        };
+
         let derived_offerings: Vec<Offering> = offerings
             .into_iter()
             .map(|o| Offering {
                 soft_profile: soft.profile_for_kind(&o.kind),
                 veto_slots: veto_mask(&o.lecturers),
+                group_veto_slots: group_veto_mask(&o.groups),
                 subtree_groups: closure.expand_subtree(&o.groups),
                 enforce: constraints.enforce_for_kind(&o.kind),
                 conflict_groups: closure.expand_conflict(&o.groups),
@@ -916,7 +957,13 @@ mod tests {
     }
 
     fn group(id: &str, parent: Option<u32>) -> Group {
-        Group { id: id.to_string(), parent: parent.map(GroupIdx), name: id.to_string(), size: 0 }
+        Group {
+            id: id.to_string(),
+            parent: parent.map(GroupIdx),
+            name: id.to_string(),
+            size: 0,
+            blackouts: vec![],
+        }
     }
 
     #[test]
