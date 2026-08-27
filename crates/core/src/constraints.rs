@@ -4,34 +4,72 @@
 //! and no expression language: tenant-supplied logic never executes. Adding a
 //! type is a code change here, by design.
 //!
-//! This module is the **authoritative** check. [`crate::solution::Occupancy`] is
-//! an index the constructive heuristic uses to *avoid* creating violations, and
-//! it is deliberately conservative about kind scoping; the pairwise rules below
-//! are exact.
+//! This module is the **authoritative** check. The occupancy index inside
+//! [`crate::solution::SearchState`] is what the constructive heuristic uses to
+//! *avoid* creating violations, and it is deliberately conservative about kind
+//! scoping; the pairwise rules below are exact. See
+//! `docs/adr/0014-structural-stays-independent-of-occupancy.md` for why this
+//! duplication is kept.
 
 use std::collections::{HashMap, HashSet};
 
-use crate::ids::{GroupIdx, PersonIdx, RoomIdx, SlotIdx};
+use crate::ids::{GroupIdx, OfferingIdx, PersonIdx, RoomIdx, SlotIdx};
 use crate::problem::{ConstraintInstance, Problem};
-use crate::solution::Solution;
+use crate::solution::{SearchState, Solution};
+
+/// Which catalogue type a violation belongs to.
+///
+/// A type rather than the eight `&'static str` constants it replaces. The
+/// constants were exported, but the service filtered on a raw literal
+/// (`v.constraint_type == "ExactFrequency"`) — so renaming a constant's *value*
+/// silently disconnected that filter with no compile error, and adding a
+/// fifteenth catalogue type gave downstream consumers no signal that they needed
+/// to handle it. Both are now compile-time facts.
+///
+/// [`ViolationType::as_str`] preserves the exact wire strings, so this is not a
+/// schema change.
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
+pub enum ViolationType {
+    RoomDoubleBooking,
+    LecturerDoubleBooking,
+    GroupDoubleBooking,
+    PersonDoubleBooking,
+    ExactFrequency,
+    LecturerVeto,
+    OnlineOnsiteSameDay,
+    MaxOnlineShare,
+}
+
+impl ViolationType {
+    /// The wire name, unchanged from the constants this replaced.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::RoomDoubleBooking => "RoomDoubleBooking",
+            Self::LecturerDoubleBooking => "LecturerDoubleBooking",
+            Self::GroupDoubleBooking => "GroupDoubleBooking",
+            Self::PersonDoubleBooking => "PersonDoubleBooking",
+            Self::ExactFrequency => "ExactFrequency",
+            Self::LecturerVeto => "LecturerVeto",
+            Self::OnlineOnsiteSameDay => "OnlineOnsiteSameDay",
+            Self::MaxOnlineShare => "MaxOnlineShare",
+        }
+    }
+}
+
+impl std::fmt::Display for ViolationType {
+    fn fmt(&self, w: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        w.write_str(self.as_str())
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Violation {
     pub constraint_id: String,
-    pub constraint_type: &'static str,
+    pub constraint_type: ViolationType,
     pub session_ids: Vec<String>,
     pub offering_ids: Vec<String>,
     pub detail: String,
 }
-
-pub const ROOM_DOUBLE_BOOKING: &str = "RoomDoubleBooking";
-pub const LECTURER_DOUBLE_BOOKING: &str = "LecturerDoubleBooking";
-pub const GROUP_DOUBLE_BOOKING: &str = "GroupDoubleBooking";
-pub const PERSON_DOUBLE_BOOKING: &str = "PersonDoubleBooking";
-pub const EXACT_FREQUENCY: &str = "ExactFrequency";
-pub const LECTURER_VETO: &str = "LecturerVeto";
-pub const ONLINE_ONSITE_SAME_DAY: &str = "OnlineOnsiteSameDay";
-pub const MAX_ONLINE_SHARE: &str = "MaxOnlineShare";
 
 /// `week W day D block B`, rendered on demand.
 ///
@@ -41,11 +79,7 @@ struct SlotLabel<'a>(&'a crate::slots::SlotFlags);
 
 impl std::fmt::Display for SlotLabel<'_> {
     fn fmt(&self, w: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            w,
-            "week {} day {} block {}",
-            self.0.week, self.0.iso_weekday, self.0.block
-        )
+        write!(w, "week {} day {} block {}", self.0.week, self.0.iso_weekday, self.0.block)
     }
 }
 
@@ -117,7 +151,7 @@ pub fn lecturer_veto(problem: &Problem, solution: &Solution, out: &mut Vec<Viola
                     .unwrap_or_default();
                 out.push(Violation {
                     constraint_id: instance.id.clone(),
-                    constraint_type: LECTURER_VETO,
+                    constraint_type: ViolationType::LecturerVeto,
                     session_ids: vec![problem.placement_label(p)],
                     offering_ids: vec![o.id.clone()],
                     detail: format!(
@@ -144,13 +178,13 @@ pub fn aggregates(problem: &Problem, solution: &Solution, out: &mut Vec<Violatio
     {
         return;
     }
-    let state = crate::search::rebuild_state(problem, solution);
+    let state = SearchState::replay(problem, solution);
 
     for instance in &problem.constraints.online_onsite_same_day {
         for (group, day) in state.aggregates.mixed_days() {
             out.push(Violation {
                 constraint_id: instance.id.clone(),
-                constraint_type: ONLINE_ONSITE_SAME_DAY,
+                constraint_type: ViolationType::OnlineOnsiteSameDay,
                 session_ids: Vec::new(),
                 offering_ids: Vec::new(),
                 detail: format!(
@@ -165,7 +199,7 @@ pub fn aggregates(problem: &Problem, solution: &Solution, out: &mut Vec<Violatio
         let rule = &problem.constraints.max_online_share[rule_idx];
         out.push(Violation {
             constraint_id: rule.id.clone(),
-            constraint_type: MAX_ONLINE_SHARE,
+            constraint_type: ViolationType::MaxOnlineShare,
             session_ids: Vec::new(),
             offering_ids: Vec::new(),
             detail: format!(
@@ -191,12 +225,9 @@ pub fn exact_frequency(problem: &Problem, solution: &Solution, out: &mut Vec<Vio
     }
 
     let mut placed = vec![0u32; problem.offerings.len()];
-    let mut in_scope = vec![false; problem.offerings.len()];
     for p in problem.placement_ids() {
-        let o = problem.placement(p).offering.get();
-        in_scope[o] = true;
         if solution.get(p).is_some() {
-            placed[o] += 1;
+            placed[problem.placement(p).offering.get()] += 1;
         }
     }
 
@@ -205,28 +236,27 @@ pub fn exact_frequency(problem: &Problem, solution: &Solution, out: &mut Vec<Vio
     // counts toward the required frequency — otherwise every Offering carrying
     // a lock would report a shortfall it does not have, and the ordinary
     // mid-term re-solve could never satisfy this constraint at all.
-    //
-    // This does NOT mark the Offering in scope: an Offering whose only presence
-    // is immovable has no placement variables, so its frequency is not this
-    // run's business and the `in_scope` gate below still skips it.
-    for f in &problem.fixed {
-        if let Some(o) = f.offering {
-            placed[o.get()] += 1;
-        }
+    for o in problem.offering_ids() {
+        placed[o.get()] += problem.immovable_count(o);
     }
 
     for instance in &problem.constraints.exact_frequency {
         for (i, offering) in problem.offerings.iter().enumerate() {
-            // An Offering with no placement variables is out of scope for this
-            // run; its frequency is not this run's business.
-            if !in_scope[i] || !instance.covers(&offering.kind) {
+            // Real scope membership, carried on `Problem` from the caller's
+            // request. This used to ask whether the Offering owned any placement
+            // variable, which is the same question only while nothing can drive
+            // an in-scope Offering's placement count to zero. Deducting locked
+            // Sessions can, so an **over-supplied** Offering — more locks than it
+            // requires — looked exactly like an out-of-scope one and its
+            // mismatch went unreported.
+            if !problem.in_scope(OfferingIdx(i as u32)) || !instance.covers(&offering.kind) {
                 continue;
             }
             let (want, got) = (offering.required_session_count, placed[i]);
             if got != want {
                 out.push(Violation {
                     constraint_id: instance.id.clone(),
-                    constraint_type: EXACT_FREQUENCY,
+                    constraint_type: ViolationType::ExactFrequency,
                     session_ids: Vec::new(),
                     offering_ids: vec![offering.id.clone()],
                     detail: format!(
@@ -259,17 +289,14 @@ pub fn structural(problem: &Problem, solution: &Solution, out: &mut Vec<Violatio
 
     // A pair overlapping several blocks must be reported once, not once per
     // block.
-    let mut seen: HashSet<(usize, usize, &'static str, &str)> = HashSet::new();
+    let mut seen: HashSet<(usize, usize, ViolationType, &str)> = HashSet::new();
 
     // Scratch for the person axis, allocated once and reused per slot.
     // `clear()` keeps each bucket's capacity, so after the first few slots this
     // stops allocating entirely.
     let check_persons = !problem.constraints.person_double_booking.is_empty();
-    let mut by_person: Vec<Vec<usize>> = if check_persons {
-        vec![Vec::new(); problem.persons.len()]
-    } else {
-        Vec::new()
-    };
+    let mut by_person: Vec<Vec<usize>> =
+        if check_persons { vec![Vec::new(); problem.persons.len()] } else { Vec::new() };
     let mut touched: Vec<usize> = Vec::new();
     let mut person_clash: HashMap<(usize, usize), usize> = HashMap::new();
 
@@ -339,14 +366,8 @@ pub fn structural(problem: &Problem, solution: &Solution, out: &mut Vec<Violatio
 
         for (ai, &a) in occupants.iter().enumerate() {
             for &b in &occupants[ai + 1..] {
-                let shared = if any_clash {
-                    person_clash.get(&(a, b)).copied()
-                } else {
-                    None
-                };
-                check_pair(
-                    problem, &views[a], &views[b], a, b, slot, shared, &mut seen, out,
-                );
+                let shared = if any_clash { person_clash.get(&(a, b)).copied() } else { None };
+                check_pair(problem, &views[a], &views[b], a, b, slot, shared, &mut seen, out);
             }
         }
     }
@@ -363,7 +384,7 @@ fn check_pair<'p>(
     // The lowest attendee index shared by this pair, precomputed in
     // `structural` by bucketing. `None` = they share nobody.
     shared_attendee: Option<usize>,
-    seen: &mut HashSet<(usize, usize, &'static str, &'p str)>,
+    seen: &mut HashSet<(usize, usize, ViolationType, &'p str)>,
     out: &mut Vec<Violation>,
 ) {
     let c = &problem.constraints;
@@ -373,19 +394,21 @@ fn check_pair<'p>(
     // `structural`, and the overwhelming majority of pairs report nothing.
     let at = SlotLabel(f);
 
-    let mut report =
-        |instance: &'p ConstraintInstance, ty: &'static str, detail: String, out: &mut Vec<Violation>| {
-            if !seen.insert((xi, yi, ty, instance.id.as_str())) {
-                return;
-            }
-            out.push(Violation {
-                constraint_id: instance.id.clone(),
-                constraint_type: ty,
-                session_ids: vec![x.label.clone(), y.label.clone()],
-                offering_ids: Vec::new(),
-                detail,
-            });
-        };
+    let mut report = |instance: &'p ConstraintInstance,
+                      ty: ViolationType,
+                      detail: String,
+                      out: &mut Vec<Violation>| {
+        if !seen.insert((xi, yi, ty, instance.id.as_str())) {
+            return;
+        }
+        out.push(Violation {
+            constraint_id: instance.id.clone(),
+            constraint_type: ty,
+            session_ids: vec![x.label.clone(), y.label.clone()],
+            offering_ids: Vec::new(),
+            detail,
+        });
+    };
 
     // A pair is only constrained when a single configured instance covers BOTH
     // sessions' kinds. A constraint scoped to `lecture` must not police a clash
@@ -399,10 +422,12 @@ fn check_pair<'p>(
         for i in c.room_double_booking.iter().filter(|i| both(i)) {
             report(
                 i,
-                ROOM_DOUBLE_BOOKING,
+                ViolationType::RoomDoubleBooking,
                 format!(
                     "room '{}' hosts '{}' and '{}' at {at}",
-                    problem.rooms[rx.get()].id, x.label, y.label
+                    problem.rooms[rx.get()].id,
+                    x.label,
+                    y.label
                 ),
                 out,
             );
@@ -414,10 +439,12 @@ fn check_pair<'p>(
         for i in c.lecturer_double_booking.iter().filter(|i| both(i)) {
             report(
                 i,
-                LECTURER_DOUBLE_BOOKING,
+                ViolationType::LecturerDoubleBooking,
                 format!(
                     "lecturer '{}' leads '{}' and '{}' at {at}",
-                    problem.persons[p.get()].id, x.label, y.label
+                    problem.persons[p.get()].id,
+                    x.label,
+                    y.label
                 ),
                 out,
             );
@@ -448,7 +475,7 @@ fn check_pair<'p>(
             };
             report(
                 i,
-                GROUP_DOUBLE_BOOKING,
+                ViolationType::GroupDoubleBooking,
                 format!("{rel} attend '{}' and '{}' at {at}", x.label, y.label),
                 out,
             );
@@ -463,7 +490,7 @@ fn check_pair<'p>(
         for i in c.person_double_booking.iter().filter(|i| both(i)) {
             report(
                 i,
-                PERSON_DOUBLE_BOOKING,
+                ViolationType::PersonDoubleBooking,
                 format!(
                     "person '{}' attends '{}' and '{}' at {at}",
                     problem.persons[p].id, x.label, y.label

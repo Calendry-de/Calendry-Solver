@@ -264,15 +264,18 @@ mod tests {
         // Cohort session pulls in every descendant class.
         assert_eq!(
             c.expand_subtree(&[GroupIdx(0)]),
-            vec![GroupIdx(0), GroupIdx(1), GroupIdx(2), GroupIdx(3), GroupIdx(4)]
+            vec![
+                GroupIdx(0),
+                GroupIdx(1),
+                GroupIdx(2),
+                GroupIdx(3),
+                GroupIdx(4)
+            ]
         );
         // Seminar session pulls in only itself — NOT the cohort.
         assert_eq!(c.expand_subtree(&[GroupIdx(3)]), vec![GroupIdx(3)]);
         // Class C pulls in its seminars but not its parent.
-        assert_eq!(
-            c.expand_subtree(&[GroupIdx(2)]),
-            vec![GroupIdx(2), GroupIdx(3), GroupIdx(4)]
-        );
+        assert_eq!(c.expand_subtree(&[GroupIdx(2)]), vec![GroupIdx(2), GroupIdx(3), GroupIdx(4)]);
     }
 
     #[test]

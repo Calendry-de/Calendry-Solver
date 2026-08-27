@@ -146,11 +146,8 @@ pub fn diagnose(
     // *scan cost* question is still open and is answered on placed placements:
     // how much of first-fit's inner room loop was wasted on slots that a
     // room-independent axis had already ruled out.
-    let pool: Vec<PlacementIdx> = if unplaced.is_empty() {
-        problem.placement_ids().collect()
-    } else {
-        unplaced.clone()
-    };
+    let pool: Vec<PlacementIdx> =
+        if unplaced.is_empty() { problem.placement_ids().collect() } else { unplaced };
     if pool.is_empty() {
         return out;
     }
@@ -199,13 +196,18 @@ pub fn diagnose(
             // Room-independent axes, tested ONCE for this slot. If they reject,
             // every probe the room loop is about to make is wasted.
             out.slots_examined += 1;
-            let mut ri = base.with_room(offering.eligible_rooms[0]);
-            ri.enforce = Enforce {
-                room: false,
-                day_mix: false,
-                ..enforce
-            };
-            if ri.enforce != Enforce::default() && !state.is_free(problem, &ri, &span) {
+            // The SAME mask the heuristic uses, from the one place that defines
+            // it. This used to be a verbatim copy of `construct`'s literal, and
+            // the whole point of this function is reporting where construction
+            // rejects candidates — which it can only do truthfully if its filter
+            // order matches. A seventh axis would have left it reporting against
+            // the old mask, silently, with plausible numbers. (The copy also
+            // indexed `eligible_rooms[0]`, which panics on an Offering with no
+            // eligible room; the shared constructor sets no room at all, because
+            // the room axis is exactly what this probe excludes.)
+            if let Some(ri) = Occupant::room_independent_probe(offering)
+                && !state.is_free(problem, &ri, &span)
+            {
                 out.slots_blocked_room_independent += 1;
                 out.wasted_probes += offering.eligible_rooms.len() as u64;
             }
@@ -222,8 +224,11 @@ pub fn diagnose(
                 // axes at once is the difference between "free a room" and
                 // "nothing here will help".
                 for (n, axis) in axes.iter().enumerate() {
-                    let mut probe = candidate;
-                    probe.enforce = single(*axis, enforce);
+                    // Per-axis attribution: "would THIS axis reject it alone".
+                    // Genuinely diagnostic-only, so it keeps its own mask — but
+                    // it goes through the named builder rather than assigning a
+                    // public field from outside.
+                    let probe = candidate.with_enforce(single(*axis, enforce));
                     if probe.enforce == Enforce::default() {
                         continue; // this axis is switched off for this kind
                     }
@@ -326,8 +331,7 @@ fn clique_evidence(problem: &Problem, kind: &str) -> CliqueEvidence {
     // of them conflicts with every other: one per non-overlapping slot.
     let duration = of_kind
         .first()
-        .map(|&i| problem.offerings[i].duration_blocks)
-        .unwrap_or(1)
+        .map_or(1, |&i| problem.offerings[i].duration_blocks)
         .max(1);
     let capacity = (problem.slots.len() as u64) / duration as u64;
 

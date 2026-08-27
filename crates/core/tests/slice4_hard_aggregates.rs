@@ -15,22 +15,14 @@
 //! were, so it is asserted per iteration in debug builds as well.
 
 use calendry_solver_core::aggregates::ShareWindow;
-use calendry_solver_core::constraints::{
-    LECTURER_VETO, MAX_ONLINE_SHARE, ONLINE_ONSITE_SAME_DAY, evaluate_hard,
-};
+use calendry_solver_core::constraints::{ViolationType, evaluate_hard};
 use calendry_solver_core::ids::PlacementIdx;
-use calendry_solver_core::search::{Budget, NeverHalt, recompute_objective, solve};
+use calendry_solver_core::problem::ProblemSpec;
+use calendry_solver_core::search::{NeverHalt, recompute_objective, solve};
 use calendry_solver_core::{Problem, testing};
 
-const SEED: u64 = 0xC0FFEE;
-
-fn budget() -> Budget {
-    Budget { max_wall_millis: 0, max_moves: 50_000 }
-}
-
-fn run(problem: &Problem) -> calendry_solver_core::SolveOutcome {
-    solve(problem, SEED, budget(), &NeverHalt)
-}
+mod common;
+use common::{SEED, moves, solve_with_move_budget as run};
 
 /// How many placed Sessions sit in a virtual room.
 fn online_count(problem: &Problem, outcome: &calendry_solver_core::SolveOutcome) -> usize {
@@ -74,19 +66,20 @@ fn a_blackout_violation_present_in_the_input_is_reported() {
     // Force the clash: the lecturer is unavailable on every block, so no
     // placement can satisfy the veto and the search must leave it unplaced
     // rather than quietly scheduling into a blackout.
-    let problem = testing::assemble(
-        testing::grid(2, 1),
-        testing::rooms(1),
-        vec![],
-        vec![testing::person_with_blackouts(
+    let problem = testing::assemble(ProblemSpec {
+        rooms: testing::rooms(1),
+        persons: vec![testing::person_with_blackouts(
             "always-out",
             &[],
             vec![testing::blackout(&[], &[], &[])],
         )],
-        vec![testing::with_lecturers(testing::offering("S", 1, &[0]), &[0])],
-        vec![],
-        testing::all_constraints(),
-    );
+        offerings: vec![testing::with_lecturers(
+            testing::offering("S", 1, &[0]),
+            &[0],
+        )],
+        constraints: testing::all_constraints(),
+        ..ProblemSpec::new(testing::grid(2, 1))
+    });
     let outcome = run(&problem);
 
     assert_eq!(outcome.solution.placed_count(), 0, "nothing is placeable");
@@ -94,13 +87,10 @@ fn a_blackout_violation_present_in_the_input_is_reported() {
         !outcome
             .hard_violations
             .iter()
-            .any(|v| v.constraint_type == LECTURER_VETO),
+            .any(|v| v.constraint_type == ViolationType::LecturerVeto),
         "an unplaced Session must not also be reported as a veto breach"
     );
-    assert!(
-        outcome.objective.unplaced > 0,
-        "the shortfall must surface on the objective"
-    );
+    assert!(outcome.objective.unplaced > 0, "the shortfall must surface on the objective");
 }
 
 // ---------------------------------------------------------------------------
@@ -146,21 +136,19 @@ fn a_mixed_day_already_in_immovable_input_is_reported() {
     let mut onsite_fixed = testing::fixed_for_groups("pinned-onsite", 1, 1, &[0]);
     onsite_fixed.kind = "lecture".to_string();
 
-    let problem = testing::assemble(
-        testing::grid(2, 1),
-        testing::online_first_rooms(),
-        vec![testing::group("G", None)],
-        vec![],
-        vec![],
-        vec![online_fixed, onsite_fixed],
-        testing::all_constraints(),
-    );
+    let problem = testing::assemble(ProblemSpec {
+        rooms: testing::online_first_rooms(),
+        groups: vec![testing::group("G", None)],
+        fixed: vec![online_fixed, onsite_fixed],
+        constraints: testing::all_constraints(),
+        ..ProblemSpec::new(testing::grid(2, 1))
+    });
 
     let violations = evaluate_hard(&problem, &calendry_solver_core::Solution::empty(&problem));
     assert!(
         violations
             .iter()
-            .any(|v| v.constraint_type == ONLINE_ONSITE_SAME_DAY),
+            .any(|v| v.constraint_type == ViolationType::OnlineOnsiteSameDay),
         "a pre-existing mixed day must be reported, got {violations:?}"
     );
 }
@@ -172,11 +160,8 @@ fn a_mixed_day_already_in_immovable_input_is_reported() {
 #[test]
 fn the_online_share_cap_is_respected() {
     // 4 Sessions, cap 0.25 => floor(0.25 * 4) = 1 may be online.
-    let problem = testing::share_capped_group(vec![testing::share_rule(
-        "cap",
-        0.25,
-        ShareWindow::PerTerm,
-    )]);
+    let problem =
+        testing::share_capped_group(vec![testing::share_rule("cap", 0.25, ShareWindow::PerTerm)]);
     let outcome = run(&problem);
 
     assert_eq!(outcome.solution.placed_count(), 4);
@@ -246,18 +231,16 @@ fn an_unsatisfiable_cap_is_reported_rather_than_silently_dropped() {
     // is zero. MaxOnlineShare lives on the objective rather than acting as a
     // filter, so the run succeeds and REPORTS the breach — the same shape as an
     // unplaced Session, not a new exception.
-    let problem = testing::assemble(
-        testing::grid(2, 1),
-        vec![testing::room_with("V", 1, true)],
-        vec![testing::group("G", None)],
-        vec![],
-        vec![testing::with_groups(testing::offering("S", 2, &[0]), &[0])],
-        vec![],
-        calendry_solver_core::ConstraintSet {
+    let problem = testing::assemble(ProblemSpec {
+        rooms: vec![testing::room_with("V", 1, true)],
+        groups: vec![testing::group("G", None)],
+        offerings: vec![testing::with_groups(testing::offering("S", 2, &[0]), &[0])],
+        constraints: calendry_solver_core::ConstraintSet {
             max_online_share: vec![testing::share_rule("cap", 0.0, ShareWindow::PerTerm)],
             ..testing::without_day_mix()
         },
-    );
+        ..ProblemSpec::new(testing::grid(2, 1))
+    });
     let outcome = run(&problem);
 
     assert_eq!(outcome.solution.placed_count(), 2, "placement still happens");
@@ -266,7 +249,7 @@ fn an_unsatisfiable_cap_is_reported_rather_than_silently_dropped() {
         outcome
             .hard_violations
             .iter()
-            .any(|v| v.constraint_type == MAX_ONLINE_SHARE),
+            .any(|v| v.constraint_type == ViolationType::MaxOnlineShare),
         "and must be reported, got {:?}",
         outcome.hard_violations
     );
@@ -290,12 +273,7 @@ fn aggregate_counters_match_full_recomputation() {
         let problem = testing::seeded_aggregate_instance(seed);
 
         for max_moves in [50u64, 500, 5_000, 50_000] {
-            let outcome = solve(
-                &problem,
-                SEED ^ seed,
-                Budget { max_wall_millis: 0, max_moves },
-                &NeverHalt,
-            );
+            let outcome = solve(&problem, SEED ^ seed, moves(max_moves), &NeverHalt);
             let full = recompute_objective(&problem, &outcome.solution);
 
             assert_eq!(
@@ -320,11 +298,17 @@ fn aggregate_counters_match_full_recomputation() {
 fn aggregate_instances_stay_deterministic() {
     for seed in 0..6u64 {
         let problem = testing::seeded_aggregate_instance(seed);
-        let first = solve(&problem, SEED, budget(), &NeverHalt);
-        let again = solve(&problem, SEED, budget(), &NeverHalt);
+        let first = solve(&problem, SEED, moves(50_000), &NeverHalt);
+        let again = solve(&problem, SEED, moves(50_000), &NeverHalt);
 
-        let a: Vec<_> = problem.placement_ids().map(|p| first.solution.get(p)).collect();
-        let b: Vec<_> = problem.placement_ids().map(|p| again.solution.get(p)).collect();
+        let a: Vec<_> = problem
+            .placement_ids()
+            .map(|p| first.solution.get(p))
+            .collect();
+        let b: Vec<_> = problem
+            .placement_ids()
+            .map(|p| again.solution.get(p))
+            .collect();
         assert_eq!(a, b, "seed {seed}");
         assert_eq!(first.objective, again.objective);
         assert_eq!(first.hard_violations, again.hard_violations);
@@ -340,10 +324,11 @@ fn the_search_never_creates_a_day_mix_or_a_veto_breach() {
         let outcome = run(&problem);
         for v in &outcome.hard_violations {
             assert_ne!(
-                v.constraint_type, ONLINE_ONSITE_SAME_DAY,
+                v.constraint_type,
+                ViolationType::OnlineOnsiteSameDay,
                 "seed {seed}: filters must never be violated by the search"
             );
-            assert_ne!(v.constraint_type, LECTURER_VETO, "seed {seed}");
+            assert_ne!(v.constraint_type, ViolationType::LecturerVeto, "seed {seed}");
         }
     }
 }

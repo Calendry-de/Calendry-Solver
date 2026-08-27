@@ -6,26 +6,39 @@
 //! This module is also where input validation lives. It is deliberately strict
 //! about *structural* problems (a Session on a day the tenant does not teach, a
 //! room id that does not exist) and deliberately permissive about *feasibility*
-//! problems (a snapshot that already double-books a room). The app's
-//! manual-edit UX is "warn and allow", so infeasible input is expected and must
-//! degrade gracefully rather than be rejected.
+//! problems (a snapshot that already double-books a room). The app's manual-edit
+//! UX is "warn and allow", so infeasible input is expected and must degrade
+//! gracefully rather than be rejected.
+//!
+//! Two things about that used to be aspirational rather than true, and both are
+//! now enforced by types:
+//!
+//! * The strictness claim was **false for four call sites**, which dropped
+//!   unknown ids with `filter_map`. An unknown `room_id` in particular became
+//!   roomless occupancy — structurally invisible to room double-booking. Every
+//!   id resolution now goes through [`Resolver`] and names its policy:
+//!   `require` or `optional`, with the reason at the call site.
+//! * Errors were `tonic::Status` values built in place, so the code-selection
+//!   policy had no single home and core's typed errors were flattened to prose.
+//!   This module now returns [`ConvertError`]; the mapping to a transport
+//!   response lives in [`crate::error`] and nowhere else.
 
 use std::collections::{HashMap, HashSet};
 
+use calendry_solver_core::aggregates::{ShareInstance, ShareWindow};
 use calendry_solver_core::ids::{GroupIdx, OfferingIdx, PersonIdx, RoomIdx, SlotIdx};
 use calendry_solver_core::problem::{
     ConstraintInstance, ConstraintSet, FixedSpec, Immovable, OfferingSpec, PlacementVar, Problem,
-    Unavailability, classify_immovable,
+    ProblemSpec, ScopeSpec, Unavailability, classify_immovable,
 };
-use calendry_solver_core::aggregates::{ShareInstance, ShareWindow};
 use calendry_solver_core::slots::{SlotTable, WeekKind, WeekSpec};
 use calendry_solver_core::soft::{SoftInstance, SoftParams};
 use calendry_solver_proto::v1 as pb;
-use tonic::Status;
 
 use crate::dates;
+use crate::error::{ConvertError, Resolver};
 
-pub fn convert(input: &pb::SolverInput, scope: &pb::SolveScope) -> Result<Problem, Status> {
+pub fn convert(input: &pb::SolverInput, scope: &pb::SolveScope) -> Result<Problem, ConvertError> {
     check_lock_policy(scope)?;
 
     let slots = build_grid(input)?;
@@ -33,51 +46,71 @@ pub fn convert(input: &pb::SolverInput, scope: &pb::SolveScope) -> Result<Proble
     let room_index = index_by(&input.rooms, |r| r.id.clone());
 
     let (groups, group_index) = build_groups(input)?;
-    let (persons, person_index) = build_persons(input, &group_index);
+    let persons = build_persons(input, &group_index)?;
+    let person_index = index_by(&input.persons, |p| p.id.clone());
 
     let reference = resolve_reference(input, &slots);
     let scope_offerings = resolve_scope(input, scope);
 
-    let offerings = build_offerings(input, &rooms, &room_index, &group_index, &person_index)?;
+    let offerings = build_offerings(input, &rooms, &group_index, &person_index)?;
     let offering_index = index_by(&input.offerings, |o| o.id.clone());
 
-    let (placements, mut fixed) = partition_sessions(
-        input,
-        &slots,
-        &room_index,
-        &group_index,
-        &person_index,
-        &offering_index,
-        &offerings,
-        &scope_offerings,
-        reference,
-    )?;
+    let indexes = Indexes {
+        rooms: Resolver::new(&room_index),
+        groups: Resolver::new(&group_index),
+        persons: Resolver::new(&person_index),
+        offerings: Resolver::new(&offering_index),
+    };
+
+    let (placements, mut fixed) =
+        partition_sessions(input, &slots, &indexes, &offerings, &scope_offerings, reference)?;
 
     fixed.extend(build_external_occupancy(input, &slots, &room_index, &rooms)?);
 
     let constraints = build_constraints(input)?;
 
-    // One derivation path, shared with the hand-written fixtures: group
-    // closures and attendee sets are computed inside `Problem::build` so the two
-    // callers cannot drift on closure semantics.
-    Problem::build(slots, rooms, groups, persons, offerings, placements, fixed, constraints)
-        .map_err(|c| Status::invalid_argument(c.to_string()))
+    // Scope membership is carried into `Problem` rather than thrown away.
+    //
+    // It was resolved here, used twice — to classify immovability and to gate
+    // placement emission — and then dropped, which left `exact_frequency`
+    // reconstructing it downstream from "does this Offering own a placement
+    // variable". That inference is lossy in exactly the direction that matters:
+    // deducting already-locked Sessions can drive an in-scope Offering's
+    // placement count to zero, so an **over-supplied** Offering was
+    // indistinguishable from an out-of-scope one and its mismatch went
+    // unreported.
+    let in_scope: Vec<OfferingIdx> = offerings
+        .iter()
+        .enumerate()
+        .filter(|(_, o)| scope_offerings.contains(&o.id))
+        .map(|(i, _)| OfferingIdx(i as u32))
+        .collect();
+
+    // One derivation path, shared with the hand-written fixtures and the
+    // benchmark generator: group closures and attendee sets are computed inside
+    // `Problem::build` so the three callers cannot drift on closure semantics.
+    Ok(Problem::build(ProblemSpec {
+        rooms,
+        groups,
+        persons,
+        offerings,
+        placements,
+        fixed,
+        constraints,
+        scope: ScopeSpec::Offerings(in_scope),
+        ..ProblemSpec::new(slots)
+    })?)
 }
 
 // ---------------------------------------------------------------------------
 // Scope & lock policy
 // ---------------------------------------------------------------------------
 
-fn check_lock_policy(scope: &pb::SolveScope) -> Result<(), Status> {
+fn check_lock_policy(scope: &pb::SolveScope) -> Result<(), ConvertError> {
     match pb::LockPolicy::try_from(scope.outside_scope_policy) {
         Ok(pb::LockPolicy::Hard) => Ok(()),
-        Ok(pb::LockPolicy::MinimizeMovement) => Err(Status::unimplemented(
-            "LOCK_POLICY_MINIMIZE_MOVEMENT is the deferred v2 policy; v1 hard-locks \
-             everything outside scope",
-        )),
-        _ => Err(Status::invalid_argument(
-            "scope.outside_scope_policy must be set; v1 supports LOCK_POLICY_HARD",
-        )),
+        Ok(pb::LockPolicy::MinimizeMovement) => Err(ConvertError::MinimizeMovementUnsupported),
+        _ => Err(ConvertError::LockPolicyUnset),
     }
 }
 
@@ -89,9 +122,7 @@ fn resolve_scope(input: &pb::SolverInput, scope: &pb::SolveScope) -> HashSet<Str
     input
         .offerings
         .iter()
-        .filter(|o| {
-            by_id.contains(&o.id) || o.group_ids.iter().any(|g| by_group.contains(g))
-        })
+        .filter(|o| by_id.contains(&o.id) || o.group_ids.iter().any(|g| by_group.contains(g)))
         .map(|o| o.id.clone())
         .collect()
 }
@@ -100,15 +131,15 @@ fn resolve_scope(input: &pb::SolverInput, scope: &pb::SolveScope) -> HashSet<Str
 // Grid
 // ---------------------------------------------------------------------------
 
-fn build_grid(input: &pb::SolverInput) -> Result<SlotTable, Status> {
+fn build_grid(input: &pb::SolverInput) -> Result<SlotTable, ConvertError> {
     let grid = input
         .time_grid
         .as_ref()
-        .ok_or_else(|| Status::invalid_argument("input.time_grid is required"))?;
+        .ok_or(ConvertError::MissingTimeGrid)?;
     let calendar = input
         .calendar
         .as_ref()
-        .ok_or_else(|| Status::invalid_argument("input.calendar is required"))?;
+        .ok_or(ConvertError::MissingCalendar)?;
 
     let mut weeks = Vec::with_capacity(calendar.weeks.len());
     for w in &calendar.weeks {
@@ -136,7 +167,7 @@ fn build_grid(input: &pb::SolverInput) -> Result<SlotTable, Status> {
     }
 
     SlotTable::build(grid.blocks_per_day, &grid.active_days, &weeks)
-        .map_err(|e| Status::invalid_argument(format!("invalid time grid: {e}")))
+        .map_err(|e| ConvertError::InvalidTimeGrid { reason: e.to_string() })
 }
 
 /// The caller-supplied "now", resolved to a comparable slot.
@@ -180,7 +211,7 @@ fn build_rooms(input: &pb::SolverInput) -> Vec<calendry_solver_core::problem::Ro
 
 type GroupBuild = (Vec<calendry_solver_core::problem::Group>, HashMap<String, u32>);
 
-fn build_groups(input: &pb::SolverInput) -> Result<GroupBuild, Status> {
+fn build_groups(input: &pb::SolverInput) -> Result<GroupBuild, ConvertError> {
     let index = index_by(&input.groups, |g| g.id.clone());
 
     let mut parent_of = Vec::with_capacity(input.groups.len());
@@ -191,10 +222,10 @@ fn build_groups(input: &pb::SolverInput) -> Result<GroupBuild, Status> {
             match index.get(&g.parent_id) {
                 Some(&p) => Some(GroupIdx(p)),
                 None => {
-                    return Err(Status::invalid_argument(format!(
-                        "group '{}' names unknown parent '{}'",
-                        g.id, g.parent_id
-                    )));
+                    return Err(ConvertError::UnknownGroupParent {
+                        group: g.id.clone(),
+                        parent: g.parent_id.clone(),
+                    });
                 }
             }
         };
@@ -223,43 +254,47 @@ fn build_groups(input: &pb::SolverInput) -> Result<GroupBuild, Status> {
 fn build_persons(
     input: &pb::SolverInput,
     group_index: &HashMap<String, u32>,
-) -> (Vec<calendry_solver_core::problem::Person>, HashMap<String, u32>) {
-    let index = index_by(&input.persons, |p| p.id.clone());
-    let persons = input
+) -> Result<Vec<calendry_solver_core::problem::Person>, ConvertError> {
+    let groups = Resolver::new(group_index);
+    input
         .persons
         .iter()
-        .map(|p| calendry_solver_core::problem::Person {
-            id: p.id.clone(),
-            role_tags: p.role_tags.clone(),
-            groups: p
-                .group_ids
-                .iter()
-                .filter_map(|g| group_index.get(g).map(|&i| GroupIdx(i)))
-                .collect(),
-            // An empty list on an axis means "every value on that axis", which
-            // is preserved verbatim rather than normalised here — the grid is
-            // what resolves it, in `Problem::build`.
-            blackouts: p
-                .blackouts
-                .iter()
-                .map(|b| Unavailability {
-                    days: b.days.clone(),
-                    blocks: b.blocks.clone(),
-                    weeks: b.weeks.clone(),
-                })
-                .collect(),
+        .map(|p| {
+            Ok(calendry_solver_core::problem::Person {
+                id: p.id.clone(),
+                role_tags: p.role_tags.clone(),
+                // REQUIRED. A silently dropped membership removes the Person from
+                // that Group's attendee list, so `PersonDoubleBooking` stops seeing
+                // a clash that is really there — the check exists precisely to catch
+                // what the Group check structurally cannot.
+                groups: groups.require_all(&p.group_ids, GroupIdx, |group| {
+                    ConvertError::UnknownGroup { context: format!("person '{}'", p.id), group }
+                })?,
+                // An empty list on an axis means "every value on that axis", which
+                // is preserved verbatim rather than normalised here — the grid is
+                // what resolves it, in `Problem::build`.
+                blackouts: p
+                    .blackouts
+                    .iter()
+                    .map(|b| Unavailability {
+                        days: b.days.clone(),
+                        blocks: b.blocks.clone(),
+                        weeks: b.weeks.clone(),
+                    })
+                    .collect(),
+            })
         })
-        .collect();
-    (persons, index)
+        .collect()
 }
 
 fn build_offerings(
     input: &pb::SolverInput,
     rooms: &[calendry_solver_core::problem::Room],
-    room_index: &HashMap<String, u32>,
     group_index: &HashMap<String, u32>,
     person_index: &HashMap<String, u32>,
-) -> Result<Vec<OfferingSpec>, Status> {
+) -> Result<Vec<OfferingSpec>, ConvertError> {
+    let groups = Resolver::new(group_index);
+    let persons = Resolver::new(person_index);
     let mut out = Vec::with_capacity(input.offerings.len());
 
     for o in &input.offerings {
@@ -267,20 +302,15 @@ fn build_offerings(
         // larger search space and is rejected rather than silently mis-solved;
         // the schema does not need to change when it lands.
         if o.candidate_lecturer_ids.len() as u32 != o.required_lecturer_count {
-            return Err(Status::unimplemented(format!(
-                "offering '{}' asks the solver to choose {} of {} candidate lecturers; \
-                 v1 supports pre-assigned lecturers only",
-                o.id,
-                o.required_lecturer_count,
-                o.candidate_lecturer_ids.len()
-            )));
+            return Err(ConvertError::LecturerPoolUnsupported {
+                offering: o.id.clone(),
+                required: o.required_lecturer_count,
+                candidates: o.candidate_lecturer_ids.len(),
+            });
         }
 
         if o.duration_blocks == 0 {
-            return Err(Status::invalid_argument(format!(
-                "offering '{}' has duration_blocks = 0",
-                o.id
-            )));
+            return Err(ConvertError::ZeroDurationOffering { offering: o.id.clone() });
         }
 
         let allowed: HashSet<&String> = o.allowed_room_ids.iter().collect();
@@ -309,39 +339,57 @@ fn build_offerings(
             kind: o.kind.clone(),
             required_session_count: o.required_session_count,
             duration_blocks: o.duration_blocks,
-            lecturers: resolve_all(&o.candidate_lecturer_ids, person_index, PersonIdx),
-            groups: resolve_all(&o.group_ids, group_index, GroupIdx),
-            participants: resolve_all(&o.participant_person_ids, person_index, PersonIdx),
+            // All three REQUIRED. A dropped lecturer still passes the
+            // `required_lecturer_count` gate above — it was checked against the
+            // *wire* list — so the Offering would silently be solved with fewer
+            // lecturers than the caller assigned, and lecturer double-booking
+            // would not police the missing one.
+            lecturers: persons.require_all(&o.candidate_lecturer_ids, PersonIdx, |person| {
+                ConvertError::UnknownPerson {
+                    context: format!("offering '{}' lecturers", o.id),
+                    person,
+                }
+            })?,
+            groups: groups.require_all(&o.group_ids, GroupIdx, |group| {
+                ConvertError::UnknownGroup { context: format!("offering '{}'", o.id), group }
+            })?,
+            participants: persons.require_all(&o.participant_person_ids, PersonIdx, |person| {
+                ConvertError::UnknownPerson {
+                    context: format!("offering '{}' participants", o.id),
+                    person,
+                }
+            })?,
             eligible_rooms,
         });
     }
 
-    let _ = room_index;
     Ok(out)
-}
-
-fn resolve_all<T>(ids: &[String], index: &HashMap<String, u32>, wrap: fn(u32) -> T) -> Vec<T> {
-    ids.iter()
-        .filter_map(|id| index.get(id).map(|&i| wrap(i)))
-        .collect()
 }
 
 // ---------------------------------------------------------------------------
 // Sessions
 // ---------------------------------------------------------------------------
 
-#[allow(clippy::too_many_arguments)]
+/// The index maps `partition_sessions` resolves against.
+///
+/// Grouped into one struct so the function is not eight positional arguments,
+/// four of which were interchangeable `&HashMap<String, u32>` values — a
+/// transposition between them would have compiled.
+struct Indexes<'a> {
+    rooms: Resolver<'a>,
+    groups: Resolver<'a>,
+    persons: Resolver<'a>,
+    offerings: Resolver<'a>,
+}
+
 fn partition_sessions(
     input: &pb::SolverInput,
     slots: &SlotTable,
-    room_index: &HashMap<String, u32>,
-    group_index: &HashMap<String, u32>,
-    person_index: &HashMap<String, u32>,
-    offering_index: &HashMap<String, u32>,
+    ix: &Indexes<'_>,
     offerings: &[OfferingSpec],
     scope_offerings: &HashSet<String>,
     reference: Option<SlotIdx>,
-) -> Result<(Vec<PlacementVar>, Vec<FixedSpec>), Status> {
+) -> Result<(Vec<PlacementVar>, Vec<FixedSpec>), ConvertError> {
     let mut fixed = Vec::new();
     // Existing in-scope Sessions, per Offering, so a re-solve preserves Session
     // ids instead of churning them downstream.
@@ -351,14 +399,15 @@ fn partition_sessions(
         let sr = s
             .start_slot
             .as_ref()
-            .ok_or_else(|| Status::invalid_argument(format!("session '{}' has no start_slot", s.id)))?;
+            .ok_or_else(|| ConvertError::SessionWithoutStart { session: s.id.clone() })?;
 
         let start = slots.resolve(sr.week, sr.day, sr.block).ok_or_else(|| {
-            Status::invalid_argument(format!(
-                "session '{}' sits at week {} day {} block {}, which is not a slot in this \
-                 tenant's grid",
-                s.id, sr.week, sr.day, sr.block
-            ))
+            ConvertError::SessionOffGrid {
+                session: s.id.clone(),
+                week: sr.week,
+                day: sr.day,
+                block: sr.block,
+            }
         })?;
 
         let in_scope = !s.offering_id.is_empty() && scope_offerings.contains(&s.offering_id);
@@ -368,19 +417,55 @@ fn partition_sessions(
         // an Offering absent from the snapshot resolves to `None` rather than
         // erroring — the caller's "warn and allow" editing UX can produce that,
         // and it is occupancy either way.
-        let offering = offering_index.get(&s.offering_id).map(|&i| OfferingIdx(i));
+        // OPTIONAL, and the documented reason: an ad-hoc Session (a
+        // `staff_meeting` kind) legitimately realizes no Offering, and a Session
+        // naming an Offering absent from this snapshot is occupancy either way —
+        // the caller's "warn and allow" editing UX produces both.
+        let offering = ix.offerings.optional(&s.offering_id, OfferingIdx);
 
         match classify_immovable(start, reference, s.is_locked, in_scope) {
             Some(reason) => fixed.push(FixedSpec {
                 session_id: s.id.clone(),
                 offering,
                 kind: s.kind.clone(),
-                room: room_index.get(&s.room_id).map(|&i| RoomIdx(i)),
+                // REQUIRED unless genuinely absent.
+                //
+                // An unknown `room_id` used to resolve to `None`, which made the
+                // Session **roomless occupancy** — it still blocked its
+                // lecturers and groups, but room double-booking structurally
+                // could not see it, so the solver would happily place another
+                // Session in a room a locked Session was already using. An empty
+                // `room_id` is different and stays permitted: an online-only or
+                // not-yet-roomed Session is a real state.
+                room: if s.room_id.is_empty() {
+                    None
+                } else {
+                    Some(ix.rooms.require(&s.room_id, RoomIdx, |room| {
+                        ConvertError::UnknownRoom { context: format!("session '{}'", s.id), room }
+                    })?)
+                },
                 start,
                 duration_blocks: s.duration_blocks.max(1),
-                lecturers: resolve_all(&s.lecturer_ids, person_index, PersonIdx),
-                groups: resolve_all(&s.group_ids, group_index, GroupIdx),
-                persons: resolve_all(&s.person_ids, person_index, PersonIdx),
+                // REQUIRED. A dropped lecturer, group or attendee silently
+                // narrows what this immovable Session blocks, which is the same
+                // failure as the room case one axis over.
+                lecturers: ix
+                    .persons
+                    .require_all(&s.lecturer_ids, PersonIdx, |person| {
+                        ConvertError::UnknownPerson {
+                            context: format!("session '{}' lecturers", s.id),
+                            person,
+                        }
+                    })?,
+                groups: ix.groups.require_all(&s.group_ids, GroupIdx, |group| {
+                    ConvertError::UnknownGroup { context: format!("session '{}'", s.id), group }
+                })?,
+                persons: ix.persons.require_all(&s.person_ids, PersonIdx, |person| {
+                    ConvertError::UnknownPerson {
+                        context: format!("session '{}' attendees", s.id),
+                        person,
+                    }
+                })?,
                 reason,
             }),
             None => reusable
@@ -436,28 +521,26 @@ fn build_external_occupancy(
     slots: &SlotTable,
     room_index: &HashMap<String, u32>,
     rooms: &[calendry_solver_core::problem::Room],
-) -> Result<Vec<FixedSpec>, Status> {
+) -> Result<Vec<FixedSpec>, ConvertError> {
     let mut out = Vec::new();
 
     for e in &input.external_occupancy {
         let Some(&room) = room_index.get(&e.room_id) else {
-            return Err(Status::invalid_argument(format!(
-                "external_occupancy references unknown room '{}'",
-                e.room_id
-            )));
+            return Err(ConvertError::UnknownRoom {
+                context: "external_occupancy".to_string(),
+                room: e.room_id.clone(),
+            });
         };
 
         // Occupancy from another tenant only makes sense against a shared room.
         if !rooms[room as usize].federation_owned {
-            return Err(Status::invalid_argument(format!(
-                "external_occupancy references room '{}', which is not Federation-owned",
-                e.room_id
-            )));
+            return Err(ConvertError::ExternalOccupancyOnPrivateRoom { room: e.room_id.clone() });
         }
 
-        let sr = e.start_slot.as_ref().ok_or_else(|| {
-            Status::invalid_argument("external_occupancy entry has no start_slot")
-        })?;
+        let sr = e
+            .start_slot
+            .as_ref()
+            .ok_or(ConvertError::ExternalOccupancyWithoutStart)?;
         let Some(start) = slots.resolve(sr.week, sr.day, sr.block) else {
             // An external booking outside this tenant's grid cannot collide with
             // anything the solver places, so it is dropped rather than rejected.
@@ -491,7 +574,7 @@ fn build_external_occupancy(
 // Constraints
 // ---------------------------------------------------------------------------
 
-fn build_constraints(input: &pb::SolverInput) -> Result<ConstraintSet, Status> {
+fn build_constraints(input: &pb::SolverInput) -> Result<ConstraintSet, ConvertError> {
     use pb::constraint_config::Params;
 
     let mut set = ConstraintSet::default();
@@ -503,10 +586,7 @@ fn build_constraints(input: &pb::SolverInput) -> Result<ConstraintSet, Status> {
 
         // `applies_to_kinds` empty means "all kinds". A type may be configured
         // more than once with different kind scopes, which is why each is a list.
-        let instance = ConstraintInstance {
-            id: c.id.clone(),
-            kinds: c.applies_to_kinds.clone(),
-        };
+        let instance = ConstraintInstance { id: c.id.clone(), kinds: c.applies_to_kinds.clone() };
 
         match &c.params {
             Some(Params::RoomDoubleBooking(_)) => set.room_double_booking.push(instance),
@@ -519,20 +599,16 @@ fn build_constraints(input: &pb::SolverInput) -> Result<ConstraintSet, Status> {
             Some(Params::OnlineOnsiteSameDay(_)) => set.online_onsite_same_day.push(instance),
             Some(Params::MaxOnlineShare(p)) => {
                 if !(0.0..=1.0).contains(&p.max_ratio) || p.max_ratio.is_nan() {
-                    return Err(Status::invalid_argument(format!(
-                        "constraint '{}' has max_ratio {}; it is a share and must be in 0.0..=1.0",
-                        c.id, p.max_ratio
-                    )));
+                    return Err(ConvertError::ShareRatioOutOfRange {
+                        constraint: c.id.clone(),
+                        ratio: p.max_ratio,
+                    });
                 }
                 let window = match pb::ShareWindow::try_from(p.window) {
                     Ok(pb::ShareWindow::PerTerm) => ShareWindow::PerTerm,
                     Ok(pb::ShareWindow::PerWeek) => ShareWindow::PerWeek,
                     _ => {
-                        return Err(Status::invalid_argument(format!(
-                            "constraint '{}' must set window to PER_TERM or PER_WEEK; the \
-                             ratio is meaningless without a window to measure it over",
-                            c.id
-                        )));
+                        return Err(ConvertError::ShareWindowUnset { constraint: c.id.clone() });
                     }
                 };
                 set.max_online_share.push(ShareInstance {
@@ -546,40 +622,38 @@ fn build_constraints(input: &pb::SolverInput) -> Result<ConstraintSet, Status> {
             // The six soft types. Weight is meaningful only here — hard types
             // ignore it, because hard-vs-soft is a property of the TYPE.
             Some(Params::MinimizeFirstBlock(_)) => {
-                set.soft.push(soft_instance(c, SoftParams::MinimizeFirstBlock)?)
+                set.soft
+                    .push(soft_instance(c, SoftParams::MinimizeFirstBlock)?);
             }
             Some(Params::MinimizeLastBlock(_)) => {
-                set.soft.push(soft_instance(c, SoftParams::MinimizeLastBlock)?)
+                set.soft
+                    .push(soft_instance(c, SoftParams::MinimizeLastBlock)?);
             }
             Some(Params::MinimizeDayUsage(p)) => {
                 for d in &p.days {
                     if !(1..=7).contains(d) {
-                        return Err(Status::invalid_argument(format!(
-                            "constraint '{}': {d} is not an ISO weekday (1..=7)",
-                            c.id
-                        )));
+                        return Err(ConvertError::NotAnIsoWeekday {
+                            constraint: c.id.clone(),
+                            day: *d,
+                        });
                     }
                 }
-                set.soft.push(soft_instance(
-                    c,
-                    SoftParams::MinimizeDayUsage { days: p.days.clone() },
-                )?)
+                set.soft
+                    .push(soft_instance(c, SoftParams::MinimizeDayUsage { days: p.days.clone() })?);
             }
             Some(Params::MinimizeRoomRank(p)) => set.soft.push(soft_instance(
                 c,
                 SoftParams::MinimizeRoomRank { rank_threshold: p.rank_threshold },
             )?),
             Some(Params::MinimizeExamWeek(_)) => {
-                set.soft.push(soft_instance(c, SoftParams::MinimizeExamWeek)?)
+                set.soft
+                    .push(soft_instance(c, SoftParams::MinimizeExamWeek)?);
             }
             Some(Params::MinimizeOnline(_)) => {
-                set.soft.push(soft_instance(c, SoftParams::MinimizeOnline)?)
+                set.soft.push(soft_instance(c, SoftParams::MinimizeOnline)?);
             }
             None => {
-                return Err(Status::invalid_argument(format!(
-                    "constraint '{}' has no params set",
-                    c.id
-                )));
+                return Err(ConvertError::ConstraintWithoutParams { constraint: c.id.clone() });
             }
         }
     }
@@ -596,13 +670,15 @@ fn build_constraints(input: &pb::SolverInput) -> Result<ConstraintSet, Status> {
 /// Every soft type declares "minimize". A negative weight would silently invert
 /// it into a maximize the type never declared — so it is refused rather than
 /// quietly honoured. Zero is fine and means "report the count, do not steer".
-fn soft_instance(c: &pb::ConstraintConfig, params: SoftParams) -> Result<SoftInstance, Status> {
+fn soft_instance(
+    c: &pb::ConstraintConfig,
+    params: SoftParams,
+) -> Result<SoftInstance, ConvertError> {
     if c.weight < 0.0 || c.weight.is_nan() {
-        return Err(Status::invalid_argument(format!(
-            "constraint '{}' has weight {}; soft weights must be >= 0 because every soft \
-             type declares minimize, and a negative weight would invert it",
-            c.id, c.weight
-        )));
+        return Err(ConvertError::NegativeSoftWeight {
+            constraint: c.id.clone(),
+            weight: c.weight,
+        });
     }
     Ok(SoftInstance {
         id: c.id.clone(),
@@ -634,11 +710,7 @@ pub fn build_output(
         sessions.push(pb::PlacedSession {
             session_id: var.existing_session_id.clone().unwrap_or_default(),
             offering_id: offering.id.clone(),
-            start_slot: Some(pb::SlotRef {
-                week: f.week,
-                day: f.iso_weekday,
-                block: f.block,
-            }),
+            start_slot: Some(pb::SlotRef { week: f.week, day: f.iso_weekday, block: f.block }),
             duration_blocks: offering.duration_blocks,
             room_id: problem.rooms[placement.room.get()].id.clone(),
             lecturer_ids: offering
@@ -695,321 +767,5 @@ pub fn build_output(
             elapsed_millis,
             termination_reason: outcome.termination_reason.to_string(),
         }),
-    }
-}
-
-// ---------------------------------------------------------------------------
-
-#[cfg(test)]
-mod locked_frequency_tests {
-    //! Locked Sessions must count toward their Offering's required frequency.
-    //!
-    //! This is the ordinary mid-term re-solve — the primary case the lock
-    //! mechanism exists for. An Offering needing 12 Sessions with 3 already
-    //! locked (user-locked, or in the past) needs **9** more, not 12.
-    //!
-    //! Two halves of one gap made that wrong:
-    //!
-    //! 1. [`partition_sessions`] dropped `Session.offering_id` when building a
-    //!    `FixedSpec`, then created placement variables for the **full**
-    //!    `required_session_count` — so the solver scheduled 12 on top of the 3
-    //!    locked ones, 15 in total.
-    //! 2. `FixedOccupancy` carried no Offering link either, so
-    //!    `constraints::exact_frequency` could not have counted the locked
-    //!    Sessions toward frequency even had the placements been deducted.
-    //!
-    //! These are written to be **red against the pre-fix code**, and were
-    //! confirmed red before the fix landed.
-
-    use super::convert;
-    use calendry_solver_core::constraints;
-    use calendry_solver_core::ids::OfferingIdx;
-    use calendry_solver_core::search::construct;
-    use calendry_solver_proto::v1 as pb;
-
-    const KIND: &str = "lecture";
-
-    fn slot(week: u32, day: u32, block: u32) -> pb::SlotRef {
-        pb::SlotRef { week, day, block }
-    }
-
-    /// Roomy enough that nothing here is infeasible for want of space:
-    /// 4 weeks x Mon-Fri x 6 blocks = 120 slots, 2 rooms.
-    fn base_input() -> pb::SolverInput {
-        pb::SolverInput {
-            requesting_tenant_id: "t1".into(),
-            federation_id: String::new(),
-            time_grid: Some(pb::TimeGrid {
-                blocks_per_day: 6,
-                block_length_minutes: 45,
-                day_start_minute: 480,
-                active_days: vec![1, 2, 3, 4, 5],
-                institution_timezone: "Europe/Berlin".into(),
-            }),
-            calendar: Some(pb::AcademicCalendar {
-                term_id: "term-1".into(),
-                weeks: (0..4)
-                    .map(|i| pb::Week {
-                        index: i,
-                        start_date: format!("2026-01-{:02}", 5 + i * 7),
-                        kind: pb::WeekKind::Teaching as i32,
-                    })
-                    .collect(),
-                holidays: vec![],
-            }),
-            rooms: (0..2)
-                .map(|i| pb::Room {
-                    id: format!("r{i}"),
-                    owner: Some(pb::room::Owner::TenantId("t1".into())),
-                    name: format!("Room {i}"),
-                    capacity: 100,
-                    rank: 1,
-                    is_virtual: false,
-                    feature_tags: vec![],
-                    location: String::new(),
-                })
-                .collect(),
-            persons: vec![pb::Person {
-                id: "p1".into(),
-                role_tags: vec!["Lecturer".into()],
-                group_ids: vec![],
-                blackouts: vec![],
-            }],
-            groups: vec![pb::Group {
-                id: "g1".into(),
-                parent_id: String::new(),
-                name: "Group 1".into(),
-                size: 20,
-            }],
-            offerings: vec![],
-            existing_sessions: vec![],
-            external_occupancy: vec![],
-            constraints: vec![
-                enabled(
-                    "c-room",
-                    pb::constraint_config::Params::RoomDoubleBooking(pb::RoomDoubleBooking {}),
-                ),
-                enabled(
-                    "c-freq",
-                    pb::constraint_config::Params::ExactFrequency(pb::ExactFrequency {}),
-                ),
-            ],
-            // Week 0 Monday block 0 — nothing here is past unless a test puts
-            // it there deliberately.
-            reference_slot: Some(slot(0, 1, 0)),
-        }
-    }
-
-    fn enabled(id: &str, params: pb::constraint_config::Params) -> pb::ConstraintConfig {
-        pb::ConstraintConfig {
-            id: id.into(),
-            enabled: true,
-            applies_to_kinds: vec![],
-            weight: 0.0,
-            params: Some(params),
-        }
-    }
-
-    fn offering(id: &str, required: u32) -> pb::Offering {
-        pb::Offering {
-            id: id.into(),
-            owner: Some(pb::offering::Owner::TenantId("t1".into())),
-            kind: KIND.into(),
-            required_session_count: required,
-            duration_blocks: 1,
-            candidate_lecturer_ids: vec!["p1".into()],
-            required_lecturer_count: 1,
-            group_ids: vec!["g1".into()],
-            participant_person_ids: vec![],
-            required_room_features: vec![],
-            min_capacity: 0,
-            allowed_room_ids: vec![],
-            allow_online: false,
-        }
-    }
-
-    fn locked_session(id: &str, offering_id: &str, at: pb::SlotRef) -> pb::Session {
-        pb::Session {
-            id: id.into(),
-            owner: Some(pb::session::Owner::TenantId("t1".into())),
-            offering_id: offering_id.into(),
-            kind: KIND.into(),
-            start_slot: Some(at),
-            duration_blocks: 1,
-            room_id: "r0".into(),
-            lecturer_ids: vec!["p1".into()],
-            group_ids: vec!["g1".into()],
-            person_ids: vec![],
-            is_locked: true,
-        }
-    }
-
-    fn scope(ids: &[&str]) -> pb::SolveScope {
-        pb::SolveScope {
-            offering_ids: ids.iter().map(|s| s.to_string()).collect(),
-            group_ids: vec![],
-            outside_scope_policy: pb::LockPolicy::Hard as i32,
-        }
-    }
-
-    fn frequency_violations(
-        problem: &calendry_solver_core::Problem,
-    ) -> Vec<constraints::Violation> {
-        let (solution, _) = construct(problem);
-        constraints::evaluate_hard(problem, &solution)
-            .into_iter()
-            .filter(|v| v.constraint_type == "ExactFrequency")
-            .collect()
-    }
-
-    #[test]
-    fn locked_sessions_count_toward_required_frequency() {
-        // 12 required, 3 already locked. The run must place exactly 9 more.
-        let mut input = base_input();
-        input.offerings = vec![offering("o1", 12)];
-        input.existing_sessions = vec![
-            locked_session("s1", "o1", slot(0, 1, 1)),
-            locked_session("s2", "o1", slot(0, 2, 1)),
-            locked_session("s3", "o1", slot(0, 3, 1)),
-        ];
-
-        let problem = convert(&input, &scope(&["o1"])).expect("valid input");
-
-        assert_eq!(
-            problem.fixed.len(),
-            3,
-            "the three locked Sessions must survive as immovable occupancy"
-        );
-
-        // RED BEFORE THE FIX: this was 12, so the solver scheduled 12 on top of
-        // the 3 locked ones — 15 Sessions for an Offering requiring 12.
-        assert_eq!(
-            problem.placements.len(),
-            9,
-            "12 required minus 3 locked = 9 placements to position"
-        );
-
-        // RED BEFORE THE FIX: the link did not exist, so frequency had nothing
-        // to count.
-        let linked = problem
-            .fixed
-            .iter()
-            .filter(|f| f.offering == Some(OfferingIdx(0)))
-            .count();
-        assert_eq!(linked, 3, "locked Sessions must carry their Offering link");
-
-        // RED BEFORE THE FIX: 12 required against 9 placed reported a violation
-        // that does not exist.
-        let freq = frequency_violations(&problem);
-        assert!(
-            freq.is_empty(),
-            "a fully realized Offering must report no frequency violation, got {freq:#?}"
-        );
-    }
-
-    #[test]
-    fn a_genuine_shortfall_is_still_reported() {
-        // The counterpart: counting locked Sessions must not become a way to
-        // silence a real shortfall. One slot, two rooms, so 5 cannot be reached.
-        let mut input = base_input();
-        input.time_grid = Some(pb::TimeGrid {
-            blocks_per_day: 1,
-            block_length_minutes: 45,
-            day_start_minute: 480,
-            active_days: vec![1],
-            institution_timezone: "Europe/Berlin".into(),
-        });
-        input.calendar = Some(pb::AcademicCalendar {
-            term_id: "term-1".into(),
-            weeks: vec![pb::Week {
-                index: 0,
-                start_date: "2026-01-05".into(),
-                kind: pb::WeekKind::Teaching as i32,
-            }],
-            holidays: vec![],
-        });
-        input.offerings = vec![offering("o1", 5)];
-        input.existing_sessions = vec![locked_session("s1", "o1", slot(0, 1, 0))];
-
-        let problem = convert(&input, &scope(&["o1"])).expect("valid input");
-        assert_eq!(problem.placements.len(), 4, "5 required minus 1 locked");
-
-        assert!(
-            !frequency_violations(&problem).is_empty(),
-            "a genuine shortfall must still be reported"
-        );
-    }
-
-    #[test]
-    fn out_of_scope_offerings_are_unaffected() {
-        // o2 is not in scope, so it gets no placement variables and its
-        // frequency is not this run's business. Its locked Sessions must still
-        // occupy the grid without leaking a violation or perturbing o1.
-        let mut input = base_input();
-        input.offerings = vec![offering("o1", 4), offering("o2", 7)];
-        input.existing_sessions = vec![
-            locked_session("s1", "o1", slot(0, 1, 1)),
-            locked_session("s2", "o2", slot(0, 2, 1)),
-            locked_session("s3", "o2", slot(0, 3, 1)),
-        ];
-
-        let problem = convert(&input, &scope(&["o1"])).expect("valid input");
-
-        assert_eq!(
-            problem.placements.len(),
-            3,
-            "only o1 is in scope: 4 required minus its 1 lock"
-        );
-        assert_eq!(problem.fixed.len(), 3, "all three locks remain occupancy");
-
-        let freq = frequency_violations(&problem);
-        assert!(
-            freq.is_empty(),
-            "an out-of-scope Offering must not report a frequency violation, got {freq:#?}"
-        );
-    }
-
-    #[test]
-    fn more_locks_than_required_saturates_instead_of_underflowing() {
-        // The app's editing UX is "warn and allow", so a caller can legitimately
-        // send more Sessions than the Offering claims to need. The deduction
-        // must saturate at zero rather than wrapping a u32 into four billion
-        // placement variables.
-        let mut input = base_input();
-        input.offerings = vec![offering("o1", 2)];
-        input.existing_sessions = vec![
-            locked_session("s1", "o1", slot(0, 1, 1)),
-            locked_session("s2", "o1", slot(0, 2, 1)),
-            locked_session("s3", "o1", slot(0, 3, 1)),
-            locked_session("s4", "o1", slot(0, 4, 1)),
-        ];
-
-        let problem = convert(&input, &scope(&["o1"])).expect("valid input");
-        assert_eq!(
-            problem.placements.len(),
-            0,
-            "already over-supplied: nothing left to place, and no underflow"
-        );
-
-        // The safety-critical property: no underflow, no absurd placement count.
-        // The run simply has nothing to do for this Offering.
-        assert!(
-            frequency_violations(&problem).is_empty(),
-            "KNOWN LIMITATION, asserted so a change is deliberate: over-supply \
-             is NOT reported"
-        );
-
-        // Why it is not reported, and why that is left alone here:
-        //
-        // `constraints::exact_frequency` treats "has placement variables" as its
-        // proxy for "in scope" — a documented decision that predates this fix.
-        // Deducting locks is the first thing that can drive an in-scope
-        // Offering's placement count to zero, so this is the first input for
-        // which the proxy and real scope membership disagree.
-        //
-        // Reporting it would mean carrying real scope membership into
-        // `Problem`, which is a semantic change to core rather than a fix to
-        // the conversion boundary. Deliberately out of scope for a standalone
-        // bug fix; recorded in CLAUDE.md as its own decision.
     }
 }

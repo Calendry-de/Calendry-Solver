@@ -14,10 +14,7 @@ pub struct BitSet {
 
 impl BitSet {
     pub fn new(capacity: usize) -> Self {
-        Self {
-            words: vec![0; capacity.div_ceil(64)],
-            capacity,
-        }
+        Self { words: vec![0; capacity.div_ceil(64)], capacity }
     }
 
     #[inline]
@@ -62,13 +59,11 @@ impl BitSet {
     /// derived `Vec`s feed straight into output and test assertions.
     pub fn iter(&self) -> impl Iterator<Item = usize> + '_ {
         self.words.iter().enumerate().flat_map(|(w, &word)| {
-            (0..64).filter_map(move |b| {
-                if word & (1u64 << b) != 0 {
-                    Some(w * 64 + b)
-                } else {
-                    None
-                }
-            })
+            (0..64).filter_map(
+                move |b| {
+                    if word & (1u64 << b) != 0 { Some(w * 64 + b) } else { None }
+                },
+            )
         })
     }
 }
@@ -84,20 +79,13 @@ pub struct BitMatrix {
 impl BitMatrix {
     pub fn new(rows: usize, cols: usize) -> Self {
         let words_per_row = cols.div_ceil(64);
-        Self {
-            words: vec![0; rows * words_per_row],
-            cols,
-            words_per_row,
-        }
+        Self { words: vec![0; rows * words_per_row], cols, words_per_row }
     }
 
     #[inline]
     fn addr(&self, row: usize, col: usize) -> (usize, u64) {
         debug_assert!(col < self.cols);
-        (
-            row * self.words_per_row + col / 64,
-            1u64 << (col % 64),
-        )
+        (row * self.words_per_row + col / 64, 1u64 << (col % 64))
     }
 
     #[inline]

@@ -64,12 +64,7 @@ impl MoveEvaluator for CpuEvaluator {
     }
 }
 
-fn score_one(
-    problem: &Problem,
-    solution: &Solution,
-    state: &SearchState,
-    mv: &Move,
-) -> Score {
+fn score_one(problem: &Problem, solution: &Solution, state: &SearchState, mv: &Move) -> Score {
     let offering = problem.offering_of(mv.placement);
 
     let Some(span) = problem.slots.span(mv.to.start, offering.duration_blocks) else {
@@ -104,7 +99,12 @@ fn score_one(
         0.0
     };
 
-    Score(problem.soft.cost(offering.soft_profile, mv.to.start, mv.to.room) + share_penalty)
+    Score(
+        problem
+            .soft
+            .cost(offering.soft_profile, mv.to.start, mv.to.room)
+            + share_penalty,
+    )
 }
 
 #[cfg(test)]

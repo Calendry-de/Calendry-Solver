@@ -15,23 +15,15 @@
 //!   real objective. No other test here would notice that.
 
 use calendry_solver_core::ids::PlacementIdx;
+use calendry_solver_core::problem::ProblemSpec;
 use calendry_solver_core::search::{
-    Budget, NeverHalt, construct, objectives_agree, recompute_objective, solve,
+    NeverHalt, construct, objectives_agree, recompute_objective, solve,
 };
 use calendry_solver_core::soft::SoftParams;
 use calendry_solver_core::{Problem, Solution, testing};
 
-const SEED: u64 = 0xC0FFEE;
-
-/// A move budget, never a wall-clock budget: time-terminated runs are
-/// legitimately non-reproducible, so tests must not depend on them.
-fn budget() -> Budget {
-    Budget { max_wall_millis: 0, max_moves: 50_000 }
-}
-
-fn run(problem: &Problem) -> calendry_solver_core::SolveOutcome {
-    solve(problem, SEED, budget(), &NeverHalt)
-}
+mod common;
+use common::{SEED, moves, solve_with_move_budget as run};
 
 fn placed(problem: &Problem, s: &Solution, i: u32) -> (u32, u32) {
     let p = s.get(PlacementIdx(i)).expect("should be placed");
@@ -57,11 +49,7 @@ fn finds_the_hand_computable_optimum() {
 
     let outcome = run(&problem);
     assert_eq!(outcome.objective.soft, 0.0, "optimum is exactly 0");
-    assert_eq!(
-        placed(&problem, &outcome.solution, 0).0,
-        1,
-        "block 1 is the only zero-cost slot"
-    );
+    assert_eq!(placed(&problem, &outcome.solution, 0).0, 1, "block 1 is the only zero-cost slot");
     assert!(outcome.hard_violations.is_empty());
 }
 
@@ -121,21 +109,19 @@ fn minimize_last_block_steers_away_from_the_final_block() {
     // Against a no-op MinimizeLastBlock the weighted case still scores block 3
     // at 0 and stays there, so this fails rather than passing by luck.
     let build = |w: f64| {
-        testing::assemble(
-            testing::grid(4, 1),
-            testing::rooms(1),
-            vec![],
-            vec![],
-            vec![testing::offering("S", 1, &[0])],
-            vec![
+        testing::assemble(ProblemSpec {
+            rooms: testing::rooms(1),
+            offerings: vec![testing::offering("S", 1, &[0])],
+            fixed: vec![
                 testing::fixed_session("blk1", Some(0), 1),
                 testing::fixed_session("blk2", Some(0), 2),
             ],
-            testing::with_soft(vec![
+            constraints: testing::with_soft(vec![
                 testing::soft("f", 10.0, SoftParams::MinimizeFirstBlock),
                 testing::soft("l", w, SoftParams::MinimizeLastBlock),
             ]),
-        )
+            ..ProblemSpec::new(testing::grid(4, 1))
+        })
     };
 
     let off = run(&build(0.0));
@@ -161,7 +147,11 @@ fn minimize_day_usage_steers_off_the_named_weekday() {
         testing::single_session(
             testing::two_day_grid(),
             testing::rooms(1),
-            vec![testing::soft("d", w, SoftParams::MinimizeDayUsage { days: vec![1] })],
+            vec![testing::soft(
+                "d",
+                w,
+                SoftParams::MinimizeDayUsage { days: vec![1] },
+            )],
         )
     });
     assert_eq!(off, 0, "unweighted, greedy takes Monday");
@@ -192,7 +182,11 @@ fn minimize_room_rank_steers_away_from_premium_rooms() {
                 testing::room_with("R0", 9, false),
                 testing::room_with("R1", 1, false),
             ],
-            vec![testing::soft("r", w, SoftParams::MinimizeRoomRank { rank_threshold: 5 })],
+            vec![testing::soft(
+                "r",
+                w,
+                SoftParams::MinimizeRoomRank { rank_threshold: 5 },
+            )],
         )
     });
     assert_eq!(off, 0, "unweighted, greedy takes the premium room");
@@ -227,7 +221,7 @@ fn search_never_returns_worse_than_the_greedy_start() {
         let problem = testing::seeded_instance(seed);
         let (greedy, _) = construct(&problem);
         let start = recompute_objective(&problem, &greedy);
-        let outcome = solve(&problem, SEED, budget(), &NeverHalt);
+        let outcome = solve(&problem, SEED, moves(50_000), &NeverHalt);
 
         assert!(
             outcome.objective.total(problem.hard_penalty)
@@ -245,7 +239,7 @@ fn search_never_increases_hard_violations() {
         let problem = testing::seeded_instance(seed);
         let (greedy, _) = construct(&problem);
         let start = recompute_objective(&problem, &greedy);
-        let outcome = solve(&problem, SEED, budget(), &NeverHalt);
+        let outcome = solve(&problem, SEED, moves(50_000), &NeverHalt);
 
         assert!(
             outcome.objective.unplaced <= start.unplaced,
@@ -261,7 +255,7 @@ fn reported_objective_matches_the_returned_solution() {
     // Guards the "returned best is not the objective we reported" class of bug.
     for seed in 0..8u64 {
         let problem = testing::seeded_instance(seed);
-        let outcome = solve(&problem, SEED, budget(), &NeverHalt);
+        let outcome = solve(&problem, SEED, moves(50_000), &NeverHalt);
         let recomputed = recompute_objective(&problem, &outcome.solution);
         assert!(
             objectives_agree(outcome.objective, recomputed),
@@ -290,12 +284,7 @@ fn incremental_objective_matches_full_recomputation() {
         let problem = testing::seeded_instance(seed);
 
         for max_moves in [50u64, 500, 5_000, 50_000] {
-            let outcome = solve(
-                &problem,
-                SEED ^ seed,
-                Budget { max_wall_millis: 0, max_moves },
-                &NeverHalt,
-            );
+            let outcome = solve(&problem, SEED ^ seed, moves(max_moves), &NeverHalt);
             let full = recompute_objective(&problem, &outcome.solution);
 
             assert_eq!(
@@ -320,13 +309,19 @@ fn incremental_objective_matches_full_recomputation() {
 fn same_seed_and_move_budget_produce_identical_output() {
     for seed in 0..6u64 {
         let problem = testing::seeded_instance(seed);
-        let first = solve(&problem, SEED, budget(), &NeverHalt);
+        let first = solve(&problem, SEED, moves(50_000), &NeverHalt);
 
         for attempt in 0..3 {
-            let again = solve(&problem, SEED, budget(), &NeverHalt);
+            let again = solve(&problem, SEED, moves(50_000), &NeverHalt);
 
-            let a: Vec<_> = problem.placement_ids().map(|p| first.solution.get(p)).collect();
-            let b: Vec<_> = problem.placement_ids().map(|p| again.solution.get(p)).collect();
+            let a: Vec<_> = problem
+                .placement_ids()
+                .map(|p| first.solution.get(p))
+                .collect();
+            let b: Vec<_> = problem
+                .placement_ids()
+                .map(|p| again.solution.get(p))
+                .collect();
             assert_eq!(a, b, "seed {seed} attempt {attempt}: placements differ");
 
             assert_eq!(first.objective, again.objective);
@@ -343,8 +338,8 @@ fn same_seed_and_move_budget_produce_identical_output() {
 fn different_seeds_explore_differently() {
     // Guards determinism passing trivially because the seed is ignored.
     let problem = testing::seeded_instance(3);
-    let a = solve(&problem, 1, budget(), &NeverHalt);
-    let b = solve(&problem, 999_983, budget(), &NeverHalt);
+    let a = solve(&problem, 1, moves(50_000), &NeverHalt);
+    let b = solve(&problem, 999_983, moves(50_000), &NeverHalt);
     assert_ne!(
         a.moves_evaluated, b.moves_evaluated,
         "different seeds should drive different search trajectories"
@@ -354,12 +349,7 @@ fn different_seeds_explore_differently() {
 #[test]
 fn move_budget_is_respected() {
     let problem = testing::seeded_instance(5);
-    let outcome = solve(
-        &problem,
-        SEED,
-        Budget { max_wall_millis: 0, max_moves: 100 },
-        &NeverHalt,
-    );
+    let outcome = solve(&problem, SEED, moves(100), &NeverHalt);
     assert!(
         outcome.termination_reason == "move_budget" || outcome.termination_reason == "converged",
         "unexpected reason {}",

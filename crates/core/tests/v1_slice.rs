@@ -6,18 +6,15 @@
 //! vacuously, so a "no violations" assertion would pass on a solver that does
 //! nothing at all.
 
-use calendry_solver_core::constraints::{EXACT_FREQUENCY, ROOM_DOUBLE_BOOKING};
+use calendry_solver_core::constraints::ViolationType;
 use calendry_solver_core::ids::{PlacementIdx, RoomIdx, SlotIdx};
-use calendry_solver_core::problem::classify_immovable;
+use calendry_solver_core::problem::{ProblemSpec, classify_immovable};
 use calendry_solver_core::search::{Budget, NeverHalt, solve};
 use calendry_solver_core::soft::SoftParams;
 use calendry_solver_core::{Immovable, Placement, testing};
 
-const SEED: u64 = 0xC0FFEE;
-
-fn run(problem: &calendry_solver_core::Problem) -> calendry_solver_core::SolveOutcome {
-    solve(problem, SEED, Budget::default(), &NeverHalt)
-}
+mod common;
+use common::{SEED, solve_to_convergence as run};
 
 // ---------------------------------------------------------------------------
 // Test 1 — forced-unique packing
@@ -67,16 +64,12 @@ fn oversubscribed_input_terminates_and_reports_a_hard_violation() {
     let outcome = run(&problem);
 
     // It must place what it can rather than giving up or erroring.
-    assert_eq!(
-        outcome.solution.placed_count(),
-        3,
-        "should fill all 3 available room-slots"
-    );
+    assert_eq!(outcome.solution.placed_count(), 3, "should fill all 3 available room-slots");
 
     // And it must SAY that it could not satisfy the demand.
     assert_eq!(outcome.hard_violations.len(), 1);
     let v = &outcome.hard_violations[0];
-    assert_eq!(v.constraint_type, EXACT_FREQUENCY);
+    assert_eq!(v.constraint_type, ViolationType::ExactFrequency);
     assert_eq!(v.offering_ids, vec!["A".to_string()]);
     assert!(
         v.detail.contains("requires 4") && v.detail.contains("3 placed"),
@@ -89,7 +82,7 @@ fn oversubscribed_input_terminates_and_reports_a_hard_violation() {
         !outcome
             .hard_violations
             .iter()
-            .any(|v| v.constraint_type == ROOM_DOUBLE_BOOKING),
+            .any(|v| v.constraint_type == ViolationType::RoomDoubleBooking),
         "must not double-book to satisfy frequency"
     );
 }
@@ -125,23 +118,14 @@ fn past_classification_is_unconditional() {
     let reference = Some(SlotIdx(10));
 
     // Before the reference instant: past, regardless of lock or scope.
-    assert_eq!(
-        classify_immovable(SlotIdx(9), reference, false, true),
-        Some(Immovable::Past)
-    );
-    assert_eq!(
-        classify_immovable(SlotIdx(9), reference, true, true),
-        Some(Immovable::Past)
-    );
+    assert_eq!(classify_immovable(SlotIdx(9), reference, false, true), Some(Immovable::Past));
+    assert_eq!(classify_immovable(SlotIdx(9), reference, true, true), Some(Immovable::Past));
 
     // At or after the reference instant, in scope and unlocked: movable.
     assert_eq!(classify_immovable(SlotIdx(10), reference, false, true), None);
 
     // A reference past the end of the term makes everything past.
-    assert_eq!(
-        classify_immovable(SlotIdx(0), None, false, true),
-        Some(Immovable::Past)
-    );
+    assert_eq!(classify_immovable(SlotIdx(0), None, false, true), Some(Immovable::Past));
 }
 
 // ---------------------------------------------------------------------------
@@ -167,10 +151,7 @@ fn locked_and_out_of_scope_are_distinguished_from_day_one() {
     let reference = Some(SlotIdx(0));
 
     // Locked, in scope: absolute. Never relaxed, not even by v2.
-    assert_eq!(
-        classify_immovable(SlotIdx(5), reference, true, true),
-        Some(Immovable::Locked)
-    );
+    assert_eq!(classify_immovable(SlotIdx(5), reference, true, true), Some(Immovable::Locked));
 
     // Unlocked, out of scope: the ONLY variant v2's minimize-movement relaxes.
     assert_eq!(
@@ -179,20 +160,14 @@ fn locked_and_out_of_scope_are_distinguished_from_day_one() {
     );
 
     // A lock outranks being out of scope, so v2 cannot relax it by accident.
-    assert_eq!(
-        classify_immovable(SlotIdx(5), reference, true, false),
-        Some(Immovable::Locked)
-    );
+    assert_eq!(classify_immovable(SlotIdx(5), reference, true, false), Some(Immovable::Locked));
 }
 
 #[test]
 fn locked_and_past_reach_the_same_outcome_by_different_paths() {
     let locked = run(&testing::immovable_blocks_first_slot(Immovable::Locked));
     let past = run(&testing::immovable_blocks_first_slot(Immovable::Past));
-    assert_eq!(
-        locked.solution.get(PlacementIdx(0)),
-        past.solution.get(PlacementIdx(0))
-    );
+    assert_eq!(locked.solution.get(PlacementIdx(0)), past.solution.get(PlacementIdx(0)));
 }
 
 // ---------------------------------------------------------------------------
@@ -208,8 +183,14 @@ fn same_input_and_seed_produce_identical_output() {
     for attempt in 0..5 {
         let again = solve(&problem, SEED, Budget::default(), &NeverHalt);
 
-        let a: Vec<_> = problem.placement_ids().map(|p| first.solution.get(p)).collect();
-        let b: Vec<_> = problem.placement_ids().map(|p| again.solution.get(p)).collect();
+        let a: Vec<_> = problem
+            .placement_ids()
+            .map(|p| first.solution.get(p))
+            .collect();
+        let b: Vec<_> = problem
+            .placement_ids()
+            .map(|p| again.solution.get(p))
+            .collect();
         assert_eq!(a, b, "run {attempt} disagreed with the first run");
 
         assert_eq!(first.moves_evaluated, again.moves_evaluated);
@@ -257,34 +238,22 @@ fn move_budget_stops_the_run_early() {
     //  * a zero-cost solution is UNREACHABLE, so the search cannot finish before
     //    the budget bites. `MinimizeRoomRank` at threshold 1 penalizes every
     //    room, making some cost unavoidable.
-    let problem = testing::assemble(
-        testing::grid(4, 1),
-        testing::rooms(1),
-        vec![],
-        vec![],
-        vec![testing::offering("S", 2, &[0])],
-        vec![],
-        testing::with_soft(vec![testing::soft(
+    let problem = testing::assemble(ProblemSpec {
+        rooms: testing::rooms(1),
+        offerings: vec![testing::offering("S", 2, &[0])],
+        constraints: testing::with_soft(vec![testing::soft(
             "rank",
             3.0,
             SoftParams::MinimizeRoomRank { rank_threshold: 1 },
         )]),
-    );
+        ..ProblemSpec::new(testing::grid(4, 1))
+    });
 
-    let outcome = solve(
-        &problem,
-        SEED,
-        Budget { max_wall_millis: 0, max_moves: 10 },
-        &NeverHalt,
-    );
+    let outcome = solve(&problem, SEED, Budget { max_wall_millis: 0, max_moves: 10 }, &NeverHalt);
 
     assert_eq!(outcome.termination_reason, "move_budget");
     // The budget is checked once per iteration, so a single batch may overshoot
     // it; what must hold is that the run stopped promptly rather than running to
     // the stagnation limit.
-    assert!(
-        outcome.moves_evaluated < 1_000,
-        "got {}",
-        outcome.moves_evaluated
-    );
+    assert!(outcome.moves_evaluated < 1_000, "got {}", outcome.moves_evaluated);
 }

@@ -19,9 +19,7 @@ pub struct Solution {
 
 impl Solution {
     pub fn empty(problem: &Problem) -> Self {
-        Self {
-            placements: vec![None; problem.placements.len()],
-        }
+        Self { placements: vec![None; problem.placements.len()] }
     }
 
     #[inline]
@@ -104,15 +102,57 @@ impl<'a> Occupant<'a> {
         self.room = Some(room);
         self
     }
+
+    /// This Session with `enforce` replaced.
+    ///
+    /// For the benchmark harness's per-axis attribution, which has to ask
+    /// "would *this one* axis reject the candidate on its own". Prefer
+    /// [`Occupant::room_independent_probe`] for the mask the search itself uses.
+    pub fn with_enforce(mut self, enforce: Enforce) -> Self {
+        self.enforce = enforce;
+        self
+    }
+
+    /// This Session as a probe over only the axes independent of which Room is
+    /// tried, or `None` if no such axis is enforced for its kind.
+    ///
+    /// Four of the six axes — lecturer, group, person, veto — read the slot
+    /// alone. Only room occupancy and day-mix (which reads the Room's virtual
+    /// flag) depend on the Room. Testing the four **once per slot**, before the
+    /// room loop, is a pure short-circuit: if they reject, no Room could have
+    /// rescued the slot.
+    ///
+    /// One definition, because two callers must agree on it: the constructive
+    /// heuristic, and the benchmark harness's construction attribution — whose
+    /// entire purpose is reporting *where* construction rejects candidates, and
+    /// which can only do that if its filter order matches the heuristic's. It
+    /// guaranteed that by holding a verbatim copy of the mask, so adding a
+    /// seventh axis would have left it reporting against the old one, silently
+    /// and with plausible-looking numbers.
+    pub fn room_independent_probe(o: &'a Offering) -> Option<Self> {
+        let enforce = Enforce { room: false, day_mix: false, ..o.enforce };
+        if enforce == Enforce::default() {
+            return None;
+        }
+        Some(Self::of_offering(o).with_enforce(enforce))
+    }
 }
 
 /// Entity-by-slot occupancy for the four structural constraint types.
+///
+/// **Private to this module.** It has exactly one consumer, [`SearchState`],
+/// which re-exposed three of its five methods with a `&Problem` bolted on; it
+/// used to be `pub` and re-exported from the crate root, which put a
+/// single-consumer index into the public interface and gave callers a second
+/// place to reason about occupancy. Its `from_fixed` also had zero callers while
+/// `SearchState::from_fixed` reimplemented the identical seeding rule — two
+/// copies of one rule, one of them dead.
 ///
 /// Lecturer and attendee are separate matrices even though both are indexed by
 /// Person, so `LecturerDoubleBooking` and `PersonDoubleBooking` remain
 /// independently switchable — a tenant may enable one without the other.
 #[derive(Clone, Debug)]
-pub struct Occupancy {
+struct Occupancy {
     room: BitMatrix,
     lecturer: BitMatrix,
     attendee: BitMatrix,
@@ -120,7 +160,7 @@ pub struct Occupancy {
 }
 
 impl Occupancy {
-    pub fn new(problem: &Problem) -> Self {
+    fn new(problem: &Problem) -> Self {
         let slots = problem.slots.len();
         Self {
             room: BitMatrix::new(problem.rooms.len().max(1), slots),
@@ -130,28 +170,17 @@ impl Occupancy {
         }
     }
 
-    /// Seed with everything the solver may not move: locked, past and
-    /// out-of-scope Sessions, plus other tenants' use of Federation-shared
-    /// Rooms.
-    pub fn from_fixed(problem: &Problem) -> Self {
-        let mut occ = Self::new(problem);
-        for f in &problem.fixed {
-            if let Some(span) = problem.slots.span(f.start, f.duration_blocks) {
-                occ.mark(&Occupant::of_fixed(f), &span);
-            }
-        }
-        occ
-    }
-
     /// Mark a Session busy.
     ///
     /// Groups are marked through their **conflict closure** — a cohort-level
     /// Session blocks every descendant class, and a seminar Session blocks its
     /// ancestors. Only one side expands; see [`crate::groups`].
-    pub fn mark(&mut self, who: &Occupant<'_>, span: &[SlotIdx]) {
+    fn mark(&mut self, who: &Occupant<'_>, span: &[SlotIdx]) {
         for &s in span {
             let c = s.get();
-            if who.enforce.room && let Some(r) = who.room {
+            if who.enforce.room
+                && let Some(r) = who.room
+            {
                 self.room.set(r.get(), c);
             }
             if who.enforce.lecturer {
@@ -172,10 +201,12 @@ impl Occupancy {
         }
     }
 
-    pub fn unmark(&mut self, who: &Occupant<'_>, span: &[SlotIdx]) {
+    fn unmark(&mut self, who: &Occupant<'_>, span: &[SlotIdx]) {
         for &s in span {
             let c = s.get();
-            if who.enforce.room && let Some(r) = who.room {
+            if who.enforce.room
+                && let Some(r) = who.room
+            {
                 self.room.clear(r.get(), c);
             }
             if who.enforce.lecturer {
@@ -201,7 +232,7 @@ impl Occupancy {
     /// Groups are queried by **identity**, never expanded. That is what keeps
     /// siblings from colliding: two classes under one cohort share an ancestor,
     /// but neither is in the other's closure.
-    pub fn is_free(&self, who: &Occupant<'_>, span: &[SlotIdx]) -> bool {
+    fn is_free(&self, who: &Occupant<'_>, span: &[SlotIdx]) -> bool {
         for &s in span {
             let c = s.get();
             if who.enforce.room
@@ -232,12 +263,14 @@ impl Occupancy {
 /// coherent view of "what is currently true".
 #[derive(Clone, Debug)]
 pub struct SearchState {
-    pub occupancy: Occupancy,
+    occupancy: Occupancy,
     pub aggregates: Aggregates,
 }
 
 impl SearchState {
-    /// Seed with everything the solver may not move.
+    /// Seed with everything the solver may not move: locked, past and
+    /// out-of-scope Sessions, plus other tenants' use of Federation-shared
+    /// Rooms.
     pub fn from_fixed(problem: &Problem) -> Self {
         let mut state = Self {
             occupancy: Occupancy::new(problem),
@@ -249,6 +282,107 @@ impl SearchState {
             }
         }
         state
+    }
+
+    /// Replay a whole solution into a fresh index.
+    ///
+    /// Used by the from-scratch objective and by the per-iteration drift
+    /// assertion. This lived in `search` as `rebuild_state`, which made
+    /// [`crate::constraints`] — the *authoritative* hard-constraint check —
+    /// depend on the metaheuristic module for what is really a `SearchState`
+    /// constructor.
+    pub fn replay(problem: &Problem, solution: &Solution) -> Self {
+        let mut state = Self::from_fixed(problem);
+        for p in problem.placement_ids() {
+            if let Some(pl) = solution.get(p) {
+                let placed = state.place(problem, p, pl);
+                debug_assert!(
+                    placed,
+                    "a solution recorded a placement whose span does not fit the grid"
+                );
+            }
+        }
+        state
+    }
+
+    // -----------------------------------------------------------------------
+    // Placement primitives
+    // -----------------------------------------------------------------------
+    //
+    // Six sites across three crates used to open-code the same four-line
+    // ritual:
+    //
+    //     let o = problem.offering_of(p);
+    //     let occupant = Occupant::of_offering(o).with_room(pl.room);
+    //     if let Some(span) = problem.slots.span(pl.start, o.duration_blocks) {
+    //         state.mark(problem, &occupant, &span);
+    //     }
+    //
+    // Two things were wrong with that beyond the duplication. `Occupant` and
+    // `SlotTable::span` were part of every caller's interface even though one is
+    // derived from the `&Problem` the caller already passes. And the `if let`
+    // was a **silent no-op on the failure path**: a `None` span skipped the mark
+    // while the caller went on to record the placement anyway, leaving the
+    // solution holding a placement the occupancy had never heard of. Nothing in
+    // the interface said that could not happen; the invariant lived in a comment
+    // in a different file.
+    //
+    // These three are `#[must_use]` so the failure path cannot be dropped
+    // without the compiler saying so.
+
+    /// The occupant and span for placement `p` sitting at `at`.
+    ///
+    /// `None` when the Session would spill past the end of its day, which is the
+    /// one case the grid can refuse.
+    #[inline]
+    fn resolve<'p>(
+        problem: &'p Problem,
+        p: PlacementIdx,
+        at: Placement,
+    ) -> Option<(Occupant<'p>, Vec<SlotIdx>)> {
+        let o = problem.offering_of(p);
+        let span = problem.slots.span(at.start, o.duration_blocks)?;
+        Some((Occupant::of_offering(o).with_room(at.room), span))
+    }
+
+    /// Mark placement `p` busy at `at`.
+    ///
+    /// Returns `false`, having changed nothing, when the Session would not fit
+    /// the grid there.
+    #[must_use = "a false return means nothing was marked; the caller must not \
+                  record the placement"]
+    #[inline]
+    pub fn place(&mut self, problem: &Problem, p: PlacementIdx, at: Placement) -> bool {
+        match Self::resolve(problem, p, at) {
+            Some((occupant, span)) => {
+                self.mark(problem, &occupant, &span);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Release placement `p` from `at`. The inverse of [`SearchState::place`].
+    #[must_use = "a false return means nothing was released; the index is still marked"]
+    #[inline]
+    pub fn unplace(&mut self, problem: &Problem, p: PlacementIdx, at: Placement) -> bool {
+        match Self::resolve(problem, p, at) {
+            Some((occupant, span)) => {
+                self.unmark(problem, &occupant, &span);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Whether placement `p` could occupy `at` right now.
+    #[must_use]
+    #[inline]
+    pub fn can_place(&self, problem: &Problem, p: PlacementIdx, at: Placement) -> bool {
+        match Self::resolve(problem, p, at) {
+            Some((occupant, span)) => self.is_free(problem, &occupant, &span),
+            None => false,
+        }
     }
 
     fn is_online(problem: &Problem, room: Option<RoomIdx>) -> bool {
@@ -322,7 +456,8 @@ impl SearchState {
         if who.enforce.day_mix {
             let days = Self::days_of(problem, span);
             if add {
-                self.aggregates.add_day_mode(who.subtree_groups, &days, online);
+                self.aggregates
+                    .add_day_mode(who.subtree_groups, &days, online);
             } else {
                 self.aggregates
                     .remove_day_mode(who.subtree_groups, &days, online);

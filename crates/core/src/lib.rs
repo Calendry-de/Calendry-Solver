@@ -6,8 +6,8 @@
 //! a pure function from a problem instance to a solution, which is what makes
 //! the search testable and a run reproducible from its seed.
 //!
-//! See the repository `CLAUDE.md` for the domain model and the architecture
-//! decisions this implements.
+//! See `CONTEXT.md` for the domain vocabulary and `docs/adr/` for the decisions
+//! this implements.
 
 pub mod aggregates;
 pub mod bitset;
@@ -25,8 +25,11 @@ pub mod solution;
 pub mod testing;
 
 pub use aggregates::{ShareInstance, ShareWindow};
+pub use constraints::{Violation, ViolationType};
 pub use groups::{GroupClosure, GroupCycle};
-pub use problem::{ConstraintInstance, ConstraintSet, Immovable, Problem};
-pub use search::{Budget, SolveOutcome, solve};
+pub use problem::{
+    ConstraintInstance, ConstraintSet, Immovable, Problem, ProblemBuilder, ProblemSpec, ScopeSpec,
+};
+pub use search::{Budget, SolveOutcome, Trial, solve, solve_with};
 pub use soft::{Objective, SoftInstance, SoftParams};
-pub use solution::{Occupancy, Placement, Solution};
+pub use solution::{Placement, SearchState, Solution};

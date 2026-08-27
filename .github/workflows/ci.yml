@@ -1,0 +1,92 @@
+name: CI
+
+# The gate this repository did not have. Until now clippy ran only when a human
+# typed it, and without `-D warnings` — so a warning was advice, not a failure.
+#
+# The proto submodule is required for the build: `crates/proto/build.rs` has no
+# sibling-checkout fallback by design, so a missing submodule is a hard error
+# quoting `git submodule update --init --recursive`. Every job therefore checks
+# out with `submodules: recursive`.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  # Fail on a warning from the compiler as well as from clippy, so a `warn`-level
+  # lint in the workspace manifest is a real gate rather than a suggestion.
+  RUSTFLAGS: "-D warnings"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # --locked so a lockfile drift fails here rather than silently resolving
+      # to a different dependency set than a developer has locally.
+      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --all-features --locked
+
+  docs:
+    name: rustdoc
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # A broken intra-doc link is the one documentation defect that rots
+      # silently, because nothing else ever resolves those paths.
+      - run: cargo doc --workspace --no-deps --all-features --locked
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+
+  # The benchmark presets carry calibration assertions (saturation band, person
+  # clique bound, and the closed-form-vs-measured agreement). They are only
+  # meaningful in release, and only reproducible under a move budget — a
+  # wall-clock-terminated run is legitimately non-deterministic.
+  bench-smoke:
+    name: bench smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo run --release --locked -p calendry-solver-gen --bin bench -- small-school --moves 20000

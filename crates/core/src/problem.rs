@@ -288,6 +288,211 @@ pub struct FixedOccupancy {
     pub subtree_groups: Vec<GroupIdx>,
 }
 
+/// Which Offerings this run is actively placing.
+///
+/// Real membership, declared by the caller. It is deliberately *not* inferred
+/// from whether an Offering owns placement variables: that inference is lossy in
+/// exactly one direction, and the direction that matters. Deducting
+/// already-locked Sessions can drive an in-scope Offering's placement count to
+/// zero, at which point an **over-supplied** Offering (more locks than it
+/// requires) looks identical to an out-of-scope one and its frequency mismatch
+/// goes unreported.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum ScopeSpec {
+    /// Every Offering in the snapshot is in scope.
+    ///
+    /// The correct default for the hand-written fixtures and for generated
+    /// benchmark instances: both build the whole instance from nothing, so there
+    /// is no out-of-scope region for a lock policy to protect.
+    #[default]
+    All,
+    /// Exactly these Offerings are in scope. Everything else is immovable.
+    Offerings(Vec<OfferingIdx>),
+}
+
+/// Everything [`Problem::build`] needs, as named fields.
+///
+/// This replaces eight positional arguments. Three independent call sites
+/// assemble a `Problem` — the service's conversion boundary, the hand-written
+/// fixtures, and the benchmark generator — and every one of them passed `vec![]`
+/// fillers to satisfy the positional shape. That shape is how `scope` came to be
+/// dropped: the boundary resolved it, used it twice, and had nowhere to put it.
+///
+/// Construct with [`ProblemSpec::new`] and override the fields you care about:
+///
+/// ```
+/// # use calendry_solver_core::problem::{ConstraintSet, ProblemSpec, Problem};
+/// # use calendry_solver_core::slots::{SlotTable, WeekKind, WeekSpec};
+/// # let slots = SlotTable::build(2, &[1], &[WeekSpec { kind: WeekKind::Teaching, holiday_weekdays: vec![] }]).unwrap();
+/// let problem = Problem::build(ProblemSpec {
+///     constraints: ConstraintSet::default(),
+///     ..ProblemSpec::new(slots)
+/// })
+/// .unwrap();
+/// ```
+#[derive(Clone, Debug)]
+pub struct ProblemSpec {
+    /// The tenant's grid, flattened. There is no default: every arithmetic
+    /// question about time resolves against this, so a caller must supply one.
+    pub slots: SlotTable,
+    pub rooms: Vec<Room>,
+    pub groups: Vec<Group>,
+    pub persons: Vec<Person>,
+    pub offerings: Vec<OfferingSpec>,
+    pub placements: Vec<PlacementVar>,
+    pub fixed: Vec<FixedSpec>,
+    pub constraints: ConstraintSet,
+    pub scope: ScopeSpec,
+}
+
+impl ProblemSpec {
+    /// An empty instance on `slots`, with every Offering in scope.
+    pub fn new(slots: SlotTable) -> Self {
+        Self {
+            slots,
+            rooms: Vec::new(),
+            groups: Vec::new(),
+            persons: Vec::new(),
+            offerings: Vec::new(),
+            placements: Vec::new(),
+            fixed: Vec::new(),
+            constraints: ConstraintSet::default(),
+            scope: ScopeSpec::All,
+        }
+    }
+
+    /// Expand each Offering's required count into placement variables, deducting
+    /// what immovable Sessions already realize.
+    ///
+    /// This is the **degenerate** expansion: no Session-id reuse, no
+    /// occupancy-aware placement of the locks themselves. The conversion
+    /// boundary and the benchmark generator each need more than this and keep
+    /// their own expansion; what they share is the arithmetic, which
+    /// [`Problem::residual_for`] now states once so all three can be checked
+    /// against it.
+    ///
+    /// `saturating_sub`, never `-`: the caller's editing UX is "warn and allow",
+    /// so more Sessions than an Offering requires is legitimate input, and
+    /// wrapping a `u32` would ask the solver to place four billion Sessions.
+    pub fn expand_placements(&mut self) -> &mut Self {
+        let mut realized = vec![0u32; self.offerings.len()];
+        for f in &self.fixed {
+            if let Some(o) = f.offering
+                && o.get() < realized.len()
+            {
+                realized[o.get()] += 1;
+            }
+        }
+
+        self.placements.clear();
+        for (i, o) in self.offerings.iter().enumerate() {
+            let outstanding = o.required_session_count.saturating_sub(realized[i]);
+            for occurrence in 0..outstanding {
+                self.placements.push(PlacementVar {
+                    offering: OfferingIdx(i as u32),
+                    occurrence,
+                    existing_session_id: None,
+                });
+            }
+        }
+        self
+    }
+}
+
+/// Incremental assembly that hands back the index of everything it inserts.
+///
+/// The hazard it removes: `Group.parent`, `Person.groups` and
+/// `OfferingSpec.groups` are raw indices into vectors the caller has not
+/// finished building, and a stale one is not a reportable error — `build`
+/// declares only [`GroupCycle`], so a dangling index panics on a raw slice index
+/// deep inside closure derivation. Returning the typed index *from the insert*
+/// makes the wrong value unavailable rather than merely discouraged.
+///
+/// ```
+/// # use calendry_solver_core::ids::PersonIdx;
+/// # use calendry_solver_core::problem::{Group, Person, ProblemBuilder};
+/// # use calendry_solver_core::slots::{SlotTable, WeekKind, WeekSpec};
+/// # let slots = SlotTable::build(2, &[1], &[WeekSpec { kind: WeekKind::Teaching, holiday_weekdays: vec![] }]).unwrap();
+/// let mut b = ProblemBuilder::new(slots);
+/// let cohort = b.group(Group { id: "C".into(), parent: None, name: "C".into(), size: 0 });
+/// let class = b.group(Group { id: "K".into(), parent: Some(cohort), name: "K".into(), size: 0 });
+/// let _student = b.person(Person {
+///     id: "s".into(),
+///     role_tags: vec![],
+///     groups: vec![class],
+///     blackouts: vec![],
+/// });
+/// let problem = b.build().unwrap();
+/// ```
+pub struct ProblemBuilder {
+    spec: ProblemSpec,
+}
+
+impl ProblemBuilder {
+    /// An empty instance on `slots`, with every Offering in scope.
+    pub fn new(slots: SlotTable) -> Self {
+        Self { spec: ProblemSpec::new(slots) }
+    }
+
+    /// Wrap an existing spec, so a caller can mix bulk field assignment with
+    /// index-returning inserts.
+    pub fn from_spec(spec: ProblemSpec) -> Self {
+        Self { spec }
+    }
+
+    pub fn room(&mut self, room: Room) -> RoomIdx {
+        self.spec.rooms.push(room);
+        RoomIdx(self.spec.rooms.len() as u32 - 1)
+    }
+
+    /// Insert a Group. Its `parent`, if any, is already a `GroupIdx` this
+    /// builder handed out, so it cannot dangle.
+    pub fn group(&mut self, group: Group) -> GroupIdx {
+        self.spec.groups.push(group);
+        GroupIdx(self.spec.groups.len() as u32 - 1)
+    }
+
+    pub fn person(&mut self, person: Person) -> PersonIdx {
+        self.spec.persons.push(person);
+        PersonIdx(self.spec.persons.len() as u32 - 1)
+    }
+
+    pub fn offering(&mut self, offering: OfferingSpec) -> OfferingIdx {
+        self.spec.offerings.push(offering);
+        OfferingIdx(self.spec.offerings.len() as u32 - 1)
+    }
+
+    pub fn fixed(&mut self, fixed: FixedSpec) -> &mut Self {
+        self.spec.fixed.push(fixed);
+        self
+    }
+
+    pub fn constraints(&mut self, constraints: ConstraintSet) -> &mut Self {
+        self.spec.constraints = constraints;
+        self
+    }
+
+    pub fn scope(&mut self, scope: ScopeSpec) -> &mut Self {
+        self.spec.scope = scope;
+        self
+    }
+
+    /// See [`ProblemSpec::expand_placements`].
+    pub fn expand_placements(&mut self) -> &mut Self {
+        self.spec.expand_placements();
+        self
+    }
+
+    /// The spec under construction, for the fields with no dedicated setter.
+    pub fn spec_mut(&mut self) -> &mut ProblemSpec {
+        &mut self.spec
+    }
+
+    pub fn build(self) -> Result<Problem, GroupCycle> {
+        Problem::build(self.spec)
+    }
+}
+
 /// One Session that needs placing.
 #[derive(Clone, Debug)]
 pub struct PlacementVar {
@@ -317,23 +522,34 @@ pub struct Problem {
     /// every reachable soft configuration, so the scalar objective orders
     /// lexicographically without a magic constant.
     pub hard_penalty: f64,
+
+    /// Whether each Offering is being actively placed by this run, indexed by
+    /// [`OfferingIdx`]. Read it through [`Problem::in_scope`].
+    in_scope: Vec<bool>,
+    /// Placement variables owned by each Offering, precomputed.
+    placement_counts: Vec<u32>,
+    /// Immovable Sessions linked to each Offering, precomputed. A locked or
+    /// already-past Session is still a Session that happened.
+    immovable_counts: Vec<u32>,
 }
 
 impl Problem {
-    /// The single derivation path, shared by the service's conversion layer and
-    /// by the hand-written test fixtures. Keeping one implementation is what
-    /// stops the two from drifting on closure semantics.
-    #[allow(clippy::too_many_arguments)]
-    pub fn build(
-        slots: SlotTable,
-        rooms: Vec<Room>,
-        groups: Vec<Group>,
-        persons: Vec<Person>,
-        offerings: Vec<OfferingSpec>,
-        placements: Vec<PlacementVar>,
-        fixed: Vec<FixedSpec>,
-        constraints: ConstraintSet,
-    ) -> Result<Self, GroupCycle> {
+    /// The single derivation path, shared by the service's conversion layer, the
+    /// hand-written test fixtures and the benchmark generator. Keeping one
+    /// implementation is what stops them from drifting on closure semantics.
+    pub fn build(spec: ProblemSpec) -> Result<Self, GroupCycle> {
+        let ProblemSpec {
+            slots,
+            rooms,
+            groups,
+            persons,
+            offerings,
+            placements,
+            fixed,
+            constraints,
+            scope,
+        } = spec;
+
         let parent_of: Vec<Option<GroupIdx>> = groups.iter().map(|g| g.parent).collect();
         let closure = GroupClosure::build(&parent_of)?;
 
@@ -386,7 +602,7 @@ impl Problem {
             mask
         };
 
-        let derived_offerings = offerings
+        let derived_offerings: Vec<Offering> = offerings
             .into_iter()
             .map(|o| Offering {
                 soft_profile: soft.profile_for_kind(&o.kind),
@@ -406,7 +622,7 @@ impl Problem {
             })
             .collect();
 
-        let derived_fixed = fixed
+        let derived_fixed: Vec<FixedOccupancy> = fixed
             .into_iter()
             .map(|f| FixedOccupancy {
                 enforce: constraints.enforce_for_kind(&f.kind),
@@ -437,7 +653,36 @@ impl Problem {
             constraints.max_online_share.clone(),
         );
 
-        Ok(Self {
+        let n = derived_offerings.len();
+        let in_scope = match &scope {
+            ScopeSpec::All => vec![true; n],
+            ScopeSpec::Offerings(list) => {
+                let mut flags = vec![false; n];
+                for &o in list {
+                    if o.get() < n {
+                        flags[o.get()] = true;
+                    }
+                }
+                flags
+            }
+        };
+
+        let mut placement_counts = vec![0u32; n];
+        for var in &placements {
+            if var.offering.get() < n {
+                placement_counts[var.offering.get()] += 1;
+            }
+        }
+        let mut immovable_counts = vec![0u32; n];
+        for f in &derived_fixed {
+            if let Some(o) = f.offering
+                && o.get() < n
+            {
+                immovable_counts[o.get()] += 1;
+            }
+        }
+
+        let problem = Self {
             slots,
             rooms,
             groups,
@@ -450,12 +695,85 @@ impl Problem {
             soft,
             aggregate_template,
             hard_penalty,
-        })
+            in_scope,
+            placement_counts,
+            immovable_counts,
+        };
+
+        // Internal consistency, never feasibility. A producer that miscounts the
+        // placement/lock split used to surface as an `ExactFrequency` violation
+        // at solve time, inside a test about something else; this attributes it
+        // to whichever assembly got the arithmetic wrong.
+        //
+        // Over-supply is deliberately NOT asserted: "warn and allow" means a
+        // caller can legitimately send more Sessions than an Offering requires,
+        // and rejecting that here would break the non-negotiable that the solver
+        // tolerates infeasible input. Hence `> 0`, not `!= 0`.
+        debug_assert!(
+            problem
+                .offering_ids()
+                .all(|o| !problem.in_scope(o) || problem.residual_for(o) <= 0),
+            "an in-scope Offering is short of placement variables against its \
+             required count: {:?}",
+            problem
+                .offering_ids()
+                .filter(|&o| problem.in_scope(o) && problem.residual_for(o) > 0)
+                .map(|o| (problem.offerings[o.get()].id.clone(), problem.residual_for(o)))
+                .collect::<Vec<_>>()
+        );
+
+        Ok(problem)
     }
 
     #[inline]
     pub fn placement_ids(&self) -> impl Iterator<Item = PlacementIdx> {
         (0..self.placements.len() as u32).map(PlacementIdx)
+    }
+
+    #[inline]
+    pub fn offering_ids(&self) -> impl Iterator<Item = OfferingIdx> {
+        (0..self.offerings.len() as u32).map(OfferingIdx)
+    }
+
+    /// Whether this run is actively placing `o`.
+    ///
+    /// Carried from the caller's scope, not inferred from placement presence.
+    /// The difference is load-bearing: an Offering with more locked Sessions
+    /// than it requires legitimately has **zero** placement variables, and under
+    /// the old inference was indistinguishable from one nobody asked about.
+    #[inline]
+    pub fn in_scope(&self, o: OfferingIdx) -> bool {
+        self.in_scope[o.get()]
+    }
+
+    /// Placement variables this run created for `o`.
+    #[inline]
+    pub fn placement_count(&self, o: OfferingIdx) -> u32 {
+        self.placement_counts[o.get()]
+    }
+
+    /// Immovable Sessions that already realize `o` — locked, past, or out of
+    /// scope. A locked Session is still a Session that happened, so it counts
+    /// toward the Offering's required frequency.
+    #[inline]
+    pub fn immovable_count(&self, o: OfferingIdx) -> u32 {
+        self.immovable_counts[o.get()]
+    }
+
+    /// `required_session_count` minus everything already accounted for:
+    /// placement variables plus immovable realizations.
+    ///
+    /// Zero in a well-formed instance. **Negative means over-supplied** — more
+    /// Sessions exist than the Offering claims to need, which the caller's "warn
+    /// and allow" editing UX can legitimately produce and which the solver must
+    /// report rather than reject. Positive means whichever assembly built the
+    /// placements is short, and is asserted against in debug builds.
+    #[inline]
+    pub fn residual_for(&self, o: OfferingIdx) -> i64 {
+        let required = i64::from(self.offerings[o.get()].required_session_count);
+        required
+            - i64::from(self.placement_counts[o.get()])
+            - i64::from(self.immovable_counts[o.get()])
     }
 
     #[inline]
@@ -492,12 +810,7 @@ mod tests {
     }
 
     fn group(id: &str, parent: Option<u32>) -> Group {
-        Group {
-            id: id.to_string(),
-            parent: parent.map(GroupIdx),
-            name: id.to_string(),
-            size: 0,
-        }
+        Group { id: id.to_string(), parent: parent.map(GroupIdx), name: id.to_string(), size: 0 }
     }
 
     #[test]
@@ -505,40 +818,139 @@ mod tests {
         // A(0) -> B(1) -> C(2)
         let groups = vec![group("A", None), group("B", Some(0)), group("C", Some(1))];
         let persons = vec![
-            Person { id: "pa".into(), role_tags: vec![], groups: vec![GroupIdx(0)], blackouts: vec![] },
-            Person { id: "pb".into(), role_tags: vec![], groups: vec![GroupIdx(1)], blackouts: vec![] },
-            Person { id: "pc".into(), role_tags: vec![], groups: vec![GroupIdx(2)], blackouts: vec![] },
+            Person {
+                id: "pa".into(),
+                role_tags: vec![],
+                groups: vec![GroupIdx(0)],
+                blackouts: vec![],
+            },
+            Person {
+                id: "pb".into(),
+                role_tags: vec![],
+                groups: vec![GroupIdx(1)],
+                blackouts: vec![],
+            },
+            Person {
+                id: "pc".into(),
+                role_tags: vec![],
+                groups: vec![GroupIdx(2)],
+                blackouts: vec![],
+            },
         ];
 
         let specs = vec![
             OfferingSpec {
-                id: "top".into(), kind: "lecture".into(), required_session_count: 1,
-                duration_blocks: 1, lecturers: vec![], groups: vec![GroupIdx(0)],
-                participants: vec![], eligible_rooms: vec![],
+                id: "top".into(),
+                kind: "lecture".into(),
+                required_session_count: 1,
+                duration_blocks: 1,
+                lecturers: vec![],
+                groups: vec![GroupIdx(0)],
+                participants: vec![],
+                eligible_rooms: vec![],
             },
             OfferingSpec {
-                id: "leaf".into(), kind: "lecture".into(), required_session_count: 1,
-                duration_blocks: 1, lecturers: vec![], groups: vec![GroupIdx(2)],
-                participants: vec![], eligible_rooms: vec![],
+                id: "leaf".into(),
+                kind: "lecture".into(),
+                required_session_count: 1,
+                duration_blocks: 1,
+                lecturers: vec![],
+                groups: vec![GroupIdx(2)],
+                participants: vec![],
+                eligible_rooms: vec![],
             },
         ];
 
-        let p = Problem::build(
-            grid(), vec![], groups, persons, specs, vec![], vec![],
-            ConstraintSet::default(),
-        )
-        .unwrap();
+        let mut spec =
+            ProblemSpec { groups, persons, offerings: specs, ..ProblemSpec::new(grid()) };
+        spec.expand_placements();
+        let p = Problem::build(spec).unwrap();
 
         // A session for the cohort involves everyone beneath it.
-        assert_eq!(
-            p.offerings[0].attendees,
-            vec![PersonIdx(0), PersonIdx(1), PersonIdx(2)]
-        );
+        assert_eq!(p.offerings[0].attendees, vec![PersonIdx(0), PersonIdx(1), PersonIdx(2)]);
         // A session for the deepest group involves only its own member.
         assert_eq!(p.offerings[1].attendees, vec![PersonIdx(2)]);
 
         // But conflict propagation still goes BOTH ways.
         assert!(p.offerings[1].conflict_groups.contains(&GroupIdx(0)));
+    }
+
+    fn spec_with(offerings: Vec<OfferingSpec>) -> ProblemSpec {
+        let mut spec = ProblemSpec { offerings, ..ProblemSpec::new(grid()) };
+        spec.expand_placements();
+        spec
+    }
+
+    fn offering(id: &str, required: u32) -> OfferingSpec {
+        OfferingSpec {
+            id: id.into(),
+            kind: "lecture".into(),
+            required_session_count: required,
+            duration_blocks: 1,
+            lecturers: vec![],
+            groups: vec![],
+            participants: vec![],
+            eligible_rooms: vec![],
+        }
+    }
+
+    #[test]
+    fn scope_defaults_to_every_offering() {
+        let p = Problem::build(spec_with(vec![offering("a", 1), offering("b", 2)])).unwrap();
+        assert!(p.offering_ids().all(|o| p.in_scope(o)));
+    }
+
+    #[test]
+    fn declared_scope_excludes_the_offerings_it_omits() {
+        let mut spec = spec_with(vec![offering("a", 1), offering("b", 2)]);
+        spec.scope = ScopeSpec::Offerings(vec![OfferingIdx(1)]);
+        let p = Problem::build(spec).unwrap();
+
+        assert!(!p.in_scope(OfferingIdx(0)));
+        assert!(p.in_scope(OfferingIdx(1)));
+    }
+
+    #[test]
+    fn residual_is_zero_when_placements_cover_the_required_count() {
+        let p = Problem::build(spec_with(vec![offering("a", 3)])).unwrap();
+        assert_eq!(p.placement_count(OfferingIdx(0)), 3);
+        assert_eq!(p.residual_for(OfferingIdx(0)), 0);
+    }
+
+    #[test]
+    fn residual_goes_negative_when_locks_over_supply_the_offering() {
+        // Two required, four immovable Sessions already linked to it. The
+        // expansion saturates to zero placements, and the surplus shows up as a
+        // negative residual rather than vanishing.
+        let mut spec = ProblemSpec {
+            offerings: vec![offering("a", 2)],
+            fixed: (0..4)
+                .map(|i| FixedSpec {
+                    session_id: format!("s{i}"),
+                    offering: Some(OfferingIdx(0)),
+                    kind: "lecture".into(),
+                    room: None,
+                    start: SlotIdx(0),
+                    duration_blocks: 1,
+                    lecturers: vec![],
+                    groups: vec![],
+                    persons: vec![],
+                    reason: Immovable::Locked,
+                })
+                .collect(),
+            ..ProblemSpec::new(grid())
+        };
+        spec.expand_placements();
+        let p = Problem::build(spec).unwrap();
+
+        assert_eq!(p.placement_count(OfferingIdx(0)), 0, "saturated, never wrapped");
+        assert_eq!(p.immovable_count(OfferingIdx(0)), 4);
+        assert_eq!(p.residual_for(OfferingIdx(0)), -2, "over-supplied by two");
+        assert!(
+            p.in_scope(OfferingIdx(0)),
+            "zero placements must not be mistaken for out of scope — that is \
+             precisely what made over-supply unreportable"
+        );
     }
 
     #[test]

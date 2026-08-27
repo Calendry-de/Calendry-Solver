@@ -29,10 +29,14 @@ pub enum SoftParams {
     /// Penalize the listed ISO weekdays (1 = Monday). Generalizes the
     /// prototype's hardcoded "minimize Saturday": with tenant-configured
     /// `active_days`, Saturday is not structurally special.
-    MinimizeDayUsage { days: Vec<u32> },
+    MinimizeDayUsage {
+        days: Vec<u32>,
+    },
     /// `Room.rank` is ordered **higher = more premium/scarce**; rooms at or
     /// above the threshold are penalized.
-    MinimizeRoomRank { rank_threshold: u32 },
+    MinimizeRoomRank {
+        rank_threshold: u32,
+    },
     MinimizeExamWeek,
     MinimizeOnline,
 }
@@ -161,14 +165,7 @@ impl SoftModel {
             })
             .collect();
 
-        Self {
-            instances,
-            profiles,
-            tables,
-            profile_of_kind,
-            n_rooms,
-            total_weight,
-        }
+        Self { instances, profiles, tables, profile_of_kind, n_rooms, total_weight }
     }
 
     pub fn profile_for_kind(&self, kind: &str) -> usize {

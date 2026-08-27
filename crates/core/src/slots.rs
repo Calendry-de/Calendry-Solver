@@ -1,6 +1,6 @@
 //! Slot flattening and per-slot flag tables.
 //!
-//! This module is the structural reason the TimeCraft prototype's magic-number
+//! This module is the structural reason the `TimeCraft` prototype's magic-number
 //! bugs cannot recur. Every `(week, day, block)` is resolved once into a global
 //! [`SlotIdx`], and everything a constraint might want to know about that slot
 //! — is it the first block of its day, the last block, which weekday, is its
@@ -125,12 +125,7 @@ impl SlotTable {
             }
         }
 
-        Ok(Self {
-            flags,
-            blocks_per_day,
-            active_days: days,
-            week_count,
-        })
+        Ok(Self { flags, blocks_per_day, active_days: days, week_count })
     }
 
     #[inline]
@@ -187,9 +182,7 @@ impl SlotTable {
         }
         let day_pos = self.day_position(iso_weekday)?;
         let per_week = self.active_days.len() as u32 * self.blocks_per_day;
-        Some(SlotIdx(
-            week * per_week + day_pos as u32 * self.blocks_per_day + block,
-        ))
+        Some(SlotIdx(week * per_week + day_pos as u32 * self.blocks_per_day + block))
     }
 
     /// The first slot at or after `(week, day, block)`.
@@ -213,9 +206,7 @@ impl SlotTable {
                     // Past the last block of that day; roll to the next day.
                     return self.lower_bound(week, iso_weekday + 1, 0);
                 }
-                Some(SlotIdx(
-                    week * per_week + pos as u32 * self.blocks_per_day + block,
-                ))
+                Some(SlotIdx(week * per_week + pos as u32 * self.blocks_per_day + block))
             }
             // No active day left this week; roll into the next.
             None => self.lower_bound(week + 1, 1, 0),
@@ -421,9 +412,6 @@ mod tests {
         assert_eq!(err(SlotTable::build(0, &[1], &weeks)), Some(GridError::NoBlocksPerDay));
         assert_eq!(err(SlotTable::build(1, &[], &weeks)), Some(GridError::NoActiveDays));
         assert_eq!(err(SlotTable::build(1, &[1], &[])), Some(GridError::NoWeeks));
-        assert_eq!(
-            err(SlotTable::build(1, &[9], &weeks)),
-            Some(GridError::InvalidWeekday(9))
-        );
+        assert_eq!(err(SlotTable::build(1, &[9], &weeks)), Some(GridError::InvalidWeekday(9)));
     }
 }

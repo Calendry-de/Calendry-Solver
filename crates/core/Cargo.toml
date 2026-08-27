@@ -12,3 +12,6 @@ license.workspace = true
 # convention someone erodes with one "just read the id off the message".
 [dependencies]
 rayon.workspace = true
+
+[lints]
+workspace = true

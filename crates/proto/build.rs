@@ -98,7 +98,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let paths: Vec<PathBuf> = files.iter().map(|f| root.join(f)).collect();
-    let includes: Vec<PathBuf> = vec![root.clone()];
+    let includes: Vec<PathBuf> = vec![root];
 
     tonic_prost_build::configure()
         .build_server(true)

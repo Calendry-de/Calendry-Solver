@@ -12,7 +12,7 @@ use calendry_solver_core::aggregates::{ShareInstance, ShareWindow};
 use calendry_solver_core::ids::{GroupIdx, OfferingIdx, PersonIdx, RoomIdx, SlotIdx};
 use calendry_solver_core::problem::{
     ConstraintInstance, ConstraintSet, FixedSpec, Group, Immovable, OfferingSpec, Person,
-    PlacementVar, Problem, Room, Unavailability,
+    PlacementVar, Problem, ProblemSpec, Room, Unavailability,
 };
 use calendry_solver_core::rng::Rng;
 use calendry_solver_core::slots::{SlotTable, WeekKind, WeekSpec};
@@ -74,6 +74,20 @@ pub struct InstanceStats {
     /// is what decides whether an instance is hard-but-feasible.
     pub saturation: f64,
     pub predicted_saturation: f64,
+    /// How far the closed form is from the measurement, as a signed fraction of
+    /// the measurement: `(predicted - saturation) / saturation`.
+    ///
+    /// `InstanceStats` carried both figures, and the calibration test asserted
+    /// each *independently* lay in the target band — but never that they
+    /// **agree**. Predicted 0.56 against measured 0.74 passed green while the
+    /// model was badly wrong, and the only thing watching for that was a human
+    /// reading the harness's printout.
+    ///
+    /// This is not hypothetical. The model has already been wrong by 1.28x at
+    /// school scale and 1.55x at university scale, and no single calibration
+    /// held across the range until the generator was changed. That is why the
+    /// agreement is now a field with a test against it.
+    pub prediction_error: f64,
 
     pub mean_eligible_rooms: f64,
     pub max_eligible_rooms: usize,
@@ -125,33 +139,30 @@ pub fn generate(params: &InstanceParams, seed: u64) -> GeneratedInstance {
     let group_sizes = group_sizes(params);
     let persons = build_persons(params, &mut rng);
 
-    let (offering_specs, occurrences) =
-        build_offerings(params, &rooms, &group_sizes, &mut rng);
+    let (offering_specs, occurrences) = build_offerings(params, &rooms, &group_sizes, &mut rng);
 
     // Locked Sessions carry their Offering link, so `required_session_count`
     // keeps its true domain meaning — the total this Offering needs — and
     // `exact_frequency` counts placements plus locks against it.
-    let (placements, fixed) = split_occurrences(
-        params,
-        &offering_specs,
-        &occurrences,
-        &rooms,
-        &slots,
-        &mut rng,
-    );
+    let (placements, fixed) =
+        split_occurrences(params, &offering_specs, &occurrences, &rooms, &slots, &mut rng);
 
     let constraints = build_constraints(params, &slots);
 
-    let problem = Problem::build(
-        slots,
+    // Every generated Offering is in scope: an instance is built whole, so there
+    // is no out-of-scope region for a lock policy to protect. The locked
+    // Sessions `split_occurrences` produces exercise the *frequency* accounting,
+    // not the scope gate.
+    let problem = Problem::build(ProblemSpec {
         rooms,
         groups,
         persons,
-        offering_specs,
+        offerings: offering_specs,
         placements,
         fixed,
         constraints,
-    )
+        ..ProblemSpec::new(slots)
+    })
     .expect("generated group hierarchy is a forest by construction");
 
     let stats = measure(params, &problem);
@@ -225,7 +236,7 @@ fn build_rooms(params: &InstanceParams, rng: &mut Rng) -> Vec<Room> {
         let features: Vec<String> = FEATURES
             .iter()
             .filter(|_| (rng.next_u64() % 1000) < (params.feature_coverage * 1000.0) as u64)
-            .map(|f| f.to_string())
+            .map(ToString::to_string)
             .collect();
 
         rooms.push(Room {
@@ -250,7 +261,7 @@ fn build_rooms(params: &InstanceParams, rng: &mut Rng) -> Vec<Room> {
             capacity: u32::MAX,
             rank: ORDINARY_RANK,
             is_virtual: true,
-            features: FEATURES.iter().map(|f| f.to_string()).collect(),
+            features: FEATURES.iter().map(ToString::to_string).collect(),
             federation_owned: false,
         });
     }
@@ -286,18 +297,12 @@ fn class_idx(params: &InstanceParams, c: u32, k: u32) -> u32 {
 
 fn seminar_idx(params: &InstanceParams, c: u32, k: u32, s: u32) -> u32 {
     let classes = params.cohorts * params.classes_per_cohort;
-    params.cohorts
-        + classes
-        + (c * params.classes_per_cohort + k) * params.seminars_per_class
-        + s
+    params.cohorts + classes + (c * params.classes_per_cohort + k) * params.seminars_per_class + s
 }
 
 /// Elective groups occupy the indices after every Seminar.
 fn elective_idx(params: &InstanceParams, e: u32) -> u32 {
-    params.cohorts
-        + params.cohorts * params.classes_per_cohort
-        + params.seminar_count()
-        + e
+    params.cohorts + params.cohorts * params.classes_per_cohort + params.seminar_count() + e
 }
 
 fn build_groups(params: &InstanceParams) -> Vec<Group> {
@@ -430,8 +435,7 @@ fn build_offerings(
     rng: &mut Rng,
 ) -> (Vec<OfferingSpec>, Vec<Occurrence>) {
     let mut specs = Vec::with_capacity(params.offerings as usize);
-    let mut occurrences =
-        Vec::with_capacity(params.total_occurrences() as usize);
+    let mut occurrences = Vec::with_capacity(params.total_occurrences() as usize);
 
     let cum0 = params.group_level_mix[0];
     let cum1 = cum0 + params.group_level_mix[1];
@@ -474,9 +478,7 @@ fn build_offerings(
             .iter()
             .enumerate()
             .filter(|(_, r)| r.capacity >= size)
-            .filter(|(_, r)| {
-                required_feature.is_none_or(|f| r.features.iter().any(|rf| rf == f))
-            })
+            .filter(|(_, r)| required_feature.is_none_or(|f| r.features.iter().any(|rf| rf == f)))
             .map(|(n, _)| RoomIdx(n as u32))
             .collect();
 
@@ -764,8 +766,7 @@ fn measure(params: &InstanceParams, problem: &Problem) -> InstanceStats {
     let mut group_blocks = vec![0u64; problem.groups.len().max(1)];
     let mut lecturer_blocks = vec![0u64; problem.persons.len().max(1)];
 
-    let mut charge = |d: u32, groups: &[calendry_solver_core::ids::GroupIdx],
-                      lecturers: &[PersonIdx]| {
+    let mut charge = |d: u32, groups: &[GroupIdx], lecturers: &[PersonIdx]| {
         for g in groups {
             group_blocks[g.get()] += d as u64;
         }
@@ -786,10 +787,8 @@ fn measure(params: &InstanceParams, problem: &Problem) -> InstanceStats {
 
     let slots_f = n_slots as f64;
     let room_tightness = demand as f64 / (slots_f * n_rooms as f64);
-    let max_group_load =
-        group_blocks.iter().copied().max().unwrap_or(0) as f64 / slots_f;
-    let max_lecturer_load =
-        lecturer_blocks.iter().copied().max().unwrap_or(0) as f64 / slots_f;
+    let max_group_load = group_blocks.iter().copied().max().unwrap_or(0) as f64 / slots_f;
+    let max_lecturer_load = lecturer_blocks.iter().copied().max().unwrap_or(0) as f64 / slots_f;
 
     let (person_clique_size, clique_blocks) = person_clique(problem);
     let person_clique_load = clique_blocks as f64 / slots_f;
@@ -800,8 +799,16 @@ fn measure(params: &InstanceParams, problem: &Problem) -> InstanceStats {
         .max(person_clique_load);
 
     let n_off = problem.offerings.len().max(1) as f64;
-    let eligible: Vec<usize> = problem.offerings.iter().map(|o| o.eligible_rooms.len()).collect();
-    let attendees: Vec<usize> = problem.offerings.iter().map(|o| o.attendees.len()).collect();
+    let eligible: Vec<usize> = problem
+        .offerings
+        .iter()
+        .map(|o| o.eligible_rooms.len())
+        .collect();
+    let attendees: Vec<usize> = problem
+        .offerings
+        .iter()
+        .map(|o| o.attendees.len())
+        .collect();
 
     let mean_eligible = eligible.iter().sum::<usize>() as f64 / n_off;
 
@@ -823,6 +830,11 @@ fn measure(params: &InstanceParams, problem: &Problem) -> InstanceStats {
         person_clique_size,
         saturation,
         predicted_saturation: params.predicted_saturation(),
+        prediction_error: if saturation > 0.0 {
+            (params.predicted_saturation() - saturation) / saturation
+        } else {
+            0.0
+        },
 
         mean_eligible_rooms: mean_eligible,
         max_eligible_rooms: eligible.iter().copied().max().unwrap_or(0),
@@ -878,11 +890,7 @@ pub fn person_clique(problem: &Problem) -> (usize, u64) {
     let shares = |a: usize, b: usize| {
         let (x, y) = (&problem.offerings[a], &problem.offerings[b]);
         // `Problem::build` leaves attendee lists sorted and deduplicated.
-        let (small, large) = if x.attendees.len() <= y.attendees.len() {
-            (x, y)
-        } else {
-            (y, x)
-        };
+        let (small, large) = if x.attendees.len() <= y.attendees.len() { (x, y) } else { (y, x) };
         small
             .attendees
             .iter()

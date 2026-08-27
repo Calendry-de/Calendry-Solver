@@ -1,0 +1,73 @@
+---
+source: crates/service/tests/build_output.rs
+expression: output
+---
+SolverOutput {
+    sessions: [
+        PlacedSession {
+            session_id: "",
+            offering_id: "o1",
+            start_slot: Some(
+                SlotRef {
+                    week: 0,
+                    day: 1,
+                    block: 0,
+                },
+            ),
+            duration_blocks: 1,
+            room_id: "r0",
+            lecturer_ids: [
+                "p1",
+            ],
+            group_ids: [
+                "g1",
+            ],
+            person_ids: [],
+        },
+        PlacedSession {
+            session_id: "",
+            offering_id: "o1",
+            start_slot: Some(
+                SlotRef {
+                    week: 0,
+                    day: 1,
+                    block: 0,
+                },
+            ),
+            duration_blocks: 1,
+            room_id: "r1",
+            lecturer_ids: [
+                "p1",
+            ],
+            group_ids: [
+                "g1",
+            ],
+            person_ids: [],
+        },
+    ],
+    hard_violations: [
+        ConstraintViolation {
+            constraint_id: "c-freq",
+            constraint_type: "ExactFrequency",
+            session_ids: [],
+            offering_ids: [
+                "o1",
+            ],
+            detail: "offering 'o1' requires 5 session(s), 2 placed",
+        },
+    ],
+    objective: Some(
+        ObjectiveBreakdown {
+            total: 3.0,
+            components: [],
+        },
+    ),
+    stats: Some(
+        SolveStats {
+            moves_evaluated: 2706,
+            moves_accepted: 300,
+            elapsed_millis: 0,
+            termination_reason: "converged",
+        },
+    ),
+}

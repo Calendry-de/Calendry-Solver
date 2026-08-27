@@ -7,18 +7,13 @@
 //! to symmetric expansion, and `cross_tree_person_clash_is_invisible_to_groups`
 //! demonstrates the clash is real before showing the person check catches it.
 
-use calendry_solver_core::constraints::{
-    GROUP_DOUBLE_BOOKING, LECTURER_DOUBLE_BOOKING, PERSON_DOUBLE_BOOKING, evaluate_hard,
-};
+use calendry_solver_core::constraints::{ViolationType, evaluate_hard};
 use calendry_solver_core::ids::PlacementIdx;
-use calendry_solver_core::search::{Budget, NeverHalt, solve};
-use calendry_solver_core::{Problem, SolveOutcome, testing};
+use calendry_solver_core::problem::ProblemSpec;
+use calendry_solver_core::{SolveOutcome, testing};
 
-const SEED: u64 = 0xC0FFEE;
-
-fn run(problem: &Problem) -> SolveOutcome {
-    solve(problem, SEED, Budget::default(), &NeverHalt)
-}
+mod common;
+use common::solve_to_convergence as run;
 
 fn slot_of(o: &SolveOutcome, i: u32) -> u32 {
     o.solution
@@ -66,11 +61,7 @@ fn a_cohort_session_blocks_its_child_class() {
     let outcome = run(&problem);
 
     assert!(outcome.hard_violations.is_empty(), "{:?}", outcome.hard_violations);
-    assert_eq!(
-        slot_of(&outcome, 0),
-        1,
-        "child must not share a slot with its pinned ancestor"
-    );
+    assert_eq!(slot_of(&outcome, 0), 1, "child must not share a slot with its pinned ancestor");
 }
 
 #[test]
@@ -98,11 +89,7 @@ fn closure_is_transitive_over_a_deep_chain() {
     let outcome = run(&problem);
 
     assert!(outcome.hard_violations.is_empty(), "{:?}", outcome.hard_violations);
-    assert_eq!(
-        slot_of(&outcome, 0),
-        1,
-        "a 3-hop ancestor must still block the leaf"
-    );
+    assert_eq!(slot_of(&outcome, 0), 1, "a 3-hop ancestor must still block the leaf");
 }
 
 // ---------------------------------------------------------------------------
@@ -128,33 +115,28 @@ fn lecturer_clash_is_reported_when_the_input_already_contains_one() {
     // Force the clash by shrinking the grid to a single slot: both sessions
     // must land there, so the violation is unavoidable and must be reported
     // rather than silently tolerated.
-    let problem = testing::assemble(
-        testing::grid(1, 1),
-        testing::rooms(2),
-        vec![],
-        vec![testing::person("dr-who", &[])],
-        vec![
+    let problem = testing::assemble(ProblemSpec {
+        rooms: testing::rooms(2),
+        persons: vec![testing::person("dr-who", &[])],
+        offerings: vec![
             testing::with_lecturers(testing::offering("L1", 1, &[0, 1]), &[0]),
             testing::with_lecturers(testing::offering("L2", 1, &[0, 1]), &[0]),
         ],
-        vec![],
-        testing::all_constraints(),
-    );
+        constraints: testing::all_constraints(),
+        ..ProblemSpec::new(testing::grid(1, 1))
+    });
     let outcome = run(&problem);
 
     // Greedy avoids the clash by refusing to place the second session, which
     // surfaces as an unmet frequency rather than a silent double-booking.
-    let kinds: Vec<&str> = outcome
+    let kinds: Vec<ViolationType> = outcome
         .hard_violations
         .iter()
         .map(|v| v.constraint_type)
         .collect();
+    assert!(!kinds.is_empty(), "an impossible instance must report something");
     assert!(
-        !kinds.is_empty(),
-        "an impossible instance must report something"
-    );
-    assert!(
-        !kinds.contains(&LECTURER_DOUBLE_BOOKING),
+        !kinds.contains(&ViolationType::LecturerDoubleBooking),
         "the heuristic must not resolve infeasibility by double-booking a lecturer"
     );
 }
@@ -190,7 +172,7 @@ fn cross_tree_person_clash_is_invisible_to_groups() {
     let violations = evaluate_hard(&person_aware, &outcome.solution);
     let person: Vec<_> = violations
         .iter()
-        .filter(|v| v.constraint_type == PERSON_DOUBLE_BOOKING)
+        .filter(|v| v.constraint_type == ViolationType::PersonDoubleBooking)
         .collect();
 
     assert_eq!(
@@ -206,7 +188,7 @@ fn cross_tree_person_clash_is_invisible_to_groups() {
     assert!(
         !violations
             .iter()
-            .any(|v| v.constraint_type == GROUP_DOUBLE_BOOKING),
+            .any(|v| v.constraint_type == ViolationType::GroupDoubleBooking),
         "the groups are tree-unrelated, so the group check must NOT fire"
     );
 }
@@ -232,7 +214,7 @@ fn person_double_booking_separates_the_two_sessions() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn slice2_fixtures_are_deterministic() {
+fn structural_fixtures_are_deterministic() {
     for problem in [
         testing::sibling_classes(),
         testing::deep_chain(),

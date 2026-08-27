@@ -1,0 +1,22 @@
+---
+source: crates/service/tests/build_output.rs
+expression: output
+---
+SolverOutput {
+    sessions: [],
+    hard_violations: [],
+    objective: Some(
+        ObjectiveBreakdown {
+            total: 0.0,
+            components: [],
+        },
+    ),
+    stats: Some(
+        SolveStats {
+            moves_evaluated: 0,
+            moves_accepted: 0,
+            elapsed_millis: 0,
+            termination_reason: "converged",
+        },
+    ),
+}

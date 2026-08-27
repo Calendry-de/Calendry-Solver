@@ -6,13 +6,13 @@
 //! `(entity, slot)` (the four structural types), and **unary** per-Session costs
 //! keyed by `(slot, room)` (the six soft types). Neither shape fits here.
 //!
-//! * [`OnlineOnsiteSameDay`] interacts at **day** granularity, not slot. Two
+//! * `OnlineOnsiteSameDay` interacts at **day** granularity, not slot. Two
 //!   Sessions of one Group clash only if they share a *day* and disagree about
 //!   being online — a pair sharing a slot is neither necessary nor sufficient.
 //!   It is still monotone-safe though: placing the first Session on a day can
 //!   never violate it, so it remains a feasibility **filter**.
 //!
-//! * [`MaxOnlineShare`] is a **cardinality ratio over a set**, and cannot be a
+//! * `MaxOnlineShare` is a **cardinality ratio over a set**, and cannot be a
 //!   filter at all. "31% online" is invisible in any pair of Sessions, and a
 //!   filter would dead-end construction: the first online Session placed makes
 //!   the ratio 100%, over any threshold below 1.0, because the denominator has
@@ -154,11 +154,8 @@ impl Aggregates {
         for &g in groups {
             for &d in days {
                 let c = self.day_cell(g, d);
-                let blocked = if is_online {
-                    self.onsite_day[c] > 0
-                } else {
-                    self.online_day[c] > 0
-                };
+                let blocked =
+                    if is_online { self.onsite_day[c] > 0 } else { self.online_day[c] > 0 };
                 if blocked {
                     return false;
                 }

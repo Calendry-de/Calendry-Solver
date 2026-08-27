@@ -43,11 +43,7 @@ pub fn weekday_within_week(week_start: &str, date: &str) -> Option<u32> {
     let start = day_number(week_start)?;
     let day = day_number(date)?;
     let offset = day - start;
-    if (0..7).contains(&offset) {
-        Some(offset as u32 + 1)
-    } else {
-        None
-    }
+    if (0..7).contains(&offset) { Some(offset as u32 + 1) } else { None }
 }
 
 #[cfg(test)]

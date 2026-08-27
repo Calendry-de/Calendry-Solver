@@ -49,6 +49,12 @@ fn every_offering_can_be_placed_somewhere() {
     }
 }
 
+/// How far the closed-form saturation may sit from the measured value.
+///
+/// See the assertion in `presets_are_calibrated_into_the_saturation_band` for
+/// why it is this loose and why it exists at all.
+const PREDICTION_TOLERANCE: f64 = 0.20;
+
 #[test]
 fn presets_are_calibrated_into_the_saturation_band() {
     for preset in Preset::ALL {
@@ -85,6 +91,28 @@ fn presets_are_calibrated_into_the_saturation_band() {
             preset.name()
         );
 
+        // The closed form and the measurement must AGREE, not merely each land
+        // in the band. Asserting only the two bands lets predicted 0.56 pass
+        // against measured 0.74 — the model badly wrong, the test green. The
+        // model has already been off by 1.28x at school scale and 1.55x at
+        // university scale, and until then the only thing watching for it was a
+        // human reading the harness printout.
+        //
+        // 20% is deliberately loose: the closed form is a calibration proxy, not
+        // a prediction, and a tight bound here would fail on ordinary
+        // round-robin quantisation. It is tight enough to catch a model that has
+        // stopped describing the generator.
+        assert!(
+            s.prediction_error.abs() <= PREDICTION_TOLERANCE,
+            "{}: closed form {:.3} is {:+.1}% off measured {:.3}, beyond ±{:.0}% — \
+             the calibration model no longer describes the generator",
+            preset.name(),
+            s.predicted_saturation,
+            s.prediction_error * 100.0,
+            s.saturation,
+            PREDICTION_TOLERANCE * 100.0
+        );
+
         // The guard that slice 5's calibration lacked. A load figure cannot see
         // pairwise-conflicting attendee sets, so every axis above can read "in
         // band" while the instance is provably unplaceable. Anything at or above
@@ -112,9 +140,10 @@ fn electives_create_tree_unrelated_co_membership() {
 
     let found = instance.problem.persons.iter().any(|p| {
         p.groups.len() >= 2
-            && p.groups.iter().enumerate().any(|(i, &a)| {
-                p.groups[i + 1..].iter().any(|&b| !closure.conflicts(a, b))
-            })
+            && p.groups
+                .iter()
+                .enumerate()
+                .any(|(i, &a)| p.groups[i + 1..].iter().any(|&b| !closure.conflicts(a, b)))
     });
 
     assert!(
@@ -143,7 +172,9 @@ fn locked_sessions_are_linked_and_complete_their_offerings() {
 
     let mut linked_locks = 0;
     for f in &problem.fixed {
-        let o = f.offering.expect("a generated lock always realizes an Offering");
+        let o = f
+            .offering
+            .expect("a generated lock always realizes an Offering");
         realized[o.get()] += 1;
         linked_locks += 1;
     }
@@ -182,11 +213,7 @@ fn the_hierarchy_is_a_three_level_forest() {
     };
 
     assert_eq!(depth(0), 0, "first group must be a cohort root");
-    assert_eq!(
-        depth(params.cohorts as usize),
-        1,
-        "classes sit one level below cohorts"
-    );
+    assert_eq!(depth(params.cohorts as usize), 1, "classes sit one level below cohorts");
     assert_eq!(
         depth((params.cohorts + params.cohorts * params.classes_per_cohort) as usize),
         2,
@@ -200,25 +227,31 @@ fn the_hierarchy_is_a_three_level_forest() {
 
 /// Build a tiny Problem whose Offerings all share `shared` attendees.
 ///
-/// With `shared > 0` every pair conflicts under PersonDoubleBooking, so the
+/// With `shared > 0` every pair conflicts under `PersonDoubleBooking`, so the
 /// Offerings are mutually exclusive in time and their Sessions need one slot
 /// each. With `shared == 0` they are independent and can be stacked.
 fn overlapping_problem(offerings: u32, sessions: u32, shared: usize) -> Problem {
-    use calendry_solver_core::ids::{OfferingIdx, PersonIdx};
-    use calendry_solver_core::problem::{
-        ConstraintSet, OfferingSpec, Person, PlacementVar, Room,
-    };
+    use calendry_solver_core::problem::{OfferingSpec, Person, ProblemBuilder, Room};
     use calendry_solver_core::slots::{SlotTable, WeekKind, WeekSpec};
 
-    // 4 slots.
-    let slots = SlotTable::build(
-        4,
-        &[1],
-        &[WeekSpec { kind: WeekKind::Teaching, holiday_weekdays: vec![] }],
-    )
-    .unwrap();
+    // Built through `ProblemBuilder`, which hands back the typed index of
+    // everything it inserts. This function used to construct `Room` and `Person`
+    // field-by-field and then index into those vectors with raw `u32`s, which is
+    // the hazard the builder removes: `OfferingSpec.participants` is a list of
+    // indices into a vector the caller has not finished building, and a stale one
+    // is not a reportable error — `Problem::build` declares only `GroupCycle`, so
+    // a dangling index panics on a raw slice index inside closure derivation.
+    let mut b = ProblemBuilder::new(
+        // 4 slots.
+        SlotTable::build(
+            4,
+            &[1],
+            &[WeekSpec { kind: WeekKind::Teaching, holiday_weekdays: vec![] }],
+        )
+        .unwrap(),
+    );
 
-    let rooms = vec![Room {
+    let room = b.room(Room {
         id: "r0".into(),
         name: "r0".into(),
         capacity: 999,
@@ -226,58 +259,38 @@ fn overlapping_problem(offerings: u32, sessions: u32, shared: usize) -> Problem 
         is_virtual: false,
         features: vec![],
         federation_owned: false,
-    }];
+    });
 
-    // `shared` people common to every Offering, then one private person each.
-    let n_persons = shared + offerings as usize;
-    let persons: Vec<Person> = (0..n_persons)
-        .map(|i| Person {
-            id: format!("p{i}"),
-            role_tags: vec![],
+    let person = |i: usize| Person {
+        id: format!("p{i}"),
+        role_tags: vec![],
+        groups: vec![],
+        blackouts: vec![],
+    };
+
+    // `shared` people common to every Offering...
+    let common: Vec<_> = (0..shared).map(|i| b.person(person(i))).collect();
+
+    for i in 0..offerings as usize {
+        // ...then one private person each.
+        let private = b.person(person(shared + i));
+        let mut participants = common.clone();
+        participants.push(private);
+
+        b.offering(OfferingSpec {
+            id: format!("o{i}"),
+            kind: "lecture".into(),
+            required_session_count: sessions,
+            duration_blocks: 1,
+            lecturers: vec![],
             groups: vec![],
-            blackouts: vec![],
-        })
-        .collect();
+            participants,
+            eligible_rooms: vec![room],
+        });
+    }
 
-    let specs: Vec<OfferingSpec> = (0..offerings)
-        .map(|i| {
-            let mut participants: Vec<PersonIdx> =
-                (0..shared).map(|s| PersonIdx(s as u32)).collect();
-            participants.push(PersonIdx(shared as u32 + i));
-            OfferingSpec {
-                id: format!("o{i}"),
-                kind: "lecture".into(),
-                required_session_count: sessions,
-                duration_blocks: 1,
-                lecturers: vec![],
-                groups: vec![],
-                participants,
-                eligible_rooms: vec![calendry_solver_core::ids::RoomIdx(0)],
-            }
-        })
-        .collect();
-
-    let placements: Vec<PlacementVar> = (0..offerings)
-        .flat_map(|i| {
-            (0..sessions).map(move |n| PlacementVar {
-                offering: OfferingIdx(i),
-                occurrence: n,
-                existing_session_id: None,
-            })
-        })
-        .collect();
-
-    Problem::build(
-        slots,
-        rooms,
-        vec![],
-        persons,
-        specs,
-        placements,
-        vec![],
-        ConstraintSet::default(),
-    )
-    .unwrap()
+    b.expand_placements();
+    b.build().unwrap()
 }
 
 #[test]
@@ -352,14 +365,13 @@ fn electives_do_not_pull_students_into_another_cohorts_subtree() {
         for &b in cohort_lectures.iter().skip(n + 1).take(40) {
             let (x, y) = (&problem.offerings[a], &problem.offerings[b]);
             if x.own_groups != y.own_groups
-                && x.attendees.iter().any(|p| y.attendees.binary_search(p).is_ok())
+                && x.attendees
+                    .iter()
+                    .any(|p| y.attendees.binary_search(p).is_ok())
             {
                 shared_pairs += 1;
             }
         }
     }
-    assert_eq!(
-        shared_pairs, 0,
-        "lectures of different Cohorts must not share attendees"
-    );
+    assert_eq!(shared_pairs, 0, "lectures of different Cohorts must not share attendees");
 }

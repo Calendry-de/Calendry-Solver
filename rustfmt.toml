@@ -1,0 +1,10 @@
+# Tuned to the style this repository was already written in, rather than
+# reformatting 10k lines to match the default. The defaults that matter here are
+# the widths: the code makes heavy use of single-line struct literals for dense
+# index types (`Placement { start, room }`, `WeekSpec { kind, holiday_weekdays }`)
+# and breaking those across four lines each hurts more than it helps.
+edition = "2024"
+max_width = 100
+struct_lit_width = 96
+fn_call_width = 88
+single_line_if_else_max_width = 80

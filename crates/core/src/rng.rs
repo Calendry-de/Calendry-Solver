@@ -5,7 +5,7 @@
 //! replayed exactly, which means the generator's output must not shift when a
 //! dependency changes its default algorithm or its platform-specific paths.
 //!
-//! SplitMix64, as published by Vigna.
+//! `SplitMix64`, as published by Vigna.
 
 #[derive(Clone, Debug)]
 pub struct Rng {
