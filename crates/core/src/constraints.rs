@@ -17,19 +17,26 @@ use crate::ids::{GroupIdx, OfferingIdx, PersonIdx, RoomIdx, SlotIdx};
 use crate::problem::{ConstraintInstance, Problem};
 use crate::solution::{SearchState, Solution};
 
-/// Which catalogue type a violation belongs to.
+/// Which catalogue type a report belongs to.
 ///
 /// A type rather than the eight `&'static str` constants it replaces. The
 /// constants were exported, but the service filtered on a raw literal
 /// (`v.constraint_type == "ExactFrequency"`) — so renaming a constant's *value*
 /// silently disconnected that filter with no compile error, and adding a
-/// fifteenth catalogue type gave downstream consumers no signal that they needed
-/// to handle it. Both are now compile-time facts.
+/// catalogue type gave downstream consumers no signal that they needed to handle
+/// it. Both are now compile-time facts.
 ///
-/// [`ViolationType::as_str`] preserves the exact wire strings, so this is not a
+/// Named for the **constraint**, not for the violation, because a type here can
+/// now be reported through either of two channels.
+/// `OnlineOnsiteSameDay` is the case that forced the distinction: it used to be a
+/// hard filter and is now priced on the objective, so it is carried in
+/// [`crate::soft::SoftComponent`] rather than in a [`Violation`]. It is still the
+/// same catalogue type with the same wire name.
+///
+/// [`ConstraintType::as_str`] preserves the exact wire strings, so this is not a
 /// schema change.
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
-pub enum ViolationType {
+pub enum ConstraintType {
     RoomDoubleBooking,
     LecturerDoubleBooking,
     GroupDoubleBooking,
@@ -40,7 +47,7 @@ pub enum ViolationType {
     MaxOnlineShare,
 }
 
-impl ViolationType {
+impl ConstraintType {
     /// The wire name, unchanged from the constants this replaced.
     pub fn as_str(self) -> &'static str {
         match self {
@@ -56,7 +63,7 @@ impl ViolationType {
     }
 }
 
-impl std::fmt::Display for ViolationType {
+impl std::fmt::Display for ConstraintType {
     fn fmt(&self, w: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         w.write_str(self.as_str())
     }
@@ -65,7 +72,7 @@ impl std::fmt::Display for ViolationType {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Violation {
     pub constraint_id: String,
-    pub constraint_type: ViolationType,
+    pub constraint_type: ConstraintType,
     pub session_ids: Vec<String>,
     pub offering_ids: Vec<String>,
     pub detail: String,
@@ -151,7 +158,7 @@ pub fn lecturer_veto(problem: &Problem, solution: &Solution, out: &mut Vec<Viola
                     .unwrap_or_default();
                 out.push(Violation {
                     constraint_id: instance.id.clone(),
-                    constraint_type: ViolationType::LecturerVeto,
+                    constraint_type: ConstraintType::LecturerVeto,
                     session_ids: vec![problem.placement_label(p)],
                     offering_ids: vec![o.id.clone()],
                     detail: format!(
@@ -165,41 +172,30 @@ pub fn lecturer_veto(problem: &Problem, solution: &Solution, out: &mut Vec<Viola
     }
 }
 
-/// The two Group-scoped aggregate types, evaluated by replaying the whole
-/// solution into a fresh counter set.
+/// The Group-scoped aggregate types that are still HARD.
 ///
-/// `OnlineOnsiteSameDay` is a filter the search can never violate, so anything
-/// reported here came from the caller's immovable input — which the "warn and
-/// allow" manual-edit UX can legitimately produce. `MaxOnlineShare` lives on the
-/// objective and CAN survive into a returned solution.
+/// `MaxOnlineShare` lives on the objective and CAN survive into a returned
+/// solution, so it is reported from here.
+///
+/// `OnlineOnsiteSameDay` USED TO BE REPORTED HERE AND DELIBERATELY IS NOT ANY
+/// MORE. It was a filter the search could never violate, so a mixed day could
+/// only have arrived in the caller's immovable input — which made it a hard
+/// violation worth naming. Now that it is soft the search produces mixed days
+/// on purpose when the alternative costs more, and listing those as hard
+/// violations would report the objective doing its job as a defect. They are
+/// carried in the objective breakdown instead, where every other soft type's
+/// breaches are, with the count and the weighted cost.
 pub fn aggregates(problem: &Problem, solution: &Solution, out: &mut Vec<Violation>) {
-    if problem.constraints.online_onsite_same_day.is_empty()
-        && problem.constraints.max_online_share.is_empty()
-    {
+    if problem.constraints.max_online_share.is_empty() {
         return;
     }
     let state = SearchState::replay(problem, solution);
-
-    for instance in &problem.constraints.online_onsite_same_day {
-        for (group, day) in state.aggregates.mixed_days() {
-            out.push(Violation {
-                constraint_id: instance.id.clone(),
-                constraint_type: ViolationType::OnlineOnsiteSameDay,
-                session_ids: Vec::new(),
-                offering_ids: Vec::new(),
-                detail: format!(
-                    "group '{}' has both online and on-site sessions on day {day}",
-                    problem.groups[group.get()].id
-                ),
-            });
-        }
-    }
 
     for (rule_idx, group, window, online, total) in state.aggregates.violated_cells() {
         let rule = &problem.constraints.max_online_share[rule_idx];
         out.push(Violation {
             constraint_id: rule.id.clone(),
-            constraint_type: ViolationType::MaxOnlineShare,
+            constraint_type: ConstraintType::MaxOnlineShare,
             session_ids: Vec::new(),
             offering_ids: Vec::new(),
             detail: format!(
@@ -256,7 +252,7 @@ pub fn exact_frequency(problem: &Problem, solution: &Solution, out: &mut Vec<Vio
             if got != want {
                 out.push(Violation {
                     constraint_id: instance.id.clone(),
-                    constraint_type: ViolationType::ExactFrequency,
+                    constraint_type: ConstraintType::ExactFrequency,
                     session_ids: Vec::new(),
                     offering_ids: vec![offering.id.clone()],
                     detail: format!(
@@ -289,7 +285,7 @@ pub fn structural(problem: &Problem, solution: &Solution, out: &mut Vec<Violatio
 
     // A pair overlapping several blocks must be reported once, not once per
     // block.
-    let mut seen: HashSet<(usize, usize, ViolationType, &str)> = HashSet::new();
+    let mut seen: HashSet<(usize, usize, ConstraintType, &str)> = HashSet::new();
 
     // Scratch for the person axis, allocated once and reused per slot.
     // `clear()` keeps each bucket's capacity, so after the first few slots this
@@ -384,7 +380,7 @@ fn check_pair<'p>(
     // The lowest attendee index shared by this pair, precomputed in
     // `structural` by bucketing. `None` = they share nobody.
     shared_attendee: Option<usize>,
-    seen: &mut HashSet<(usize, usize, ViolationType, &'p str)>,
+    seen: &mut HashSet<(usize, usize, ConstraintType, &'p str)>,
     out: &mut Vec<Violation>,
 ) {
     let c = &problem.constraints;
@@ -395,7 +391,7 @@ fn check_pair<'p>(
     let at = SlotLabel(f);
 
     let mut report = |instance: &'p ConstraintInstance,
-                      ty: ViolationType,
+                      ty: ConstraintType,
                       detail: String,
                       out: &mut Vec<Violation>| {
         if !seen.insert((xi, yi, ty, instance.id.as_str())) {
@@ -416,13 +412,20 @@ fn check_pair<'p>(
     let both = |i: &ConstraintInstance| i.covers(x.kind) && i.covers(y.kind);
 
     // 1. Room double-booking.
+    //
+    // Only EXCLUSIVE rooms clash. A virtual room hosts unlimited concurrent
+    // Sessions, and the exemption is keyed on the same `Room::is_exclusive`
+    // predicate `Occupancy::exclusive_room` uses to decide whether to claim the
+    // slot bit at all — so the search cannot refuse a placement this then
+    // declines to report, or the reverse.
     if let (Some(rx), Some(ry)) = (x.room, y.room)
         && rx == ry
+        && problem.rooms[rx.get()].is_exclusive()
     {
         for i in c.room_double_booking.iter().filter(|i| both(i)) {
             report(
                 i,
-                ViolationType::RoomDoubleBooking,
+                ConstraintType::RoomDoubleBooking,
                 format!(
                     "room '{}' hosts '{}' and '{}' at {at}",
                     problem.rooms[rx.get()].id,
@@ -439,7 +442,7 @@ fn check_pair<'p>(
         for i in c.lecturer_double_booking.iter().filter(|i| both(i)) {
             report(
                 i,
-                ViolationType::LecturerDoubleBooking,
+                ConstraintType::LecturerDoubleBooking,
                 format!(
                     "lecturer '{}' leads '{}' and '{}' at {at}",
                     problem.persons[p.get()].id,
@@ -475,7 +478,7 @@ fn check_pair<'p>(
             };
             report(
                 i,
-                ViolationType::GroupDoubleBooking,
+                ConstraintType::GroupDoubleBooking,
                 format!("{rel} attend '{}' and '{}' at {at}", x.label, y.label),
                 out,
             );
@@ -490,7 +493,7 @@ fn check_pair<'p>(
         for i in c.person_double_booking.iter().filter(|i| both(i)) {
             report(
                 i,
-                ViolationType::PersonDoubleBooking,
+                ConstraintType::PersonDoubleBooking,
                 format!(
                     "person '{}' attends '{}' and '{}' at {at}",
                     problem.persons[p].id, x.label, y.label

@@ -9,8 +9,12 @@
 //! * `OnlineOnsiteSameDay` interacts at **day** granularity, not slot. Two
 //!   Sessions of one Group clash only if they share a *day* and disagree about
 //!   being online — a pair sharing a slot is neither necessary nor sufficient.
-//!   It is still monotone-safe though: placing the first Session on a day can
-//!   never violate it, so it remains a feasibility **filter**.
+//!
+//!   It WAS a feasibility filter, because it is monotone-safe: placing the
+//!   first Session on a day can never violate it. It is now SOFT, so the filter
+//!   is gone and the same counters feed the objective instead. The counters did
+//!   not change; what changed is that `day_mix_allows` answers "would this cost
+//!   something" rather than "is this permitted at all".
 //!
 //! * `MaxOnlineShare` is a **cardinality ratio over a set**, and cannot be a
 //!   filter at all. "31% online" is invisible in any pair of Sessions, and a
@@ -32,6 +36,30 @@ pub enum ShareWindow {
     PerTerm,
     /// One bucket per calendar week index from the academic calendar.
     PerWeek,
+}
+
+/// One configured `OnlineOnsiteSameDay`.
+///
+/// SOFT since the reclassification. It carries a weight for the same reason
+/// every other soft instance does — the objective needs to know what a mixed
+/// day costs — and it stays in its own list rather than joining
+/// [`crate::soft::SoftModel`] because that model is a precomputed
+/// `(slot, room)` table and a mixed day is a property of what ELSE is already
+/// placed for the Group that day. It cannot be read off a table keyed by the
+/// candidate alone.
+#[derive(Clone, Debug)]
+pub struct DayMixInstance {
+    pub id: String,
+    /// Empty means all kinds.
+    pub kinds: Vec<String>,
+    pub weight: f64,
+}
+
+impl DayMixInstance {
+    #[inline]
+    pub fn covers(&self, kind: &str) -> bool {
+        self.kinds.is_empty() || self.kinds.iter().any(|k| k == kind)
+    }
 }
 
 /// One configured `MaxOnlineShare`.
@@ -191,6 +219,26 @@ impl Aggregates {
     }
 
     /// Groups whose day is currently mixed, for diagnostics.
+    /// How many `(group, day)` cells currently mix the two delivery modes.
+    ///
+    /// The number the objective charges for, and the counterpart of
+    /// [`Self::share_violations`] — read straight off the counters rather than
+    /// accumulated as a delta, because a mixed day is a property of a cell and
+    /// not of any one placement. Two Sessions make a cell mixed; neither of them
+    /// individually "costs" anything.
+    pub fn day_mix_violations(&self) -> u32 {
+        (0..self.online_day.len())
+            .filter(|&c| self.online_day[c] > 0 && self.onsite_day[c] > 0)
+            .count() as u32
+    }
+
+    /// Total `(group, day)` cells — the exact upper bound on how many can be
+    /// mixed at once, which is what bounds the day-mix term's contribution to
+    /// the objective. See `Problem::hard_penalty`.
+    pub fn day_mix_cell_count(&self) -> usize {
+        self.online_day.len()
+    }
+
     pub fn mixed_days(&self) -> impl Iterator<Item = (GroupIdx, u32)> + '_ {
         (0..self.online_day.len())
             .filter(move |&c| self.online_day[c] > 0 && self.onsite_day[c] > 0)

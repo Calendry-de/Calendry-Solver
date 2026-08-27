@@ -105,6 +105,11 @@ pub enum ConvertError {
     #[error("constraint '{constraint}': {day} is not an ISO weekday (1..=7)")]
     NotAnIsoWeekday { constraint: String, day: u32 },
     #[error(
+        "constraint '{constraint}': MinimizeBlockUsage selects no blocks — set at least one \
+         index, or `first`/`last`"
+    )]
+    BlockUsageSelectsNothing { constraint: String },
+    #[error(
         "constraint '{constraint}' has weight {weight}; soft weights must be >= 0 because every \
          soft type declares minimize, and a negative weight would invert it"
     )]
@@ -130,6 +135,11 @@ pub enum ConvertError {
         required: u32,
         candidates: usize,
     },
+    #[error(
+        "constraint '{constraint}': person_preference_fit is in the schema but not yet \
+         evaluated by this solver"
+    )]
+    PersonPreferenceFitUnsupported { constraint: String },
 }
 
 impl ConvertError {
@@ -140,7 +150,12 @@ impl ConvertError {
     /// can send that v1 will solve, so `UNIMPLEMENTED` is still the honest code.
     /// Keeping the rule as one predicate is what makes it reviewable.
     pub fn is_unimplemented(&self) -> bool {
-        matches!(self, Self::MinimizeMovementUnsupported | Self::LecturerPoolUnsupported { .. })
+        matches!(
+            self,
+            Self::MinimizeMovementUnsupported
+                | Self::LecturerPoolUnsupported { .. }
+                | Self::PersonPreferenceFitUnsupported { .. }
+        )
     }
 }
 

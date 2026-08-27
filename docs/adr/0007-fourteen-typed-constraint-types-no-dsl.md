@@ -20,3 +20,16 @@ Adding a constraint type is a code change in `crates/core/src/constraints.rs`,
 by design. `build_constraints` in the conversion layer matches exhaustively with
 no `_ =>` arm, so a new type in the schema is a compile error rather than a
 silently ignored setting.
+
+## Amendment: the count is no longer fourteen
+
+The filename and title keep the number because an ADR slug is a stable
+reference, not a description. The catalogue has since moved:
+`MinimizeBlockUsage` replaced two types with one carrying flags
+([ADR-0024](0024-one-type-per-axis-with-flags.md)), the two it replaced remain on
+the wire as deprecated, and `PersonPreferenceFit` was added to the schema and is
+refused as `UNIMPLEMENTED`.
+
+**Counting the types is not a useful check.** What this ADR actually decides is
+unchanged and is what to verify against: one compiled evaluator per type, typed
+parameters only, no interpreter, and hard-versus-soft as a property of the type.

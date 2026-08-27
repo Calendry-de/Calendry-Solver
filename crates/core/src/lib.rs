@@ -25,7 +25,7 @@ pub mod solution;
 pub mod testing;
 
 pub use aggregates::{ShareInstance, ShareWindow};
-pub use constraints::{Violation, ViolationType};
+pub use constraints::{ConstraintType, Violation};
 pub use groups::{GroupClosure, GroupCycle};
 pub use problem::{
     ConstraintInstance, ConstraintSet, Immovable, Problem, ProblemBuilder, ProblemSpec, ScopeSpec,

@@ -25,7 +25,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use calendry_solver_core::aggregates::{ShareInstance, ShareWindow};
+use calendry_solver_core::aggregates::{DayMixInstance, ShareInstance, ShareWindow};
 use calendry_solver_core::ids::{GroupIdx, OfferingIdx, PersonIdx, RoomIdx, SlotIdx};
 use calendry_solver_core::problem::{
     ConstraintInstance, ConstraintSet, FixedSpec, Immovable, OfferingSpec, PlacementVar, Problem,
@@ -596,7 +596,29 @@ fn build_constraints(input: &pb::SolverInput) -> Result<ConstraintSet, ConvertEr
             Some(Params::ExactFrequency(_)) => set.exact_frequency.push(instance),
 
             Some(Params::LecturerVeto(_)) => set.lecturer_veto.push(instance),
-            Some(Params::OnlineOnsiteSameDay(_)) => set.online_onsite_same_day.push(instance),
+            /*
+             * SOFT since the reclassification, so it reads `weight` like every
+             * other soft type and lands in its own list rather than in the
+             * filter set. A tenant that has not been backfilled sends weight 0,
+             * which the solver treats as "count it, do not steer" — the same
+             * reading every soft type gives a zero weight, and the reason the
+             * app's rollout order puts the backfill before the deploy.
+             */
+            Some(Params::OnlineOnsiteSameDay(_)) => {
+                if c.weight < 0.0 || c.weight.is_nan() {
+                    // The same fault class as every other soft type's weight, so
+                    // the same variant: one name per fault, not one per site.
+                    return Err(ConvertError::NegativeSoftWeight {
+                        constraint: c.id.clone(),
+                        weight: c.weight,
+                    });
+                }
+                set.online_onsite_same_day.push(DayMixInstance {
+                    id: c.id.clone(),
+                    kinds: c.applies_to_kinds.clone(),
+                    weight: c.weight,
+                });
+            }
             Some(Params::MaxOnlineShare(p)) => {
                 if !(0.0..=1.0).contains(&p.max_ratio) || p.max_ratio.is_nan() {
                     return Err(ConvertError::ShareRatioOutOfRange {
@@ -619,15 +641,48 @@ fn build_constraints(input: &pb::SolverInput) -> Result<ConstraintSet, ConvertEr
                 });
             }
 
-            // The six soft types. Weight is meaningful only here — hard types
-            // ignore it, because hard-vs-soft is a property of the TYPE.
+            // The soft types. Weight is meaningful only here — hard types ignore
+            // it, because hard-vs-soft is a property of the TYPE.
+            //
+            // The two block variants below are DEPRECATED on the wire and must
+            // still be accepted: deprecation removes them from what senders
+            // should emit, not from what a peer on the old schema may already be
+            // sending. Refusing them would turn a schema upgrade on one side
+            // into a rejected run on the other.
+            #[allow(deprecated)]
             Some(Params::MinimizeFirstBlock(_)) => {
                 set.soft
                     .push(soft_instance(c, SoftParams::MinimizeFirstBlock)?);
             }
+            #[allow(deprecated)]
             Some(Params::MinimizeLastBlock(_)) => {
                 set.soft
                     .push(soft_instance(c, SoftParams::MinimizeLastBlock)?);
+            }
+            Some(Params::MinimizeBlockUsage(p)) => {
+                // Deliberately NOT validated against blocks_per_day. A grid may
+                // shrink under a constraint that named a higher index, and this
+                // repo's rule is that the solver tolerates input the app's
+                // warn-and-allow UX can produce; a stale index is inert in
+                // `applies`, not a rejected run.
+                //
+                // A rule that selects nothing at all IS rejected, because it can
+                // only be a configuration mistake: it carries a weight, costs
+                // scoring time, and can never fire.
+                if p.blocks.is_empty() && !p.first && !p.last {
+                    return Err(ConvertError::BlockUsageSelectsNothing {
+                        constraint: c.id.clone(),
+                    });
+                }
+
+                set.soft.push(soft_instance(
+                    c,
+                    SoftParams::MinimizeBlockUsage {
+                        blocks: p.blocks.clone(),
+                        first: p.first,
+                        last: p.last,
+                    },
+                )?);
             }
             Some(Params::MinimizeDayUsage(p)) => {
                 for d in &p.days {
@@ -643,7 +698,7 @@ fn build_constraints(input: &pb::SolverInput) -> Result<ConstraintSet, ConvertEr
             }
             Some(Params::MinimizeRoomRank(p)) => set.soft.push(soft_instance(
                 c,
-                SoftParams::MinimizeRoomRank { rank_threshold: p.rank_threshold },
+                SoftParams::MinimizeRoomRank { rank_threshold: p.rank_threshold, invert: p.invert },
             )?),
             Some(Params::MinimizeExamWeek(_)) => {
                 set.soft
@@ -652,16 +707,37 @@ fn build_constraints(input: &pb::SolverInput) -> Result<ConstraintSet, ConvertEr
             Some(Params::MinimizeOnline(_)) => {
                 set.soft.push(soft_instance(c, SoftParams::MinimizeOnline)?);
             }
+            // Accepted by the schema, not yet evaluated here. REFUSED rather
+            // than ignored: a caller that enables this rule and receives a
+            // successful run would reasonably conclude the solver honoured it,
+            // and a preference silently priced at nothing is the exact failure
+            // the app side spent a design pass avoiding. Same shape as
+            // LockPolicy::MINIMIZE_MOVEMENT, which returns UNIMPLEMENTED for the
+            // same reason.
+            //
+            // The app does not send this yet — its catalogue entry deliberately
+            // has no wire field — so this branch is unreachable from the current
+            // client and exists for any peer that gets ahead of it.
+            Some(Params::PersonPreferenceFit(_)) => {
+                return Err(ConvertError::PersonPreferenceFitUnsupported {
+                    constraint: c.id.clone(),
+                });
+            }
             None => {
                 return Err(ConvertError::ConstraintWithoutParams { constraint: c.id.clone() });
             }
         }
     }
 
-    // Every one of the 14 catalogue types is now implemented, so there is no
-    // longer an UNIMPLEMENTED branch here. A new type added to the schema will
-    // fail to compile against this match rather than being silently ignored —
-    // which is the property that mattered about the old branch.
+    // Every one of the 14 catalogue types is implemented. The one UNIMPLEMENTED
+    // branch that remains is `PersonPreferenceFit`, which the schema carries
+    // from 0.7.0 and this service does not yet evaluate.
+    //
+    // The property that matters is unchanged: a new type added to the schema
+    // fails to COMPILE against this match rather than being silently ignored.
+    // That is what produced the branch above — the 0.7.0 pin would not build
+    // until the variant was handled explicitly, which is the intended way to
+    // learn that the contract grew.
     Ok(set)
 }
 

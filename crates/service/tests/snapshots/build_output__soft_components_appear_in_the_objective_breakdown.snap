@@ -52,13 +52,13 @@ SolverOutput {
             components: [
                 ComponentScore {
                     constraint_id: "c-first",
-                    constraint_type: "MinimizeFirstBlock",
+                    constraint_type: "MinimizeBlockUsage",
                     raw_count: 0,
                     weighted: 0.0,
                 },
                 ComponentScore {
                     constraint_id: "c-last",
-                    constraint_type: "MinimizeLastBlock",
+                    constraint_type: "MinimizeBlockUsage",
                     raw_count: 0,
                     weighted: 0.0,
                 },

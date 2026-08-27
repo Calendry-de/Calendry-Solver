@@ -160,6 +160,24 @@ struct Occupancy {
 }
 
 impl Occupancy {
+    /// The room whose slot bit this Session claims, if any.
+    ///
+    /// `None` when the Session is unplaced, when `RoomDoubleBooking` is not
+    /// configured for its kind, or when the room is **not exclusive** — see
+    /// [`Problem`]'s `Room::is_exclusive`. A virtual room's row therefore stays
+    /// permanently clear, which is what lets any number of Sessions run online
+    /// in the same slot.
+    ///
+    /// `mark`, `unmark` and `is_free` all go through here rather than reading
+    /// `who.room` directly. That is deliberate: if one of them claimed a bit the
+    /// others did not test, the search would refuse placements it then declined
+    /// to report, or free a bit it never set. There is one expression, so there
+    /// is one answer.
+    #[inline]
+    fn exclusive_room(problem: &Problem, who: &Occupant<'_>) -> Option<RoomIdx> {
+        who.room.filter(|&r| problem.rooms[r.get()].is_exclusive())
+    }
+
     fn new(problem: &Problem) -> Self {
         let slots = problem.slots.len();
         Self {
@@ -175,11 +193,12 @@ impl Occupancy {
     /// Groups are marked through their **conflict closure** — a cohort-level
     /// Session blocks every descendant class, and a seminar Session blocks its
     /// ancestors. Only one side expands; see [`crate::groups`].
-    fn mark(&mut self, who: &Occupant<'_>, span: &[SlotIdx]) {
+    fn mark(&mut self, problem: &Problem, who: &Occupant<'_>, span: &[SlotIdx]) {
+        let room = Self::exclusive_room(problem, who);
         for &s in span {
             let c = s.get();
             if who.enforce.room
-                && let Some(r) = who.room
+                && let Some(r) = room
             {
                 self.room.set(r.get(), c);
             }
@@ -201,11 +220,12 @@ impl Occupancy {
         }
     }
 
-    fn unmark(&mut self, who: &Occupant<'_>, span: &[SlotIdx]) {
+    fn unmark(&mut self, problem: &Problem, who: &Occupant<'_>, span: &[SlotIdx]) {
+        let room = Self::exclusive_room(problem, who);
         for &s in span {
             let c = s.get();
             if who.enforce.room
-                && let Some(r) = who.room
+                && let Some(r) = room
             {
                 self.room.clear(r.get(), c);
             }
@@ -232,11 +252,12 @@ impl Occupancy {
     /// Groups are queried by **identity**, never expanded. That is what keeps
     /// siblings from colliding: two classes under one cohort share an ancestor,
     /// but neither is in the other's closure.
-    fn is_free(&self, who: &Occupant<'_>, span: &[SlotIdx]) -> bool {
+    fn is_free(&self, problem: &Problem, who: &Occupant<'_>, span: &[SlotIdx]) -> bool {
+        let room = Self::exclusive_room(problem, who);
         for &s in span {
             let c = s.get();
             if who.enforce.room
-                && let Some(r) = who.room
+                && let Some(r) = room
                 && self.room.get(r.get(), c)
             {
                 return false;
@@ -400,13 +421,20 @@ impl SearchState {
 
     /// Whether this Session could occupy `span`.
     ///
-    /// Covers the four structural types, `LecturerVeto` (a unary slot mask) and
-    /// `OnlineOnsiteSameDay` (day-granularity). `MaxOnlineShare` is deliberately
-    /// absent — it is a ratio with a moving denominator and cannot be a filter
-    /// without dead-ending construction, so it is scored on the objective
-    /// instead. See [`crate::aggregates`].
+    /// Covers the four structural types and `LecturerVeto` (a unary slot mask).
+    ///
+    /// TWO TYPES ARE DELIBERATELY ABSENT, for the same underlying reason:
+    /// neither is a question about the candidate alone.
+    ///
+    /// * `MaxOnlineShare` is a ratio with a moving denominator and cannot be a
+    ///   filter without dead-ending construction.
+    /// * `OnlineOnsiteSameDay` COULD be one — it is monotone-safe, and it was
+    ///   one until the reclassification — but it is now SOFT, so a mixed day is
+    ///   priced rather than forbidden.
+    ///
+    /// Both are scored on the objective instead. See [`crate::aggregates`].
     pub fn is_free(&self, problem: &Problem, who: &Occupant<'_>, span: &[SlotIdx]) -> bool {
-        if !self.occupancy.is_free(who, span) {
+        if !self.occupancy.is_free(problem, who, span) {
             return false;
         }
 
@@ -417,27 +445,54 @@ impl SearchState {
             return false;
         }
 
-        if who.enforce.day_mix && !who.subtree_groups.is_empty() {
-            let days = Self::days_of(problem, span);
-            let online = Self::is_online(problem, who.room);
-            if !self
-                .aggregates
-                .day_mix_allows(who.subtree_groups, &days, online)
-            {
-                return false;
-            }
-        }
-
         true
     }
 
+    /// Would placing this Session here make a `(group, day)` cell mix delivery
+    /// modes that currently does not?
+    ///
+    /// The day-mix counterpart of [`Self::would_worsen_share`], and used the
+    /// same way: the evaluator adds a penalty rather than rejecting the move.
+    /// `day_mix_allows` is the same predicate that used to gate `is_free`;
+    /// only what the caller does with the answer changed.
+    pub fn would_worsen_day_mix(
+        &self,
+        problem: &Problem,
+        who: &Occupant<'_>,
+        span: &[SlotIdx],
+    ) -> bool {
+        if !who.enforce.day_mix || who.subtree_groups.is_empty() || span.is_empty() {
+            return false;
+        }
+
+        let days = Self::days_of(problem, span);
+        let online = Self::is_online(problem, who.room);
+
+        !self
+            .aggregates
+            .day_mix_allows(who.subtree_groups, &days, online)
+    }
+
+    /// What the currently mixed days cost, at the configured weight.
+    ///
+    /// Read off the counters rather than accumulated per placement — a mixed
+    /// cell belongs to no single Session, so there is no delta to add when one
+    /// moves. Same treatment `share_violations` already gets.
+    pub fn day_mix_cost(&self, problem: &Problem) -> f64 {
+        if problem.day_mix_weight == 0.0 {
+            return 0.0;
+        }
+
+        self.aggregates.day_mix_violations() as f64 * problem.day_mix_weight
+    }
+
     pub fn mark(&mut self, problem: &Problem, who: &Occupant<'_>, span: &[SlotIdx]) {
-        self.occupancy.mark(who, span);
+        self.occupancy.mark(problem, who, span);
         self.apply_aggregates(problem, who, span, true);
     }
 
     pub fn unmark(&mut self, problem: &Problem, who: &Occupant<'_>, span: &[SlotIdx]) {
-        self.occupancy.unmark(who, span);
+        self.occupancy.unmark(problem, who, span);
         self.apply_aggregates(problem, who, span, false);
     }
 

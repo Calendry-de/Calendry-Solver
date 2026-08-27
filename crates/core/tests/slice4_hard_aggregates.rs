@@ -15,7 +15,7 @@
 //! were, so it is asserted per iteration in debug builds as well.
 
 use calendry_solver_core::aggregates::ShareWindow;
-use calendry_solver_core::constraints::{ViolationType, evaluate_hard};
+use calendry_solver_core::constraints::{ConstraintType, evaluate_hard};
 use calendry_solver_core::ids::PlacementIdx;
 use calendry_solver_core::problem::ProblemSpec;
 use calendry_solver_core::search::{NeverHalt, recompute_objective, solve};
@@ -87,18 +87,27 @@ fn a_blackout_violation_present_in_the_input_is_reported() {
         !outcome
             .hard_violations
             .iter()
-            .any(|v| v.constraint_type == ViolationType::LecturerVeto),
+            .any(|v| v.constraint_type == ConstraintType::LecturerVeto),
         "an unplaced Session must not also be reported as a veto breach"
     );
     assert!(outcome.objective.unplaced > 0, "the shortfall must surface on the objective");
 }
 
 // ---------------------------------------------------------------------------
-// OnlineOnsiteSameDay — day-granularity filter
+// OnlineOnsiteSameDay — day-granularity, SOFT since the reclassification
 // ---------------------------------------------------------------------------
+//
+// These four tests changed direction rather than being deleted, and the reason
+// is the point of the change: the rule used to eliminate candidate placements
+// inside `is_free`, so the search COULD NOT produce a mixed day. It is now
+// priced on the objective, so it can — and must, when every alternative costs
+// more. What is still guaranteed is that a mix is never FREE.
 
 #[test]
-fn a_group_does_not_mix_online_and_onsite_on_one_day() {
+fn a_group_prefers_not_to_mix_online_and_onsite_on_one_day() {
+    // Was `a_group_does_not_mix…`, asserting an all-or-nothing day. The
+    // preference still wins here, because this instance has an alternative that
+    // costs nothing — which is exactly the case where soft and hard agree.
     let problem = testing::group_day_with_both_room_types(testing::all_constraints());
     let outcome = run(&problem);
 
@@ -108,29 +117,54 @@ fn a_group_does_not_mix_online_and_onsite_on_one_day() {
     let online = online_count(&problem, &outcome);
     assert!(
         online == 0 || online == 2,
-        "the day must be all-online or all-on-site, got {online} of 2 online"
+        "with a free alternative the day should still come out unmixed, got {online} of 2 online"
     );
+    assert_eq!(outcome.objective.day_mix_cost, 0.0, "an unmixed day must cost nothing");
 }
 
 #[test]
-fn without_the_rule_the_same_instance_does_mix() {
-    // Falsification: greedy reaches for the virtual room first, then the
-    // on-site one, producing exactly the mix the rule exists to prevent.
-    let problem = testing::group_day_with_both_room_types(testing::without_day_mix());
-    let outcome = run(&problem);
+fn a_mixed_day_costs_the_configured_weight() {
+    // The falsification that replaces `without_the_rule_the_same_instance_does_mix`.
+    //
+    // That test proved the rule was doing something by removing it and watching
+    // the mix appear. Removing a SOFT rule changes the price rather than the
+    // feasibility, so the sharper question is what a mix costs — and the answer
+    // has to be the configured weight per mixed cell, or the objective is not
+    // actually carrying the rule.
+    let problem = testing::group_day_with_both_room_types(testing::all_constraints());
+    let unpriced = testing::group_day_with_both_room_types(testing::without_day_mix());
 
-    assert_eq!(outcome.solution.placed_count(), 2);
+    assert_eq!(unpriced.day_mix_weight, 0.0, "with no instance configured a mixed day is free");
     assert_eq!(
-        online_count(&problem, &outcome),
-        1,
-        "unconstrained, this instance mixes one online and one on-site"
+        problem.day_mix_weight, 5.0,
+        "the fixture configures the catalogue's default weight"
+    );
+
+    // Force the mix rather than hoping for it: one Session pinned online, the
+    // other with only an on-site room left.
+    let mixed = testing::solution_mixing_one_day(&problem);
+    let objective = recompute_objective(&problem, &mixed);
+
+    assert_eq!(
+        objective.day_mix_cost, 5.0,
+        "one mixed (group, day) cell must cost exactly one weight"
+    );
+    assert!(
+        objective.total(problem.hard_penalty) > 0.0,
+        "and it must reach the scalar objective the search minimises"
     );
 }
 
 #[test]
-fn a_mixed_day_already_in_immovable_input_is_reported() {
-    // The search can never create a mix, so anything reported must have come
-    // from the caller — which the "warn and allow" manual-edit UX permits.
+fn a_mixed_day_is_no_longer_a_hard_violation() {
+    // Was `a_mixed_day_already_in_immovable_input_is_reported`. The input is
+    // identical; the expectation is inverted.
+    //
+    // It used to be reportable ONLY from immovable input, because the filter
+    // made it unreachable for the search — which is what made it a defect worth
+    // naming. Now the search creates mixed days deliberately, so reporting them
+    // as hard violations would report the objective working as a fault. They
+    // travel in the objective breakdown instead.
     let mut online_fixed = testing::fixed_for_groups("pinned-online", 0, 0, &[0]);
     online_fixed.kind = "lecture".to_string();
     let mut onsite_fixed = testing::fixed_for_groups("pinned-onsite", 1, 1, &[0]);
@@ -144,13 +178,26 @@ fn a_mixed_day_already_in_immovable_input_is_reported() {
         ..ProblemSpec::new(testing::grid(2, 1))
     });
 
-    let violations = evaluate_hard(&problem, &calendry_solver_core::Solution::empty(&problem));
+    let empty = calendry_solver_core::Solution::empty(&problem);
+    let violations = evaluate_hard(&problem, &empty);
+
     assert!(
-        violations
+        !violations
             .iter()
-            .any(|v| v.constraint_type == ViolationType::OnlineOnsiteSameDay),
-        "a pre-existing mixed day must be reported, got {violations:?}"
+            .any(|v| v.constraint_type == ConstraintType::OnlineOnsiteSameDay),
+        "a mixed day is soft and must not be reported as a hard violation, got {violations:?}"
     );
+
+    // ...but it is not silently dropped either. The count and its cost are in
+    // the breakdown, which is what the app shows a human to explain the score.
+    let breakdown = calendry_solver_core::search::soft_breakdown(&problem, &empty);
+    let component = breakdown
+        .iter()
+        .find(|c| c.constraint_type == ConstraintType::OnlineOnsiteSameDay.as_str())
+        .expect("the day-mix component must appear in the breakdown");
+
+    assert_eq!(component.raw_count, 1, "one mixed (group, day) cell");
+    assert_eq!(component.weighted, 5.0);
 }
 
 // ---------------------------------------------------------------------------
@@ -249,7 +296,7 @@ fn an_unsatisfiable_cap_is_reported_rather_than_silently_dropped() {
         outcome
             .hard_violations
             .iter()
-            .any(|v| v.constraint_type == ViolationType::MaxOnlineShare),
+            .any(|v| v.constraint_type == ConstraintType::MaxOnlineShare),
         "and must be reported, got {:?}",
         outcome.hard_violations
     );
@@ -316,19 +363,41 @@ fn aggregate_instances_stay_deterministic() {
 }
 
 #[test]
-fn the_search_never_creates_a_day_mix_or_a_veto_breach() {
-    // Both are filters, so unlike MaxOnlineShare the search must never produce
-    // them at all.
+fn the_search_never_creates_a_veto_breach_and_never_hard_reports_a_day_mix() {
+    /*
+     * THE ASSERTION DIRECTION FLIPPED FOR ONE OF THE TWO, AND ONLY ONE.
+     *
+     * `LecturerVeto` is still a filter, so the old claim stands unchanged: the
+     * search cannot produce one.
+     *
+     * `OnlineOnsiteSameDay` is no longer a filter, so "the search never creates
+     * a day mix" is no longer true and must not be asserted — it would pin the
+     * behaviour the reclassification exists to remove. What replaces it is the
+     * property that survived: a mixed day never appears among the HARD
+     * violations, whether the search made it or the caller pinned it.
+     *
+     * Keeping the loop over twelve seeds matters more now, not less. A filter
+     * either holds or does not; a priced term can be right on average and wrong
+     * on a particular instance, so the sweep is the part doing the work.
+     */
     for seed in 0..12u64 {
         let problem = testing::seeded_aggregate_instance(seed);
         let outcome = run(&problem);
         for v in &outcome.hard_violations {
             assert_ne!(
                 v.constraint_type,
-                ViolationType::OnlineOnsiteSameDay,
-                "seed {seed}: filters must never be violated by the search"
+                ConstraintType::OnlineOnsiteSameDay,
+                "seed {seed}: a soft rule must never surface as a hard violation"
             );
-            assert_ne!(v.constraint_type, ViolationType::LecturerVeto, "seed {seed}");
+            assert_ne!(
+                v.constraint_type,
+                ConstraintType::LecturerVeto,
+                "seed {seed}: LecturerVeto is still a filter"
+            );
         }
+        assert!(
+            outcome.objective.day_mix_cost >= 0.0,
+            "seed {seed}: the day-mix term must be a real, non-negative cost"
+        );
     }
 }

@@ -50,6 +50,8 @@ Check any change against these. Each links to the decision behind it.
 - [ ] No exam-week or holiday logic by array slicing; resolve against the Academic Calendar
 - [ ] No per-person timezone anywhere in grid or constraint logic
 - [ ] No expression evaluation of tenant-supplied strings; typed parameters only — [ADR-0007](docs/adr/0007-fourteen-typed-constraint-types-no-dsl.md)
+- [ ] Room exclusivity is read from `Room::is_exclusive()`, never from a room id — [ADR-0022](docs/adr/0022-a-virtual-room-is-not-an-exclusive-resource.md)
+- [ ] A preset never moves to make a violation count fall — [ADR-0025](docs/adr/0025-maxonlineshare-is-not-enforced-by-the-search.md)
 - [ ] Past Sessions excluded from recalculation, always — [ADR-0008](docs/adr/0008-one-solve-mechanism-scope-plus-lock-policy.md)
 - [ ] Locked and out-of-scope Sessions never moved (v1: hard lock) — [ADR-0008](docs/adr/0008-one-solve-mechanism-scope-plus-lock-policy.md)
 - [ ] Group conflict checks use precomputed ancestor+descendant sets, never a live tree walk
@@ -89,7 +91,7 @@ the behaviour they exercise, and kept separate from the generator on purpose
 ```bash
 git clone --recurse-submodules …     # or: git submodule update --init --recursive
 
-cargo test --workspace               # 177 tests
+cargo test --workspace               # 183 tests
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo fmt --all --check
 
@@ -99,6 +101,10 @@ CALENDRY_SOLVER_ADDR=127.0.0.1:50051 cargo run -p calendry-solver
 CI runs all of the above plus rustdoc and a release benchmark smoke run
 ([ADR-0020](docs/adr/0020-workspace-lints-and-ci-are-the-gate.md)). Lints live in
 the root `Cargo.toml` and are inherited by every crate.
+
+There is a second workflow, `.github/workflows/docker.yml`, building the image
+from the root `Dockerfile`. It is independent of the gate above — a red test does
+not stop an image build and vice versa.
 
 ### Benchmarks
 
@@ -141,17 +147,29 @@ cd ../.. && git add vendor/calendry-proto && git commit -m "proto: bump to v0.3.
 
 ## What is built, and what is not
 
-**All fourteen catalogue constraint types are implemented.** There is no
-`UNIMPLEMENTED` branch left in the conversion layer: a new type added to the
-schema fails to compile against the match instead, which is the property that
-mattered.
+**Every catalogue constraint type the schema defines is implemented, with one
+exception.** `PersonPreferenceFit` arrived in schema v0.7.0 and is refused as
+`UNIMPLEMENTED`; everything else is evaluated. The conversion layer's match is
+exhaustive with no `_ =>` arm, so a new type in the schema is a compile error
+rather than a silently ignored setting — which is the property that mattered.
+
+The catalogue is no longer exactly fourteen types, and counting them is not a
+useful check: `MinimizeBlockUsage` replaced two types with one carrying flags
+([ADR-0024](docs/adr/0024-one-type-per-axis-with-flags.md)), and the two it
+replaced remain on the wire as deprecated.
 
 Search is greedy construction followed by Large Neighborhood Search with
 simulated-annealing acceptance, driving `MoveEvaluator` for real. All four
 benchmark presets place every Session; a 27,136-Session university solves in
-~350 ms. **Performance work is closed** —
+~250 ms. **Performance work is closed** —
 [ADR-0021](docs/adr/0021-measure-end-to-end-before-optimizing-a-component.md)
 explains why, and what not to reopen without a new measurement.
+
+The one open question about search *quality* rather than speed is that nothing
+currently bounds online usage until LNS, and LNS barely runs at the default move
+budget. That is measured, not suspected —
+[ADR-0025](docs/adr/0025-maxonlineshare-is-not-enforced-by-the-search.md), and
+read it before changing a preset.
 
 Deliberately not built:
 
@@ -171,26 +189,39 @@ schema pipeline never exercised end to end. See
 ## Three constraint shapes — read before adding a type
 
 1. **Pairwise, keyed by `(entity, slot)`** — the four structural double-booking
-   types. Occupancy bitsets; the search can never violate them.
-2. **Unary, keyed by `(slot, room)`** — the six soft types, and also
-   `LecturerVeto`, which despite its name depends only on one Session's slot and
-   its lecturers. Precomputed lookup tables and masks; O(1) exact deltas.
+   types. Occupancy bitsets; the search can never violate them. Note that the
+   room axis exempts non-exclusive Rooms
+   ([ADR-0022](docs/adr/0022-a-virtual-room-is-not-an-exclusive-resource.md)).
+2. **Unary, keyed by `(slot, room)`** — the soft types, and also `LecturerVeto`,
+   which despite its name depends only on one Session's slot and its lecturers.
+   Precomputed lookup tables and masks; O(1) exact deltas.
 3. **Aggregate over a set** — `OnlineOnsiteSameDay` and `MaxOnlineShare`, in
-   `aggregates.rs`. Neither is expressible as a slot-keyed bitset.
+   `aggregates.rs`. Neither is expressible as a slot-keyed bitset, and **neither
+   is a filter any more**.
 
-Within shape 3 the two types still differ, and the difference is load-bearing:
+Within shape 3 the two types still differ, and the difference is load-bearing —
+it is what "hard" and "soft" reduce to once neither can be a filter:
 
-* **`OnlineOnsiteSameDay` is a feasibility filter.** It interacts at *day*
-  granularity but is monotone-safe — placing the first Session on a day can never
-  violate it — so the search never produces one, and anything reported came from
-  the caller's immovable input.
 * **`MaxOnlineShare` cannot be a filter at all.** It is a cardinality ratio,
   invisible in any pair, and a filter would dead-end construction because the
   first online Session placed makes the ratio 100% before the denominator has
   grown. Under `PER_WEEK` the denominator also *moves* when a Session relocates
-  between weeks. So it lives on the objective, on the hard side. A run can
-  therefore succeed while still reporting a `MaxOnlineShare` violation — the same
-  shape as `ExactFrequency` reporting unplaced Sessions, not a new exception.
+  between weeks. So it lives on the objective, **charged at `hard_penalty`**. A
+  run can therefore succeed while still reporting a `MaxOnlineShare` violation —
+  the same shape as `ExactFrequency` reporting unplaced Sessions, not a new
+  exception.
+* **`OnlineOnsiteSameDay` used to be a filter and is now priced**, at its
+  configured weight rather than at `hard_penalty`
+  ([ADR-0023](docs/adr/0023-onlineonsitesameday-is-priced-not-forbidden.md)). That
+  weight difference is the entire distinction between the two. Because the search
+  now produces mixed days on purpose when the alternative costs more, a mixed day
+  is **not** a hard violation: it is carried in the objective breakdown with its
+  cell count and weighted cost, where every other soft type's breaches are.
+
+Neither term can be attributed to a single placement — a violated share cell and
+a mixed `(group, day)` cell each belong to a set — so `Trial` reads both straight
+off the counters instead of accumulating them as deltas, and `ruin_worst` is blind
+to both ([ADR-0025](docs/adr/0025-maxonlineshare-is-not-enforced-by-the-search.md)).
 
 ## Group scoping differs by constraint, deliberately
 
@@ -227,7 +258,7 @@ Within shape 3 the two types still differ, and the difference is load-bearing:
 ## Reference
 
 Prototype: **TimeCraft**, a prior student project — Python, CP-SAT via OR-Tools.
-Its constraint set is the origin of the fourteen types. Its hardcoded assumptions
+Its constraint set is the origin of this catalogue. Its hardcoded assumptions
 (`timeslot % 3`, `timeslot > 14`, `weeks[-exam_weeks:]`, a 30% online cap) are
 exactly what the parametrized versions replace — treat any resemblance to those
 magic numbers in new code as a bug.

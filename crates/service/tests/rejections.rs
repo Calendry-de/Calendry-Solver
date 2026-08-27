@@ -434,7 +434,11 @@ fn a_negative_soft_weight_is_refused() {
     let mut input = base_input();
     let mut c = enabled(
         "c-first",
-        pb::constraint_config::Params::MinimizeFirstBlock(pb::MinimizeFirstBlock {}),
+        pb::constraint_config::Params::MinimizeBlockUsage(pb::MinimizeBlockUsage {
+            blocks: vec![],
+            first: true,
+            last: false,
+        }),
     );
     c.weight = -1.0;
     input.constraints.push(c);
@@ -452,7 +456,11 @@ fn a_zero_soft_weight_is_accepted() {
     let mut input = base_input();
     input.constraints.push(enabled(
         "c-first",
-        pb::constraint_config::Params::MinimizeFirstBlock(pb::MinimizeFirstBlock {}),
+        pb::constraint_config::Params::MinimizeBlockUsage(pb::MinimizeBlockUsage {
+            blocks: vec![],
+            first: true,
+            last: false,
+        }),
     ));
 
     convert(&input, &scope(&[])).expect("zero weight is meaningful, not an error");

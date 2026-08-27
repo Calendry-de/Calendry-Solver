@@ -4,7 +4,31 @@ Status, not decisions. The decision this records is
 [ADR-0003](adr/0003-proto-schema-as-a-pinned-submodule.md) — the schema lives in
 a separate repo, consumed as a pinned submodule.
 
-## Verified working, 2026-08-15
+## Current pin: `v0.7.0`
+
+Submodule `vendor/calendry-proto` is pinned to `6107eb2` = **`v0.7.0`**, up from
+`v0.2.0`. What arrived between them that this repo cares about:
+
+* **`MinimizeBlockUsage`** and an `invert` flag on `MinimizeRoomRank`, replacing
+  `MinimizeFirstBlock` / `MinimizeLastBlock` — see
+  [ADR-0024](adr/0024-one-type-per-axis-with-flags.md). The two replaced messages
+  are **deprecated but retained**, because removing a field is wire-breaking and
+  `buf breaking` rejects it. Senders should emit the new type; this repo's
+  fixtures were migrated, and the `deprecated` warning is a hard error under the
+  lint policy, so a new use cannot land quietly.
+* **`PersonPreferenceFit`**, plus a `preferred` field on `Person`. Neither is
+  evaluated: the conversion layer refuses the constraint as `UNIMPLEMENTED`, and
+  `preferred` is read by nothing. `None` is the "no stated preference" case.
+* **`OnlineOnsiteSameDay` carries a weight**, since it is priced rather than
+  forbidden — [ADR-0023](adr/0023-onlineonsitesameday-is-priced-not-forbidden.md).
+  A tenant that has not been backfilled sends weight 0, which reads as "count it,
+  do not steer" — the same reading every soft type gives a zero weight, and the
+  reason the app's rollout order puts the backfill before the deploy.
+
+The verification below was done at `v0.2.0`. The **pipeline** it describes is
+unchanged and still the one in force; only the pin moved.
+
+## Verified working at `v0.2.0`, 2026-08-15
 
 The contract repo, this repo's consumption of it, and the contract's CI/CD are all
 real and observed working. Only the Nuxt side remains.
@@ -77,9 +101,11 @@ plus `package.json` — no `src/generated`, no `node_modules`, no `.proto`.
 
 **That repo is not checked out here. Do not attempt this from the solver repo.**
 
-* Add `calendry-proto` as a submodule there too, pinned to the same `v0.2.0`.
-* Install and import `@mindcollaps/calendry-proto@0.2.0`, and wire the gRPC
-  client.
+* Add `calendry-proto` as a submodule there too, pinned to the same **`v0.7.0`**
+  this repo is on.
+* Install and import `@mindcollaps/calendry-proto@0.7.0`, and wire the gRPC
+  client. Note that only `0.2.0` was ever confirmed published — whether the later
+  tags reached GitHub Packages has not been checked from here.
 * **Add an `.npmrc` with a GitHub Packages token.** The registry requires
   authentication even to *install* a public package — this hits local dev, the
   docker-compose build, and CI. `calendry` has no `.npmrc` today. This is the one

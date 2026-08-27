@@ -23,31 +23,49 @@ not reproducible ([ADR-0006](adr/0006-two-budgets-and-the-limit-of-determinism.m
 
 All four presets place **every** Session, and LNS runs properly at every scale.
 
-| preset | placements | iterations | unplaced | objective |
-|---|---|---|---|---|
-| small-school | 1,497 | 91 | 0 | 85,090 |
-| large-school | 3,167 | 84 | 0 | 1,067,445 |
-| small-university | 6,760 | 89 | 0 | 5,685,722 |
-| large-university | 27,136 | 80 | 0 | 68,409,047 |
+| preset | placements | iterations | unplaced | aggregate | soft | day_mix |
+|---|---|---|---|---|---|---|
+| small-school | 1,497 | 92 | 0 | 3 | 1,232 | 225 |
+| large-school | 3,167 | 81 | 0 | 22 | 3,379 | 1,050 |
+| small-university | 6,760 | 85 | 0 | 60 | 7,164 | 5,195 |
+| large-university | 27,136 | 87 | 0 | 454 | 28,800 | 34,210 |
 
-The objectives are a fingerprint as much as a figure: they were checked
-unchanged, to the digit, across the module-shape refactor recorded in
-ADR-0016 through ADR-0019.
+Objective **totals are not comparable** across either of the two semantic changes
+that produced these numbers: the virtual-room fix
+([ADR-0022](adr/0022-a-virtual-room-is-not-an-exclusive-resource.md)) raised the
+aggregate count, and pricing a mixed day
+([ADR-0023](adr/0023-onlineonsitesameday-is-priced-not-forbidden.md)) grew
+`hard_penalty` itself to bound the new term. The per-term columns are the ones to
+compare.
+
+The per-term figures *are* a fingerprint, and were used as one twice. They were
+checked unchanged to the digit across the module-shape refactor
+(ADR-0016 through ADR-0019), and then checked to match the independently
+documented post-change figures after that refactor was merged with the semantic
+work — same aggregate, same soft, same day-mix, same violation count. Two
+rewrites of the same code meeting on the same numbers is the strongest evidence
+available that neither changed behaviour it did not mean to.
 
 ## Phase timings
 
 | preset | construct | `evaluate_hard` | LNS | total solve |
 |---|---|---|---|---|
-| small-school | 3.0 ms (5%) | 0.8 ms (1%) | 59.7 ms (94%) | 63.5 ms |
-| large-school | 7.2 ms (11%) | 1.4 ms (2%) | 57.8 ms (87%) | 66.4 ms |
-| small-university | 24.8 ms (35%) | 6.3 ms (9%) | 40.4 ms (57%) | 71.5 ms |
-| large-university | **219 ms (60%)** | 45.5 ms (12%) | 100 ms (27%) | **365 ms** |
+| small-school | 2.7 ms (4%) | 0.6 ms (1%) | 70.5 ms (96%) | 73.7 ms |
+| large-school | 6.1 ms (9%) | 1.5 ms (2%) | 60.6 ms (89%) | 68.2 ms |
+| small-university | 19.9 ms (29%) | 6.0 ms (9%) | 43.5 ms (63%) | 69.5 ms |
+| large-university | **119 ms (48%)** | 46.7 ms (19%) | 82.4 ms (33%) | **248 ms** |
 
 **There is no single bottleneck — it is scale-dependent.** At school scale LNS
 dominates, but that is the move budget being spent rather than a defect: LNS time
-is roughly constant (40–60 ms) across an 18x range of instance size because runs
+is roughly constant (43–82 ms) across an 18x range of instance size because runs
 are budget-bound at 200k moves, so its *share* falls as instances grow. Only at
-large-university does construction dominate.
+large-university does construction dominate, and it no longer dominates outright.
+
+Construction got **~46% faster** at large-university (219 ms → 119 ms) purely as
+a side effect of pricing the day mix instead of filtering on it: with no per-
+candidate day-mix check, the room loop does less work per probe. Nobody set out
+to make construction faster here — which is the corollary above, arriving on
+schedule.
 
 Re-attribute after every change. These shares move whenever anything else is
 fixed, and carrying forward a stale picture is exactly the mistake ADR-0021
@@ -152,3 +170,87 @@ slice.
 **symptom of infeasible instances** rather than a defect. It is gone at every
 preset size: with 0 unplaced there is nothing to retry, and LNS completes 80–91
 iterations everywhere.
+
+---
+
+## The move budget does not buy what it looks like it buys
+
+Measured at large-university, seed 1, varying `--moves` only:
+
+| moves | iterations | aggregate | soft | solve |
+|---|---|---|---|---|
+| 200k (bench default) | 85 | **455** | 29,181 | 339 ms |
+| 1M | 444 | **386** | 25,622 | 627 ms |
+| 5M | 2,181 | **219** | 15,093 | 2.28 s |
+
+Construction ends at ~478 violations. The curve is **monotone and still falling
+steeply at 5M**; no plateau anywhere in the range. Wall cost scales far better
+than linearly — 25x the moves for 6.7x the time — because construction is a fixed
+~220 ms and iterations per second *improves* with run length (251 → 955/s).
+Per-iteration yield does decay: 0.27 → 0.21 → 0.12 violations removed per
+iteration.
+
+Why so few iterations, and why that is the whole story:
+
+* `k = 1 + rng.below(8)` — a ruin touches ~4.5 placements.
+* `MAX_CANDIDATES = 512` scored per repaired placement, so ~2,300 moves per
+  iteration. **Moves buy candidate breadth, not coverage.**
+* 200k moves therefore repairs roughly **380 of 27,136 placements — 1.4% of the
+  instance**.
+* **`COOLING = 0.999` is per iteration.** At ~86 iterations the temperature is
+  still 0.918x initial. Only the 5M run (2,181 iterations, 0.113x) completes
+  anything resembling an annealing schedule.
+
+**This is not scale-dependent, which was the surprise.** Every preset lands at
+85–88 iterations at 200k moves, because iteration cost is `k × MAX_CANDIDATES`
+and is independent of instance size. So the 200k-move budget is an essentially
+isothermal walk at *every* scale.
+
+**Recorded as a wrong prediction, deliberately.** Reasoning from the cooling
+schedule alone, the expectation before measuring was that extra budget merely
+extends a near-zero-temperature hill climb and plateaus. The opposite is true:
+extra budget buys the *first actual annealing*. That was not knowable without
+running it — which is the whole of
+[ADR-0021](adr/0021-measure-end-to-end-before-optimizing-a-component.md).
+
+The cost of using this lever: it reopens a performance envelope slice 6
+deliberately closed (7.79 s → 349 ms). **Spending 2.28 s where 349 ms was
+celebrated must be a conscious decision, not drift.**
+
+## What `ruin_worst` can see
+
+`ruin_worst` ranks placements by `problem.soft.cost` alone — the unary table. At
+large-university soft is 29,181 of an objective of 172,885,956: **0.017%**. So the
+arm whose job is "ruin the worst thing" is steering by a rounding error, while the
+other two arms are random and related.
+
+LNS does not merely fail to *stumble onto* share breaches; one third of its
+selection is actively aimed at the wrong quantity. Pricing a mixed day
+([ADR-0023](adr/0023-onlineonsitesameday-is-priced-not-forbidden.md)) added a
+second term it cannot see, and among the *tunable* terms its visibility fell from
+100% to 45.7%.
+
+The harness prints that ratio every run, so the number moves when the code does
+rather than living in a comment. What to do about it is
+[ADR-0025](adr/0025-maxonlineshare-is-not-enforced-by-the-search.md).
+
+## Violations after the virtual-room fix
+
+Both measured before and after
+[ADR-0022](adr/0022-a-virtual-room-is-not-an-exclusive-resource.md):
+
+| preset | aggregate before → after | soft before → after | unplaced |
+|---|---|---|---|
+| small-school | 4 → 5 | 1,254 → 1,288 | 0 → 0 |
+| large-school | 23–24 → 32–33 | ~3,400 → ~3,470 | 0 → 0 |
+| small-university | 60–63 → 62–69 | ~7,200 → ~7,300 | 0 → 0 |
+| large-university | **167–180 → 448–461** | ~26,100 → ~29,200 | 0 → 0 |
+
+Structural violations are **unchanged at exactly 80** (14 group + 66 person) at
+large-university before and after, and `unplaced` stays 0 everywhere — so the fix
+moved nothing it should not have. Objective totals rose 25–49% at school scale and
+153–176% at large-university, entirely through the hard penalty applied to the
+aggregate count.
+
+Totals are not comparable across the day-mix reclassification either, because
+`hard_penalty` itself grew to bound the new term.

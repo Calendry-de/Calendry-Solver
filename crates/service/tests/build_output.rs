@@ -77,14 +77,25 @@ fn soft_components_appear_in_the_objective_breakdown() {
     // real weighted objective plus one component per configured soft instance.
     let mut input = base_input();
     input.offerings = vec![offering("o1", 2)];
+    // `MinimizeBlockUsage`, not the deprecated MinimizeFirstBlock /
+    // MinimizeLastBlock pair: schema 0.7.0 supersedes both with one type
+    // carrying `first` and `last` flags, and senders are asked to emit it.
     let mut first = enabled(
         "c-first",
-        pb::constraint_config::Params::MinimizeFirstBlock(pb::MinimizeFirstBlock {}),
+        pb::constraint_config::Params::MinimizeBlockUsage(pb::MinimizeBlockUsage {
+            blocks: vec![],
+            first: true,
+            last: false,
+        }),
     );
     first.weight = 3.0;
     let mut last = enabled(
         "c-last",
-        pb::constraint_config::Params::MinimizeLastBlock(pb::MinimizeLastBlock {}),
+        pb::constraint_config::Params::MinimizeBlockUsage(pb::MinimizeBlockUsage {
+            blocks: vec![],
+            first: false,
+            last: true,
+        }),
     );
     last.weight = 2.0;
     input.constraints.push(first);

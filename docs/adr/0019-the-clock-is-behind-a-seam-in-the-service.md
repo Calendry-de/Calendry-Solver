@@ -26,3 +26,32 @@ the process lifetime.
 One lock over one `RegistryState` makes create atomic. `Registry::reap` gives the
 retention bound a name; the binary runs it on a timer with a 15-minute retention,
 long enough for a poller (ADR-0005) to collect a result.
+
+## The reaper touches a cross-repo contract — read before changing the retention
+
+The Nuxt side had been carrying this repo's unbounded-registry note in its own
+`CLAUDE.md`, which meant the one repo that could fix it was the one repo that did
+not know about it. It is fixed here, but the app depends on two behaviours that
+reaping interacts with, so they change together or not at all:
+
+* The app **captures a run's result the moment it goes terminal**, rather than
+  when someone asks to apply it, because "I'll fetch it later" is a promise a
+  restart breaks.
+* The app treats `NOT_FOUND` as **terminal and unrecoverable** — the solver
+  restarted and lost the run — while `UNAVAILABLE` is transient and leaves its
+  row untouched.
+
+The concern the app raised is real: an eviction policy makes `NOT_FOUND` mean two
+things, and the app cannot tell them apart. What makes it tolerable rather than
+breaking is the *order* of the two behaviours above. Because the app captures on
+terminal, a reaped run is one whose result the app already holds, and the
+retention window is the margin that guarantees it: 15 minutes, against a poll
+interval measured in seconds.
+
+So the rule is a floor on the retention, not a ban on reaping. **Retention must
+stay comfortably longer than the app's longest plausible gap between a run going
+terminal and its poller noticing.** Shortening it toward that gap re-creates the
+ambiguity with no warning, because nothing in either repo tests the interaction.
+
+Still worth confirming from the app side before the retention is tuned: this ADR
+records the reasoning, not agreement.

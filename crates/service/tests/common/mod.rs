@@ -85,6 +85,11 @@ pub fn person(id: &str) -> pb::Person {
         role_tags: vec!["Lecturer".into()],
         group_ids: vec![],
         blackouts: vec![],
+        // Schema 0.7.0. `None` is the "no stated preference" case, which is what
+        // these fixtures mean and what nothing here reads yet —
+        // `PersonPreferenceFit` is in the schema but not evaluated by this
+        // solver, and `convert` refuses it as UNIMPLEMENTED.
+        preferred: None,
     }
 }
 

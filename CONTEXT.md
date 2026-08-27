@@ -94,8 +94,13 @@ _Avoid_: equipment, amenity, tag
 
 **Virtual Room**:
 How online delivery is modelled. Online is a Room, not a boolean on a Session,
-which keeps room assignment uniform.
+which keeps room assignment uniform. **Not an exclusive resource**: any number of
+Sessions may occupy one in the same slot.
 _Avoid_: online flag, remote mode
+
+**Exclusive Room**:
+A Room only one Session may occupy at a time — every physical Room, and no
+virtual one. The single property the room double-booking check consults.
 
 ---
 
@@ -180,8 +185,9 @@ a presentation and export concern only, and must not reach "same day" or
 ## Constraints
 
 **Constraint type**:
-One of fourteen predefined kinds of rule, each with one compiled evaluator
-reading its own typed parameters. Tenant-supplied logic never executes.
+One of a fixed set of predefined kinds of rule, each with one compiled evaluator
+reading its own typed parameters. Tenant-supplied logic never executes. Adding
+one is a code change; the set is not open to tenants.
 
 **Constraint instance**:
 One configured use of a type: an id, the kinds it covers, and its typed
@@ -196,7 +202,9 @@ A rule contributing a weighted penalty to the objective.
 
 **Objective**:
 What the search minimizes: unplaced Sessions and aggregate violations on the hard
-side, weighted soft penalties on the soft side.
+side, weighted soft penalties on the soft side. Terms belonging to a *set* rather
+than to one Placement — a violated share cell, a mixed day — are read off the
+running counters instead of accumulated as per-Placement deltas.
 
 **Occupancy**:
 The entity-by-slot index recording what is busy when. An index the search
@@ -204,7 +212,8 @@ consults to *avoid* creating violations — not the authoritative check.
 
 **Violation**:
 A reported breach of a hard constraint, naming its type, the Sessions or
-Offerings involved, and a human-readable detail.
+Offerings involved, and a human-readable detail. A **priced** outcome is not a
+Violation, however undesirable — it appears in the objective breakdown instead.
 
 **Structural constraint**:
 One of the four double-booking types — Room, Lecturer, Group, Person. Pairwise,
@@ -216,7 +225,13 @@ types, and `LecturerVeto`.
 
 **Aggregate constraint**:
 A constraint over a *set* of Sessions, not expressible as a slot-keyed bitset:
-`OnlineOnsiteSameDay` and `MaxOnlineShare`.
+`OnlineOnsiteSameDay` and `MaxOnlineShare`. Neither can be a filter, so both live
+on the objective; they differ only in what they are charged.
+
+**Mixed day**:
+A `(Group, day)` cell holding both online and on-site Sessions. Priced at its
+configured weight rather than forbidden, so the search will accept one when every
+alternative costs more.
 
 **Budget**:
 What ends a run. A **move budget** counts evaluated candidate moves and is

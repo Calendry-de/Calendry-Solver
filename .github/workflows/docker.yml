@@ -1,0 +1,102 @@
+name: Build Docker image
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      # recursive: crates/proto/build.rs compiles vendor/calendry-proto/proto,
+      # which is a submodule of a submodule.
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Verify the proto submodule is present
+        run: |
+          set -euo pipefail
+          SENTINEL=vendor/calendry-proto/proto/calendry/solver/v1/service.proto
+          [ -f "$SENTINEL" ] || { echo "::error::$SENTINEL missing — build.rs will fail"; exit 1; }
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=sha
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          push: ${{ github.event_name != 'pull_request' }}
+          load: ${{ github.event_name == 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test
+        run: |
+          set -euo pipefail
+          FIRST_TAG="$(printf '%s\n' '${{ steps.meta.outputs.tags }}' | head -n1)"
+
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            docker pull "$FIRST_TAG"
+          fi
+
+          docker run -d --name solver-smoke -p 50051:50051 "$FIRST_TAG"
+
+          for _ in $(seq 1 30); do
+            if timeout 1 bash -c 'cat < /dev/null > /dev/tcp/127.0.0.1/50051' 2>/dev/null; then
+              READY=1
+              break
+            fi
+            sleep 1
+          done
+
+          if [ "${READY:-0}" != "1" ]; then
+            echo "::error::nothing listening on 50051 — check CALENDRY_SOLVER_ADDR binds 0.0.0.0"
+            docker logs solver-smoke || true
+            exit 1
+          fi
+
+          [ "$(docker inspect -f '{{ .State.Running }}' solver-smoke)" = "true" ] \
+            || { echo "::error::container exited after starting"; docker logs solver-smoke; exit 1; }
+
+          docker logs solver-smoke
+
+      - name: Tear down
+        if: always()
+        run: docker rm -f solver-smoke 2>/dev/null || true

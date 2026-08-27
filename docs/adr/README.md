@@ -24,10 +24,14 @@ and measured to be wrong.
 
 | # | Decision |
 |---|---|
-| [0007](0007-fourteen-typed-constraint-types-no-dsl.md) | Fourteen predefined constraint types, each a compiled evaluator; no expression DSL |
+| [0007](0007-fourteen-typed-constraint-types-no-dsl.md) | Predefined constraint types, each a compiled evaluator; no expression DSL |
 | [0008](0008-one-solve-mechanism-scope-plus-lock-policy.md) | One solve mechanism: a scope plus a lock policy |
 | [0015](0015-getstatus-best-objective-carries-the-weighted-objective.md) | `GetStatus.best_objective` carries the weighted objective, not a violation count |
 | [0016](0016-scope-membership-is-carried-not-inferred.md) | Scope membership is carried into `Problem`, not inferred from placement presence |
+| [0022](0022-a-virtual-room-is-not-an-exclusive-resource.md) | A virtual Room is not an exclusive resource |
+| [0023](0023-onlineonsitesameday-is-priced-not-forbidden.md) | `OnlineOnsiteSameDay` is priced, not forbidden |
+| [0024](0024-one-type-per-axis-with-flags.md) | One constraint type per axis, with flags, rather than one type per direction |
+| [0025](0025-maxonlineshare-is-not-enforced-by-the-search.md) | `MaxOnlineShare` is not enforced by the search, and never was |
 
 ## Benchmarking
 

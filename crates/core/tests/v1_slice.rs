@@ -6,7 +6,7 @@
 //! vacuously, so a "no violations" assertion would pass on a solver that does
 //! nothing at all.
 
-use calendry_solver_core::constraints::ViolationType;
+use calendry_solver_core::constraints::ConstraintType;
 use calendry_solver_core::ids::{PlacementIdx, RoomIdx, SlotIdx};
 use calendry_solver_core::problem::{ProblemSpec, classify_immovable};
 use calendry_solver_core::search::{Budget, NeverHalt, solve};
@@ -69,7 +69,7 @@ fn oversubscribed_input_terminates_and_reports_a_hard_violation() {
     // And it must SAY that it could not satisfy the demand.
     assert_eq!(outcome.hard_violations.len(), 1);
     let v = &outcome.hard_violations[0];
-    assert_eq!(v.constraint_type, ViolationType::ExactFrequency);
+    assert_eq!(v.constraint_type, ConstraintType::ExactFrequency);
     assert_eq!(v.offering_ids, vec!["A".to_string()]);
     assert!(
         v.detail.contains("requires 4") && v.detail.contains("3 placed"),
@@ -82,7 +82,7 @@ fn oversubscribed_input_terminates_and_reports_a_hard_violation() {
         !outcome
             .hard_violations
             .iter()
-            .any(|v| v.constraint_type == ViolationType::RoomDoubleBooking),
+            .any(|v| v.constraint_type == ConstraintType::RoomDoubleBooking),
         "must not double-book to satisfy frequency"
     );
 }
@@ -244,7 +244,7 @@ fn move_budget_stops_the_run_early() {
         constraints: testing::with_soft(vec![testing::soft(
             "rank",
             3.0,
-            SoftParams::MinimizeRoomRank { rank_threshold: 1 },
+            SoftParams::MinimizeRoomRank { rank_threshold: 1, invert: false },
         )]),
         ..ProblemSpec::new(testing::grid(4, 1))
     });

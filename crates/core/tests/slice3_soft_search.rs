@@ -185,7 +185,7 @@ fn minimize_room_rank_steers_away_from_premium_rooms() {
             vec![testing::soft(
                 "r",
                 w,
-                SoftParams::MinimizeRoomRank { rank_threshold: 5 },
+                SoftParams::MinimizeRoomRank { rank_threshold: 5, invert: false },
             )],
         )
     });

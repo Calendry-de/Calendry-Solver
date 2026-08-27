@@ -8,7 +8,7 @@
 //! The generation seed is deliberately **separate** from the solve seed, so an
 //! instance can be held fixed while the search seed varies — and vice versa.
 
-use calendry_solver_core::aggregates::{ShareInstance, ShareWindow};
+use calendry_solver_core::aggregates::{DayMixInstance, ShareInstance, ShareWindow};
 use calendry_solver_core::ids::{GroupIdx, OfferingIdx, PersonIdx, RoomIdx, SlotIdx};
 use calendry_solver_core::problem::{
     ConstraintInstance, ConstraintSet, FixedSpec, Group, Immovable, OfferingSpec, Person,
@@ -696,7 +696,7 @@ fn build_constraints(params: &InstanceParams, slots: &SlotTable) -> ConstraintSe
             id: "soft-room-rank".into(),
             kinds: vec![],
             weight: 2.0 * w,
-            params: SoftParams::MinimizeRoomRank { rank_threshold: PREMIUM_RANK },
+            params: SoftParams::MinimizeRoomRank { rank_threshold: PREMIUM_RANK, invert: false },
         },
         SoftInstance {
             id: "soft-exam-week".into(),
@@ -721,7 +721,9 @@ fn build_constraints(params: &InstanceParams, slots: &SlotTable) -> ConstraintSe
         person_double_booking: vec![all("c-person")],
         exact_frequency: vec![all("c-frequency")],
         lecturer_veto: vec![all("c-veto")],
-        online_onsite_same_day: vec![ConstraintInstance {
+        // Weight 5 mirrors the app catalogue's `defaultWeight`, so generated
+        // benchmark instances price a mixed day the way a real tenant does.
+        online_onsite_same_day: vec![DayMixInstance {
             id: "c-day-mix".into(),
             kinds: vec![
                 KIND_LECTURE.into(),
@@ -729,6 +731,7 @@ fn build_constraints(params: &InstanceParams, slots: &SlotTable) -> ConstraintSe
                 KIND_LAB.into(),
                 KIND_ELECTIVE.into(),
             ],
+            weight: 5.0,
         }],
         max_online_share: params
             .max_online_share

@@ -20,7 +20,7 @@
 //! library target made possible.
 
 use calendry_solver::convert::convert;
-use calendry_solver_core::constraints::{self, ViolationType};
+use calendry_solver_core::constraints::{self, ConstraintType};
 use calendry_solver_core::ids::OfferingIdx;
 use calendry_solver_core::search::construct;
 
@@ -38,7 +38,7 @@ fn frequency_violations(problem: &calendry_solver_core::Problem) -> Vec<constrai
     let (solution, _) = construct(problem);
     constraints::evaluate_hard(problem, &solution)
         .into_iter()
-        .filter(|v| v.constraint_type == ViolationType::ExactFrequency)
+        .filter(|v| v.constraint_type == ConstraintType::ExactFrequency)
         .collect()
 }
 

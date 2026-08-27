@@ -7,9 +7,10 @@
 //! to symmetric expansion, and `cross_tree_person_clash_is_invisible_to_groups`
 //! demonstrates the clash is real before showing the person check catches it.
 
-use calendry_solver_core::constraints::{ViolationType, evaluate_hard};
+use calendry_solver_core::constraints::{ConstraintType, evaluate_hard};
 use calendry_solver_core::ids::PlacementIdx;
 use calendry_solver_core::problem::ProblemSpec;
+use calendry_solver_core::solution::Solution;
 use calendry_solver_core::{SolveOutcome, testing};
 
 mod common;
@@ -129,14 +130,14 @@ fn lecturer_clash_is_reported_when_the_input_already_contains_one() {
 
     // Greedy avoids the clash by refusing to place the second session, which
     // surfaces as an unmet frequency rather than a silent double-booking.
-    let kinds: Vec<ViolationType> = outcome
+    let kinds: Vec<ConstraintType> = outcome
         .hard_violations
         .iter()
         .map(|v| v.constraint_type)
         .collect();
     assert!(!kinds.is_empty(), "an impossible instance must report something");
     assert!(
-        !kinds.contains(&ViolationType::LecturerDoubleBooking),
+        !kinds.contains(&ConstraintType::LecturerDoubleBooking),
         "the heuristic must not resolve infeasibility by double-booking a lecturer"
     );
 }
@@ -172,7 +173,7 @@ fn cross_tree_person_clash_is_invisible_to_groups() {
     let violations = evaluate_hard(&person_aware, &outcome.solution);
     let person: Vec<_> = violations
         .iter()
-        .filter(|v| v.constraint_type == ViolationType::PersonDoubleBooking)
+        .filter(|v| v.constraint_type == ConstraintType::PersonDoubleBooking)
         .collect();
 
     assert_eq!(
@@ -188,7 +189,7 @@ fn cross_tree_person_clash_is_invisible_to_groups() {
     assert!(
         !violations
             .iter()
-            .any(|v| v.constraint_type == ViolationType::GroupDoubleBooking),
+            .any(|v| v.constraint_type == ConstraintType::GroupDoubleBooking),
         "the groups are tree-unrelated, so the group check must NOT fire"
     );
 }
@@ -210,6 +211,76 @@ fn person_double_booking_separates_the_two_sessions() {
 }
 
 // ---------------------------------------------------------------------------
+// Test 5 — a virtual Room is not an exclusive resource
+// ---------------------------------------------------------------------------
+//
+// Online delivery is modeled AS a Room so that room-assignment logic stays
+// uniform (see the proto), not to make concurrency scarce. There is one virtual
+// room per delivery mode, so treating it as capacity-1 caps ALL online teaching
+// at a single Session per slot, institution-wide.
+//
+// Both LAYERS are covered, on the same pair of instances, because they are
+// separate code paths that must agree: `Occupancy` decides what the search may
+// place, `check_pair` decides what gets reported. If they drift, the solver
+// refuses placements it then declines to report, or the reverse — and either
+// direction is caught below.
+//
+// Each virtual case is paired with the identical physical instance. Asserting
+// only that virtual rooms permit concurrency would pass just as well against a
+// build where room checking was broken outright.
+
+#[test]
+fn the_search_packs_a_virtual_room_but_not_a_physical_one() {
+    // Physical: the room is exclusive, so only one of the two can be placed.
+    let physical = run(&testing::two_sessions_one_room(false));
+    assert_eq!(
+        physical.solution.placed_count(),
+        1,
+        "one physical room, one slot — the second Session has nowhere to go"
+    );
+
+    // Virtual: both fit, in the same room, in the same slot.
+    let virt = run(&testing::two_sessions_one_room(true));
+    assert_eq!(
+        virt.solution.placed_count(),
+        2,
+        "a virtual room hosts unlimited concurrent Sessions"
+    );
+    assert!(
+        virt.hard_violations.is_empty(),
+        "two streamed Sessions at one hour are not a clash, got {:?}",
+        virt.hard_violations
+    );
+
+    let a = virt.solution.get(PlacementIdx(0)).unwrap();
+    let b = virt.solution.get(PlacementIdx(1)).unwrap();
+    assert_eq!((a.room, a.start), (b.room, b.start), "same room, same slot");
+}
+
+#[test]
+fn a_shared_room_is_reported_only_when_the_room_is_exclusive() {
+    // The search can never create a room clash, so both Sessions are pinned by
+    // the caller — the "warn and allow" path that makes reporting reachable.
+    let physical = testing::two_fixed_sessions_one_room(false);
+    let reported = evaluate_hard(&physical, &Solution::empty(&physical));
+    assert!(
+        reported
+            .iter()
+            .any(|v| v.constraint_type == ConstraintType::RoomDoubleBooking),
+        "two pinned Sessions in one physical room must be reported, got {reported:?}"
+    );
+
+    let virt = testing::two_fixed_sessions_one_room(true);
+    let quiet = evaluate_hard(&virt, &Solution::empty(&virt));
+    assert!(
+        !quiet
+            .iter()
+            .any(|v| v.constraint_type == ConstraintType::RoomDoubleBooking),
+        "the same pair in a virtual room is not a double booking, got {quiet:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Determinism, carried forward
 // ---------------------------------------------------------------------------
 
@@ -220,6 +291,8 @@ fn structural_fixtures_are_deterministic() {
         testing::deep_chain(),
         testing::lecturer_clash(),
         testing::cross_tree_person(testing::all_constraints()),
+        testing::two_sessions_one_room(true),
+        testing::two_sessions_one_room(false),
     ] {
         let a = run(&problem);
         let b = run(&problem);

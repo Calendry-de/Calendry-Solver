@@ -5,7 +5,7 @@
 //! (group closures, attendee lists) is precomputed here rather than in the hot
 //! loop.
 
-use crate::aggregates::{Aggregates, ShareInstance};
+use crate::aggregates::{Aggregates, DayMixInstance, ShareInstance};
 use crate::bitset::BitSet;
 use crate::groups::{GroupClosure, GroupCycle};
 use crate::ids::{GroupIdx, OfferingIdx, PersonIdx, PlacementIdx, RoomIdx, SlotIdx};
@@ -22,6 +22,32 @@ pub struct Room {
     pub is_virtual: bool,
     pub features: Vec<String>,
     pub federation_owned: bool,
+}
+
+impl Room {
+    /// Whether this Room can host only ONE Session per slot.
+    ///
+    /// True for a physical room, where two Sessions in the same place at the
+    /// same time is the definition of a double booking. False for a virtual
+    /// one: online delivery is modeled AS a Room so that room-assignment logic
+    /// stays uniform, not to make concurrency a scarce resource. Two lectures
+    /// streaming at the same hour are not a clash, and there is exactly one
+    /// virtual room per delivery mode — so treating it as exclusive caps ALL
+    /// online teaching at one Session per slot, institution-wide.
+    ///
+    /// This is the single definition of that policy. `Occupancy` decides
+    /// whether to claim a room's slot bit through it, and `constraints::
+    /// check_pair` decides whether to report a shared room through it, so the
+    /// search and the report cannot disagree about which rooms are exclusive.
+    ///
+    /// Note what this is NOT: a virtual room with a genuine concurrency limit
+    /// (a single meeting licence, say) cannot be expressed today at all —
+    /// `capacity` means seats, and it still gates ELIGIBILITY in `convert`.
+    /// Expressing a real cap needs its own field, not an overload of this flag.
+    #[inline]
+    pub fn is_exclusive(&self) -> bool {
+        !self.is_virtual
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -149,8 +175,16 @@ pub struct ConstraintSet {
     /// The blackout VALUES live on `Person.blackouts`; this list only switches
     /// enforcement on.
     pub lecturer_veto: Vec<ConstraintInstance>,
-    /// HARD, day-granularity filter.
-    pub online_onsite_same_day: Vec<ConstraintInstance>,
+    /// SOFT, day-granularity. Was a HARD feasibility filter until the
+    /// reclassification: the tenant asked for "no switching between online and
+    /// in-person for a group on one day" to be a preference the solver may
+    /// break when it has no better option, rather than a rule that eliminates
+    /// the placement outright.
+    ///
+    /// Its own list rather than `soft` below, because `SoftModel` is a
+    /// precomputed `(slot, room)` table and a mixed day depends on what else is
+    /// already placed — see [`crate::aggregates::DayMixInstance`].
+    pub online_onsite_same_day: Vec<DayMixInstance>,
     /// HARD, aggregate ratio. Carried on the objective rather than as a filter
     /// — see [`crate::aggregates`].
     pub max_online_share: Vec<ShareInstance>,
@@ -190,7 +224,9 @@ impl ConstraintSet {
             group: any_covers(&self.group_double_booking, kind),
             person: any_covers(&self.person_double_booking, kind),
             lecturer_veto: any_covers(&self.lecturer_veto, kind),
-            day_mix: any_covers(&self.online_onsite_same_day, kind),
+            // Own predicate: `DayMixInstance` is not a `ConstraintInstance`
+            // any more, since it carries a weight.
+            day_mix: self.online_onsite_same_day.iter().any(|c| c.covers(kind)),
         }
     }
 }
@@ -522,6 +558,10 @@ pub struct Problem {
     /// every reachable soft configuration, so the scalar objective orders
     /// lexicographically without a magic constant.
     pub hard_penalty: f64,
+    /// Summed weight of every configured `OnlineOnsiteSameDay`, charged once
+    /// per mixed `(group, day)` cell. Zero when the type is not configured, so
+    /// the term costs nothing rather than needing a branch at every use.
+    pub day_mix_weight: f64,
 
     /// Whether each Offering is being actively placed by this run, indexed by
     /// [`OfferingIdx`]. Read it through [`Problem::in_scope`].
@@ -641,17 +681,36 @@ impl Problem {
             })
             .collect();
 
-        // sum(weights) * placements + 1 dominates any achievable soft total, so
-        // the scalar objective orders lexicographically. Aggregate violations
-        // join `unplaced` on the hard side and are covered by the same bound.
-        let hard_penalty = soft.total_weight * placements.len() as f64 + 1.0;
-
         let aggregate_template = Aggregates::new(
             groups.len(),
             slots.day_count(),
             slots.week_count() as usize,
             constraints.max_online_share.clone(),
         );
+
+        let day_mix_weight: f64 = constraints
+            .online_onsite_same_day
+            .iter()
+            .map(|i| i.weight)
+            .sum();
+
+        /*
+         * sum(weights) * placements + 1 dominates any achievable soft total, so
+         * the scalar objective orders lexicographically. Aggregate violations
+         * join `unplaced` on the hard side and are covered by the same bound.
+         *
+         * THE DAY-MIX TERM NEEDS ITS OWN BOUND, and multiplying it by
+         * `placements` would be wrong in both directions. It is charged per
+         * mixed `(group, day)` CELL, and one placement can make several cells
+         * mixed at once (it spans days and implicates its whole subtree of
+         * Groups) while two placements are needed before any cell is mixed at
+         * all. The exact ceiling is every cell being mixed, which is what the
+         * counter table is sized for — so that is the multiplier, and the bound
+         * stays tight rather than merely safe.
+         */
+        let hard_penalty = soft.total_weight * placements.len() as f64
+            + day_mix_weight * aggregate_template.day_mix_cell_count() as f64
+            + 1.0;
 
         let n = derived_offerings.len();
         let in_scope = match &scope {
@@ -695,6 +754,7 @@ impl Problem {
             soft,
             aggregate_template,
             hard_penalty,
+            day_mix_weight,
             in_scope,
             placement_counts,
             immovable_counts,

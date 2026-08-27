@@ -38,7 +38,9 @@ pub struct Attribution {
     pub blocked_group: u64,
     pub blocked_person: u64,
     pub blocked_veto: u64,
-    pub blocked_day_mix: u64,
+    /// Candidates the day-mix rule would CHARGE for rather than reject.
+    /// Replaced `blocked_day_mix` when the rule became soft.
+    pub day_mix_priced: u64,
 }
 
 /// Aggregate over the sampled unplaced placements.
@@ -157,13 +159,24 @@ pub fn diagnose(
     let stride = (pool.len() / limit.max(1)).max(1);
     let sample: Vec<PlacementIdx> = pool.iter().copied().step_by(stride).collect();
 
-    let axes: [AxisProbe; 6] = [
+    /*
+     * FIVE AXES, NOT SIX. `day_mix` was the sixth until OnlineOnsiteSameDay
+     * became soft, and it is gone from here for a reason worth stating: this
+     * probe asks `is_free`, so a soft rule can only ever answer "blocks
+     * nothing". Leaving it in would print `day_mix 0.00%` on every instance —
+     * true, and read by anybody as "this rule never binds" rather than "this
+     * rule no longer filters".
+     *
+     * What replaces it is `day_mix_priced` below, which counts the candidates
+     * the rule would CHARGE for. That is the same question the old line
+     * answered, asked in the terms the rule now works in.
+     */
+    let axes: [AxisProbe; 5] = [
         |e| e.room = true,
         |e| e.lecturer = true,
         |e| e.group = true,
         |e| e.person = true,
         |e| e.lecturer_veto = true,
-        |e| e.day_mix = true,
     ];
 
     let mut ratios: Vec<f64> = Vec::new();
@@ -215,6 +228,13 @@ pub fn diagnose(
             for &room in &offering.eligible_rooms {
                 a.candidates += 1;
                 let candidate = base.with_room(room);
+                // Priced, not blocked: a candidate that would mix a day is
+                // still free, and this counts how often the rule has something
+                // to say about the search's choices.
+                if state.would_worsen_day_mix(problem, &candidate, &span) {
+                    a.day_mix_priced += 1;
+                }
+
                 if state.is_free(problem, &candidate, &span) {
                     a.free += 1;
                     continue;
@@ -237,9 +257,7 @@ pub fn diagnose(
                             0 => a.blocked_room += 1,
                             1 => a.blocked_lecturer += 1,
                             2 => a.blocked_group += 1,
-                            3 => a.blocked_person += 1,
-                            4 => a.blocked_veto += 1,
-                            _ => a.blocked_day_mix += 1,
+                            _ => a.blocked_veto += 1,
                         }
                     }
                 }
@@ -266,7 +284,7 @@ pub fn diagnose(
         out.totals.blocked_group += a.blocked_group;
         out.totals.blocked_person += a.blocked_person;
         out.totals.blocked_veto += a.blocked_veto;
-        out.totals.blocked_day_mix += a.blocked_day_mix;
+        out.totals.day_mix_priced += a.day_mix_priced;
     }
 
     // If one kind dominates the failures, ask whether that kind's Sessions can

@@ -41,7 +41,7 @@ use crate::evaluator::{CpuEvaluator, Move, MoveEvaluator, Score};
 use crate::ids::PlacementIdx;
 use crate::problem::Problem;
 use crate::rng::Rng;
-use crate::soft::{Objective, SoftComponent};
+use crate::soft::{Objective, RankSpan, SoftComponent};
 use crate::solution::{Occupant, Placement, SearchState, Solution};
 
 /// Search hyperparameters.
@@ -185,15 +185,18 @@ impl<'p> Trial<'p> {
 
     /// The current objective.
     ///
-    /// `unplaced` and `soft` are maintained incrementally; `aggregate` is read
-    /// straight off the counters, which are the running state rather than
-    /// something a delta accumulates into.
+    /// `unplaced` and `soft` are maintained incrementally. `aggregate` and
+    /// `day_mix_cost` are read straight off the counters, which ARE the running
+    /// state rather than something a delta accumulates into — a violated share
+    /// cell and a mixed `(group, day)` cell each belong to no single placement,
+    /// so neither can be attributed to one as a delta.
     #[inline]
     pub fn objective(&self) -> Objective {
         Objective {
             unplaced: self.unplaced,
             aggregate: self.state.share_violations(),
             soft: self.soft,
+            day_mix_cost: self.state.day_mix_cost(self.problem),
         }
     }
 
@@ -774,8 +777,14 @@ pub fn recompute_objective(problem: &Problem, solution: &Solution) -> Objective 
     // Aggregate violations are recomputed by replaying the whole solution into
     // a fresh counter set — the from-scratch counterpart to the incremental
     // counters the search maintains.
-    let aggregate = SearchState::replay(problem, solution).share_violations();
-    Objective { unplaced, aggregate, soft }
+    let state = SearchState::replay(problem, solution);
+
+    Objective {
+        unplaced,
+        aggregate: state.share_violations(),
+        soft,
+        day_mix_cost: state.day_mix_cost(problem),
+    }
 }
 
 /// Per-instance counts for `ObjectiveBreakdown`.
@@ -784,32 +793,74 @@ pub fn recompute_objective(problem: &Problem, solution: &Solution) -> Objective 
 /// cost table was built from, so the fast path and the reported counts cannot
 /// disagree.
 pub fn soft_breakdown(problem: &Problem, solution: &Solution) -> Vec<SoftComponent> {
-    problem
-        .soft
-        .instances
+    /*
+     * The day-mix instances come first and separately, because they are not in
+     * `problem.soft` — see `ConstraintSet::online_onsite_same_day`. Reported
+     * here rather than as a hard violation: since the reclassification a mixed
+     * day is a priced outcome, and the breakdown is the place a human is shown
+     * what the score is made of.
+     *
+     * `raw_count` is the mixed CELL count, which is the question somebody
+     * actually asks ("how many group-days ended up mixed?"), and `weighted` is
+     * exactly what the objective charged for them.
+     */
+    let state = SearchState::replay(problem, solution);
+    let mixed_cells = state.aggregates.day_mix_violations() as u64;
+
+    let day_mix = problem
+        .constraints
+        .online_onsite_same_day
         .iter()
-        .map(|inst| {
+        .map(|inst| SoftComponent {
+            constraint_id: inst.id.clone(),
+            constraint_type: constraints::ConstraintType::OnlineOnsiteSameDay.as_str(),
+            raw_count: mixed_cells,
+            weighted: mixed_cells as f64 * inst.weight,
+        });
+
+    day_mix
+        .chain(problem.soft.instances.iter().map(|inst| {
             let mut count = 0u64;
+            let mut weighted = 0.0f64;
+            let ranks = RankSpan::of(&problem.rooms);
+
             for p in problem.placement_ids() {
                 let Some(pl) = solution.get(p) else { continue };
                 let o = problem.offering_of(p);
                 if !inst.covers(&o.kind) {
                     continue;
                 }
-                if inst
-                    .params
-                    .applies(problem.slots.flags(pl.start), &problem.rooms[pl.room.get()])
-                {
+                let flags = problem.slots.flags(pl.start);
+                let room = &problem.rooms[pl.room.get()];
+
+                if inst.params.applies(flags, room) {
                     count += 1;
                 }
+
+                /*
+                 * ACCUMULATED, not `count * weight`.
+                 *
+                 * `MinimizeRoomRank` now grades its penalty by how far past the
+                 * threshold a room sits, so a flat multiplication would report a
+                 * number the objective does not contain — and this breakdown is
+                 * what the app shows a human to explain the score. `severity`
+                 * returns 0.0 where the rule does not apply, so this sums exactly
+                 * the same cells the cost table charged for.
+                 *
+                 * `raw_count` deliberately stays a COUNT: "sessions in
+                 * discouraged rooms" is the question a person asks, and it is
+                 * still answered by the same predicate.
+                 */
+                weighted += inst.weight * inst.params.severity(flags, room, ranks);
             }
+
             SoftComponent {
                 constraint_id: inst.id.clone(),
                 constraint_type: inst.params.type_name(),
                 raw_count: count,
-                weighted: count as f64 * inst.weight,
+                weighted,
             }
-        })
+        }))
         .collect()
 }
 
@@ -822,6 +873,7 @@ pub fn objectives_agree(a: Objective, b: Objective) -> bool {
     a.unplaced == b.unplaced
         && a.aggregate == b.aggregate
         && (a.soft - b.soft).abs() <= 1e-9 * (1.0 + a.soft.abs())
+        && (a.day_mix_cost - b.day_mix_cost).abs() <= 1e-9 * (1.0 + a.day_mix_cost.abs())
 }
 
 /// Set so a move worsening the objective by the average instance weight is

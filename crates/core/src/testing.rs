@@ -22,6 +22,7 @@
 //!   expressible as a slot-keyed bitset.
 //! * **Seeded** — randomized instances for the drift and determinism tests.
 
+use crate::aggregates::DayMixInstance;
 use crate::ids::{GroupIdx, OfferingIdx, PersonIdx, RoomIdx, SlotIdx};
 use crate::problem::{
     ConstraintInstance, ConstraintSet, FixedSpec, Group, Immovable, OfferingSpec, Person,
@@ -122,6 +123,10 @@ fn inst(id: &str) -> Vec<ConstraintInstance> {
     vec![ConstraintInstance { id: id.to_string(), kinds: vec![] }]
 }
 
+fn day_mix(id: &str, weight: f64) -> Vec<DayMixInstance> {
+    vec![DayMixInstance { id: id.to_string(), kinds: vec![], weight }]
+}
+
 /// Every implemented constraint type, applying to all kinds.
 pub fn all_constraints() -> ConstraintSet {
     ConstraintSet {
@@ -131,7 +136,9 @@ pub fn all_constraints() -> ConstraintSet {
         person_double_booking: inst("c-person"),
         exact_frequency: inst("c-freq"),
         lecturer_veto: inst("c-veto"),
-        online_onsite_same_day: inst("c-mix"),
+        // Weight 5 mirrors the app catalogue's `defaultWeight` for this type,
+        // so a fixture's day-mix cost reads the same as a real tenant's.
+        online_onsite_same_day: day_mix("c-mix", 5.0),
         max_online_share: Vec::new(),
         soft: Vec::new(),
     }
@@ -306,6 +313,43 @@ pub fn sibling_classes() -> Problem {
         offerings: vec![
             with_groups(offering("sb", 1, &[0, 1]), &[1]),
             with_groups(offering("sc", 1, &[0, 1]), &[2]),
+        ],
+        constraints: all_constraints(),
+        ..ProblemSpec::new(grid(1, 1))
+    })
+}
+
+/// Two Sessions, one slot, and exactly ONE room — so the room is the only thing
+/// that could keep them apart.
+///
+/// `virtual_room` selects which kind of room it is, and that is the whole point:
+/// a virtual room hosts unlimited concurrent Sessions, a physical one hosts one.
+/// The two groups are unrelated roots, so no group rule interferes.
+pub fn two_sessions_one_room(virtual_room: bool) -> Problem {
+    assemble(ProblemSpec {
+        rooms: vec![room_with("R", 1, virtual_room)],
+        groups: vec![group("A", None), group("B", None)],
+        offerings: vec![
+            with_groups(offering("a", 1, &[0]), &[0]),
+            with_groups(offering("b", 1, &[0]), &[1]),
+        ],
+        constraints: all_constraints(),
+        ..ProblemSpec::new(grid(1, 1))
+    })
+}
+
+/// The same collision, but already present in IMMOVABLE input.
+///
+/// The search can never *create* a room clash, so the reporting path is only
+/// reachable through Sessions the caller pinned there — which "warn and allow"
+/// permits. Nothing is placeable here; the instance exists to be evaluated.
+pub fn two_fixed_sessions_one_room(virtual_room: bool) -> Problem {
+    assemble(ProblemSpec {
+        rooms: vec![room_with("R", 1, virtual_room)],
+        groups: vec![group("A", None)],
+        fixed: vec![
+            fixed_session("pinned-a", Some(0), 0),
+            fixed_session("pinned-b", Some(0), 0),
         ],
         constraints: all_constraints(),
         ..ProblemSpec::new(grid(1, 1))
@@ -510,7 +554,11 @@ pub fn seeded_instance(seed: u64) -> Problem {
         soft("first", 1.0 + rng.below(4) as f64, SoftParams::MinimizeFirstBlock),
         soft("last", 1.0 + rng.below(4) as f64, SoftParams::MinimizeLastBlock),
         soft("sat", 1.0 + rng.below(4) as f64, SoftParams::MinimizeDayUsage { days: vec![6] }),
-        soft("rank", 1.0 + rng.below(4) as f64, SoftParams::MinimizeRoomRank { rank_threshold: 5 }),
+        soft(
+            "rank",
+            1.0 + rng.below(4) as f64,
+            SoftParams::MinimizeRoomRank { rank_threshold: 5, invert: false },
+        ),
         soft("online", 1.0 + rng.below(4) as f64, SoftParams::MinimizeOnline),
     ];
 
@@ -584,25 +632,57 @@ pub fn lecturer_blacked_out_on_first_block(constraints: ConstraintSet) -> Proble
     })
 }
 
-/// One Group, two Sessions on a single day, with the virtual room available for
-/// only one of the two blocks.
+/// One Group, two Sessions on a single day, one of which cannot go online.
 ///
-/// `GroupDoubleBooking` already forces the two Sessions into different blocks, and
-/// greedy reaches for the virtual room first — so without the day-mix rule the
-/// result is one online plus one on-site: a mixed day. With the rule, both must
-/// end up on-site, which is reachable because the on-site room is free all day.
+/// `GroupDoubleBooking` forces the two into different blocks, and greedy reaches
+/// for the virtual room first (`online_first_rooms` lists it first) — so without
+/// the day-mix rule the free Session goes online and the on-site-only one does
+/// not: a mixed day. With the rule, both end up on-site, which is reachable
+/// because the on-site room is free all day.
+///
+/// The mix comes from **eligibility**, not from occupancy. An earlier version
+/// pinned a Session into the virtual room to make it unavailable at one block,
+/// which only worked because virtual rooms were wrongly treated as capacity-1;
+/// once that bug was fixed the virtual room was free at both blocks and greedy
+/// put *both* Sessions online. A fixture must not depend on the defect its
+/// neighbours are testing around.
 pub fn group_day_with_both_room_types(constraints: ConstraintSet) -> Problem {
-    let mut block_virtual = fixed_session("occupies-virtual", Some(0), 1);
-    block_virtual.kind = "other".to_string();
     assemble(ProblemSpec {
         rooms: online_first_rooms(),
         groups: vec![group("G", None)],
-        offerings: vec![with_groups(offering("S", 2, &[0, 1]), &[0])],
-        fixed: vec![block_virtual],
+        offerings: vec![
+            // Free to go either way; greedy takes the virtual room.
+            with_groups(offering("either", 1, &[0, 1]), &[0]),
+            // Not permitted online at all — the on-site room only.
+            with_groups(offering("onsite-only", 1, &[1]), &[0]),
+        ],
         constraints,
         // One day, two blocks.
         ..ProblemSpec::new(grid(2, 1))
     })
+}
+
+/// A hand-built Solution for [`group_day_with_both_room_types`] that DOES mix:
+/// the flexible Session online, the on-site-only one beside it, same day.
+///
+/// Constructed rather than searched for, because the point of the test using it
+/// is what a mixed day COSTS — and a test that first has to coax the search into
+/// producing one would be measuring the search instead of the price.
+pub fn solution_mixing_one_day(problem: &Problem) -> crate::solution::Solution {
+    use crate::solution::{Placement, Solution};
+
+    let mut solution = Solution::empty(problem);
+
+    for p in problem.placement_ids() {
+        let offering = problem.offering_of(p);
+        // Room 0 is virtual in `online_first_rooms`, room 1 is physical.
+        let room = if offering.id == "either" { RoomIdx(0) } else { RoomIdx(1) };
+        let start = if offering.id == "either" { SlotIdx(0) } else { SlotIdx(1) };
+
+        solution.set(p, Some(Placement { start, room }));
+    }
+
+    solution
 }
 
 /// One Group with four Sessions across four blocks of one day, with an online
