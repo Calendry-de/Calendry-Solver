@@ -76,6 +76,24 @@ value on that axis".
 _Avoid_: unavailability window, veto (the *constraint* is the veto; this is its
 data)
 
+**Preference**:
+Days and blocks a Person would *rather* have. Counted for Sessions they *lead*,
+like a Blackout — but **empty means no preference**, the inverse of a Blackout's
+emptiness, and there is no week axis because a Preference is a recurring weekly
+shape rather than a dated absence. Soft: a Placement that misses one is priced,
+never refused.
+_Avoid_: soft blackout, preferred availability (a Preference is not a window of
+availability and the two are separately stated)
+
+**Weight multiplier**:
+A bounded per-Person override of the tenant's `PersonPreferenceFit` weight —
+"this person's preferences count half as much / twice as much as normal".
+Dimensionless on purpose, so it survives a change to the tenant weight; bounded
+on purpose, so a tenant-editable value cannot reach the derived hard penalty.
+Absent is a distinct state from zero.
+_Avoid_: priority, seniority (it is a scheduling weight, not a claim about the
+person)
+
 ---
 
 ## Space
@@ -223,10 +241,24 @@ keyed by (entity, slot).
 A constraint depending only on one Session's own slot and Room. The six soft
 types, and `LecturerVeto`.
 
+**Per-placement constraint**:
+A constraint depending only on the candidate Placement, like a Unary one, but
+whose cost varies per *Placement* rather than per Kind — so it cannot share the
+unary types' `(profile, slot, Room)` table. `PersonPreferenceFit` alone, keyed by
+`(placement, day, block)`. Still accumulated as an exact delta, and still
+rankable by the ruin operators, which is what separates it from an Aggregate.
+
 **Aggregate constraint**:
 A constraint over a *set* of Sessions, not expressible as a slot-keyed bitset:
 `OnlineOnsiteSameDay` and `MaxOnlineShare`. Neither can be a filter, so both live
 on the objective; they differ only in what they are charged.
+
+**Unmet fraction**:
+What `PersonPreferenceFit` charges: the share of a counted lecturer's *stated*
+preference axes that a Placement does not satisfy, averaged over the lecturers.
+Charged rather than rewarding the met share, so that no soft term is ever
+negative. A lecturer who stated nothing is not counted at all, which is a
+different fact from one who stated something and got none of it.
 
 **Mixed day**:
 A `(Group, day)` cell holding both online and on-site Sessions. Priced at its

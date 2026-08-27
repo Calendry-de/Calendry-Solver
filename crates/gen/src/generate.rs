@@ -10,6 +10,7 @@
 
 use calendry_solver_core::aggregates::{DayMixInstance, ShareInstance, ShareWindow};
 use calendry_solver_core::ids::{GroupIdx, OfferingIdx, PersonIdx, RoomIdx, SlotIdx};
+use calendry_solver_core::preferences::{Preference, PreferenceInstance};
 use calendry_solver_core::problem::{
     ConstraintInstance, ConstraintSet, FixedSpec, Group, Immovable, OfferingSpec, Person,
     PlacementVar, Problem, ProblemSpec, Room, Unavailability,
@@ -372,11 +373,43 @@ fn build_persons(params: &InstanceParams, rng: &mut Rng) -> Vec<Person> {
         } else {
             vec![]
         };
+        // A preferred day plus, half the time, a preferred block — the two
+        // shapes the additive rule distinguishes, so a generated instance
+        // exercises both divisors rather than only the 2-axis one.
+        //
+        // Deliberately NOT the blackout day: a preference the lecturer is
+        // already unavailable for is inert, and an instance made of inert data
+        // measures nothing.
+        //
+        // GATED so that no RNG is consumed when the ratio is 0.0. Drawing
+        // unconditionally would shift every subsequent draw and change the
+        // preset instances themselves — the 27,136-Session `large-university`
+        // in `docs/PERFORMANCE.md` became a 27,134-Session one, which is a
+        // silently different benchmark reporting the same name.
+        let preferred = if params.preference_ratio > 0.0
+            && (rng.next_u64() % 1000) < (params.preference_ratio * 1000.0) as u64
+        {
+            let day = params.active_days[rng.below(params.active_days.len())];
+            let blocks = if rng.below(2) == 0 {
+                vec![]
+            } else {
+                vec![rng.below(params.blocks_per_day as usize) as u32]
+            };
+            let multiplier = match rng.below(4) {
+                0 => Some(0.5),
+                1 => Some(2.0),
+                _ => None,
+            };
+            Some(Preference { days: vec![day], blocks, weight_multiplier: multiplier })
+        } else {
+            None
+        };
         persons.push(Person {
             id: format!("lecturer-{i}"),
             role_tags: vec!["Lecturer".to_string()],
             groups: vec![],
             blackouts,
+            preferred,
         });
     }
 
@@ -409,6 +442,10 @@ fn build_persons(params: &InstanceParams, rng: &mut Rng) -> Vec<Person> {
                         role_tags: vec!["Student".to_string()],
                         groups,
                         blackouts: vec![],
+                        // Students never state one: the counted set is
+                        // lecturers only, so student preferences would be
+                        // generated data nothing reads.
+                        preferred: None,
                     });
                 }
             }
@@ -733,6 +770,13 @@ fn build_constraints(params: &InstanceParams, slots: &SlotTable) -> ConstraintSe
             ],
             weight: 5.0,
         }],
+        // Configured only when the generator was asked for preferences, so the
+        // presets keep exactly the objective `docs/PERFORMANCE.md` measured.
+        person_preference_fit: if params.preference_ratio > 0.0 {
+            vec![PreferenceInstance { id: "c-pref".into(), kinds: vec![], weight: 2.0 * w }]
+        } else {
+            Vec::new()
+        },
         max_online_share: params
             .max_online_share
             .map(|r| ShareInstance {

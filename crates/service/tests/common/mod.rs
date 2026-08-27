@@ -86,9 +86,9 @@ pub fn person(id: &str) -> pb::Person {
         group_ids: vec![],
         blackouts: vec![],
         // Schema 0.7.0. `None` is the "no stated preference" case, which is what
-        // these fixtures mean and what nothing here reads yet —
-        // `PersonPreferenceFit` is in the schema but not evaluated by this
-        // solver, and `convert` refuses it as UNIMPLEMENTED.
+        // these fixtures mean: the rule is off unless a test enables it, so a
+        // preference here would be data nothing reads. See
+        // `tests/person_preference_wire.rs`, which supplies its own.
         preferred: None,
     }
 }

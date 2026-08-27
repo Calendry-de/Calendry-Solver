@@ -9,6 +9,7 @@ use crate::aggregates::{Aggregates, DayMixInstance, ShareInstance};
 use crate::bitset::BitSet;
 use crate::groups::{GroupClosure, GroupCycle};
 use crate::ids::{GroupIdx, OfferingIdx, PersonIdx, PlacementIdx, RoomIdx, SlotIdx};
+use crate::preferences::{Preference, PreferenceInstance, PreferenceModel};
 use crate::slots::SlotTable;
 use crate::soft::{SoftInstance, SoftModel};
 
@@ -66,6 +67,14 @@ pub struct Person {
     /// Windows in which this Person is unavailable. Enforced for Sessions they
     /// LEAD, by `LecturerVeto` — never for Sessions they merely attend.
     pub blackouts: Vec<Unavailability>,
+    /// Days and blocks this Person would RATHER have, priced by
+    /// `PersonPreferenceFit`. Counted for Sessions they LEAD, like `blackouts`
+    /// above and for the same reason.
+    ///
+    /// Note the INVERTED emptiness relative to `blackouts`: `None` here means
+    /// "no preference", where an empty axis on an `Unavailability` means "every
+    /// value on that axis". See [`crate::preferences::Preference`].
+    pub preferred: Option<Preference>,
 }
 
 /// A blackout window.
@@ -188,6 +197,16 @@ pub struct ConstraintSet {
     /// HARD, aggregate ratio. Carried on the objective rather than as a filter
     /// — see [`crate::aggregates`].
     pub max_online_share: Vec<ShareInstance>,
+    /// SOFT, per-placement. Rewards placements landing in the days and blocks
+    /// this placement's lecturers stated they would rather have.
+    ///
+    /// Its own list rather than `soft` below, for the same reason
+    /// `online_onsite_same_day` has one: `SoftModel` is a precomputed
+    /// `(profile, slot, room)` table and a preference cost is not keyed that
+    /// way — it depends on who leads the placement. See
+    /// [`crate::preferences`], which also explains why the COST is nevertheless
+    /// part of `Objective::soft` where the day-mix cost is not.
+    pub person_preference_fit: Vec<PreferenceInstance>,
     /// The six soft types. Separate from the hard lists because only soft
     /// instances carry a weight and typed parameters.
     pub soft: Vec<SoftInstance>,
@@ -457,6 +476,7 @@ impl ProblemSpec {
 ///     role_tags: vec![],
 ///     groups: vec![class],
 ///     blackouts: vec![],
+///     preferred: None,
 /// });
 /// let problem = b.build().unwrap();
 /// ```
@@ -551,6 +571,9 @@ pub struct Problem {
     pub fixed: Vec<FixedOccupancy>,
     pub constraints: ConstraintSet,
     pub soft: SoftModel,
+    /// Per-placement preference costs, precomputed. Empty and inert when no
+    /// `PersonPreferenceFit` is configured.
+    pub preferences: PreferenceModel,
     /// Template for the search's aggregate counters: sized and configured, but
     /// empty. The search clones it and fills it from the fixed occupancy.
     pub aggregate_template: Aggregates,
@@ -694,6 +717,17 @@ impl Problem {
             .map(|i| i.weight)
             .sum();
 
+        // Built here rather than beside `SoftModel` above because it keys on
+        // the PLACEMENT, so it needs the derived Offerings — a placement's
+        // lecturer set is what it folds in.
+        let preferences = PreferenceModel::build(
+            constraints.person_preference_fit.clone(),
+            &slots,
+            &persons,
+            &derived_offerings,
+            &placements,
+        );
+
         /*
          * sum(weights) * placements + 1 dominates any achievable soft total, so
          * the scalar objective orders lexicographically. Aggregate violations
@@ -707,8 +741,19 @@ impl Problem {
          * all. The exact ceiling is every cell being mixed, which is what the
          * counter table is sized for — so that is the multiplier, and the bound
          * stays tight rather than merely safe.
+         *
+         * THE PREFERENCE TERM IS PER PLACEMENT LIKE `soft`, but its weight is
+         * not its ceiling: a Person may carry a bounded multiplier, so one
+         * placement can cost up to `weight * MAX_WEIGHT_MULTIPLIER`. Summing
+         * raw weights here would leave the bound short by exactly that factor
+         * and a heavily-preferred schedule could outrank an unplaced Session.
+         * `max_cost_per_placement` is computed from the constraint
+         * configuration alone — not from how many lecturers have an override on
+         * file — which is what keeps a tenant-editable column out of this
+         * number. See [`crate::preferences::PreferenceModel`].
          */
         let hard_penalty = soft.total_weight * placements.len() as f64
+            + preferences.max_cost_per_placement() * placements.len() as f64
             + day_mix_weight * aggregate_template.day_mix_cell_count() as f64
             + 1.0;
 
@@ -752,6 +797,7 @@ impl Problem {
             fixed: derived_fixed,
             constraints,
             soft,
+            preferences,
             aggregate_template,
             hard_penalty,
             day_mix_weight,
@@ -883,18 +929,21 @@ mod tests {
                 role_tags: vec![],
                 groups: vec![GroupIdx(0)],
                 blackouts: vec![],
+                preferred: None,
             },
             Person {
                 id: "pb".into(),
                 role_tags: vec![],
                 groups: vec![GroupIdx(1)],
                 blackouts: vec![],
+                preferred: None,
             },
             Person {
                 id: "pc".into(),
                 role_tags: vec![],
                 groups: vec![GroupIdx(2)],
                 blackouts: vec![],
+                preferred: None,
             },
         ];
 

@@ -114,6 +114,7 @@ impl Preset {
 
                 max_online_share: Some(0.30),
                 soft_weight: 1.0,
+                preference_ratio: 0.0,
             },
 
             // A large comprehensive school or Berufsschule.
@@ -148,6 +149,7 @@ impl Preset {
 
                 max_online_share: Some(0.30),
                 soft_weight: 1.0,
+                preference_ratio: 0.0,
             },
 
             // A faculty-scale university: 14-week term, longer teaching day,
@@ -183,6 +185,7 @@ impl Preset {
 
                 max_online_share: Some(0.30),
                 soft_weight: 1.0,
+                preference_ratio: 0.0,
             },
 
             // A full university, Saturday teaching, 12 blocks/day.
@@ -217,6 +220,7 @@ impl Preset {
 
                 max_online_share: Some(0.30),
                 soft_weight: 1.0,
+                preference_ratio: 0.0,
             },
         }
     }
@@ -290,6 +294,15 @@ pub struct InstanceParams {
     // --- Constraint configuration -------------------------------------------
     pub max_online_share: Option<f64>,
     pub soft_weight: f64,
+    /// Fraction of lecturers stating a preference, and the switch for
+    /// `PersonPreferenceFit` itself: **0.0 in every preset**, which leaves the
+    /// rule unconfigured.
+    ///
+    /// Off by default on purpose. The four presets are the instances
+    /// `docs/PERFORMANCE.md` reports timings for, and adding a term to their
+    /// objective would silently invalidate every number in that file. Raise it
+    /// with `--preferences RATIO` to measure the preference table instead.
+    pub preference_ratio: f64,
 }
 
 impl InstanceParams {

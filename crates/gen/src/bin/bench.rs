@@ -9,6 +9,7 @@
 //! cargo run --release -p calendry-solver-gen --bin bench -- [preset...] \
 //!     [--gen-seed N] [--seeds N] [--moves N] [--wall SECONDS] [--probe N] \
 //!     [--calibrate] [--diagnose N] [--evaluate] [--elective RATIO]
+//!     [--preferences RATIO]
 //! ```
 
 use calendry_solver_gen::bench::{self, Args};

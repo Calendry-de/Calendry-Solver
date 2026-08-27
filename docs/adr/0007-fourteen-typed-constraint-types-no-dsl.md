@@ -28,7 +28,10 @@ reference, not a description. The catalogue has since moved:
 `MinimizeBlockUsage` replaced two types with one carrying flags
 ([ADR-0024](0024-one-type-per-axis-with-flags.md)), the two it replaced remain on
 the wire as deprecated, and `PersonPreferenceFit` was added to the schema and is
-refused as `UNIMPLEMENTED`.
+now evaluated
+([ADR-0026](0026-personpreferencefit-charges-the-unmet-fraction.md)) — which also
+added a fourth constraint *shape*, per-placement, alongside pairwise, unary and
+aggregate.
 
 **Counting the types is not a useful check.** What this ADR actually decides is
 unchanged and is what to verify against: one compiled evaluator per type, typed

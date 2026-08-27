@@ -45,6 +45,7 @@ pub enum ConstraintType {
     LecturerVeto,
     OnlineOnsiteSameDay,
     MaxOnlineShare,
+    PersonPreferenceFit,
 }
 
 impl ConstraintType {
@@ -59,6 +60,7 @@ impl ConstraintType {
             Self::LecturerVeto => "LecturerVeto",
             Self::OnlineOnsiteSameDay => "OnlineOnsiteSameDay",
             Self::MaxOnlineShare => "MaxOnlineShare",
+            Self::PersonPreferenceFit => "PersonPreferenceFit",
         }
     }
 }

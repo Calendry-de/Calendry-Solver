@@ -136,10 +136,13 @@ pub enum ConvertError {
         candidates: usize,
     },
     #[error(
-        "constraint '{constraint}': person_preference_fit is in the schema but not yet \
-         evaluated by this solver"
+        "constraint '{constraint}': person_preference_fit counts lecturers' preferences only; \
+         scoping it to role_tags {roles:?} is not implemented"
     )]
-    PersonPreferenceFitUnsupported { constraint: String },
+    PreferenceRolesUnsupported {
+        constraint: String,
+        roles: Vec<String>,
+    },
 }
 
 impl ConvertError {
@@ -154,7 +157,7 @@ impl ConvertError {
             self,
             Self::MinimizeMovementUnsupported
                 | Self::LecturerPoolUnsupported { .. }
-                | Self::PersonPreferenceFitUnsupported { .. }
+                | Self::PreferenceRolesUnsupported { .. }
         )
     }
 }

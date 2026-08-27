@@ -234,6 +234,40 @@ The harness prints that ratio every run, so the number moves when the code does
 rather than living in a comment. What to do about it is
 [ADR-0025](adr/0025-maxonlineshare-is-not-enforced-by-the-search.md).
 
+`PersonPreferenceFit` is the first term added since that was written which moves
+the ratio the *right* way, because it is placement-local by construction
+([ADR-0026](adr/0026-personpreferencefit-charges-the-unmet-fraction.md)). At
+large-university with half the lecturers stating a preference, `ruin_worst`'s
+share of the objective goes **0.0055% → 0.0114%**. Still a rounding error; the
+point is only that this term does not widen the blind spot.
+
+## `PersonPreferenceFit` costs no measurable time
+
+Measured because the whole representation was chosen to make it true, so a claim
+was worth checking rather than asserting. Release, `--seeds 1 --moves 20000`, one
+machine, one sitting:
+
+| run | placements | construct | solve | soft |
+|---|---|---|---|---|
+| large-university, no preferences | 27,136 | 125 ms | 203–225 ms | 29,560 |
+| large-university, `--preferences 0.5` | 27,130 | 123 ms | 214 ms | 59,615 |
+
+Inside run-to-run variance on both phases, with the preference term contributing
+about half the soft objective. The two instances differ slightly because
+generating preferences consumes RNG, so this is not a controlled A/B of one
+instance — it is a check that the term does not cost a phase, which is what the
+`placement × (day, block)` key was for: the attendee scan happens once per
+placement at setup, not once per candidate evaluation. A per-candidate
+aggregation over the lecturer set would have put back exactly the scan whose
+removal was this project's largest measured win (31× on construction).
+
+**Nothing above this line changes**, because every preset sets
+`preference_ratio: 0.0`. `--preferences RATIO` is the only way the rule enters a
+generated instance, and the generator gates the RNG draw on that ratio rather
+than drawing unconditionally — an unconditional draw shifted every subsequent
+draw and silently turned the 27,136-Session `large-university` in the table above
+into a 27,134-Session instance reporting the same name.
+
 ## Violations after the virtual-room fix
 
 Both measured before and after

@@ -121,6 +121,10 @@ fn score_one(problem: &Problem, solution: &Solution, state: &SearchState, mv: &M
         problem
             .soft
             .cost(offering.soft_profile, mv.to.start, mv.to.room)
+            // EXACT, not a ranking approximation like the two penalties above:
+            // a preference cost depends only on this placement and this slot,
+            // so the delta the objective will record is the number read here.
+            + problem.preferences.cost(mv.placement, mv.to.start)
             + share_penalty
             + day_mix_penalty,
     )

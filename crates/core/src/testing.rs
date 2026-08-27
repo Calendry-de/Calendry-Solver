@@ -18,12 +18,15 @@
 //!   nested-group closure.
 //! * **Unary** — the six soft types and `LecturerVeto`: slot-keyed lookups with
 //!   O(1) exact deltas.
+//! * **Preference** — `PersonPreferenceFit`, which is per-placement rather than
+//!   slot-keyed because it depends on who leads the placement.
 //! * **Aggregate** — `OnlineOnsiteSameDay` and `MaxOnlineShare`, which are not
 //!   expressible as a slot-keyed bitset.
 //! * **Seeded** — randomized instances for the drift and determinism tests.
 
 use crate::aggregates::DayMixInstance;
 use crate::ids::{GroupIdx, OfferingIdx, PersonIdx, RoomIdx, SlotIdx};
+use crate::preferences::{Preference, PreferenceInstance};
 use crate::problem::{
     ConstraintInstance, ConstraintSet, FixedSpec, Group, Immovable, OfferingSpec, Person,
     PlacementVar, Problem, ProblemSpec, Room,
@@ -71,6 +74,7 @@ pub fn person(id: &str, groups: &[u32]) -> Person {
         role_tags: vec!["lecturer".to_string()],
         groups: groups.iter().map(|&g| GroupIdx(g)).collect(),
         blackouts: vec![],
+        preferred: None,
     }
 }
 
@@ -127,7 +131,14 @@ fn day_mix(id: &str, weight: f64) -> Vec<DayMixInstance> {
     vec![DayMixInstance { id: id.to_string(), kinds: vec![], weight }]
 }
 
-/// Every implemented constraint type, applying to all kinds.
+/// Every implemented constraint type except `PersonPreferenceFit`, applying to
+/// all kinds.
+///
+/// The exception is deliberate. No fixture built on this has a Person with a
+/// stated preference, so switching the rule on here would put an enabled rule
+/// with nothing to work with into most of the suite — the `lecturer_veto`
+/// shape, which "looked healthy and could never fire". Fixtures that mean to
+/// exercise it say so, via [`with_preference`].
 pub fn all_constraints() -> ConstraintSet {
     ConstraintSet {
         room_double_booking: inst("c-room"),
@@ -140,6 +151,7 @@ pub fn all_constraints() -> ConstraintSet {
         // so a fixture's day-mix cost reads the same as a real tenant's.
         online_onsite_same_day: day_mix("c-mix", 5.0),
         max_online_share: Vec::new(),
+        person_preference_fit: Vec::new(),
         soft: Vec::new(),
     }
 }
@@ -506,6 +518,84 @@ pub fn two_day_grid() -> SlotTable {
 }
 
 // ---------------------------------------------------------------------------
+// Preference — PersonPreferenceFit, keyed by placement rather than by slot
+// ---------------------------------------------------------------------------
+
+/// A stated preference. Empty arrays mean **no preference on that axis**, the
+/// inverse of [`blackout`].
+pub fn preference(days: &[u32], blocks: &[u32], multiplier: Option<f64>) -> Preference {
+    Preference { days: days.to_vec(), blocks: blocks.to_vec(), weight_multiplier: multiplier }
+}
+
+pub fn person_with_preference(id: &str, groups: &[u32], pref: Preference) -> Person {
+    Person { preferred: Some(pref), ..person(id, groups) }
+}
+
+pub fn preference_rule(id: &str, weight: f64) -> PreferenceInstance {
+    PreferenceInstance { id: id.to_string(), kinds: vec![], weight }
+}
+
+/// Structural checks plus the given `PersonPreferenceFit` instances.
+pub fn with_preference(rules: Vec<PreferenceInstance>) -> ConstraintSet {
+    ConstraintSet { person_preference_fit: rules, ..all_constraints() }
+}
+
+/// The weight [`two_lecturers_with_opposing_preferences`] is configured with.
+pub const PREFERENCE_WEIGHT: f64 = 8.0;
+
+/// **The discriminating fixture for the combination rule.** One Session, two
+/// required lecturers whose multipliers *and* whose satisfaction both differ —
+/// on Monday lecturer 0 gets what they asked for and lecturer 1 does not, and on
+/// Saturday the reverse.
+///
+/// Built this way because a fixture with equal multipliers or equal fits makes
+/// the three candidate combination rules agree, and so proves nothing. Here
+/// they disagree, and disagree in *shape* rather than only in magnitude:
+///
+/// | form | Monday | Saturday |
+/// |---|---|---|
+/// | mean of the product — CORRECT | `1.0 * w` | `0.25 * w` |
+/// | sum instead of mean | `2.0 * w` | `0.5 * w` |
+/// | `mean(m) * mean(unmet)` | `0.625 * w` | `0.625 * w` |
+///
+/// The separated form prices both days identically, so it does not merely give
+/// a different number — it loses the preference between the two slots
+/// altogether.
+pub fn two_lecturers_with_opposing_preferences() -> Problem {
+    assemble(ProblemSpec {
+        rooms: rooms(1),
+        // Monday is slot 0, Saturday is slot 1.
+        persons: vec![
+            person_with_preference("half", &[], preference(&[1], &[], Some(0.5))),
+            person_with_preference("double", &[], preference(&[6], &[], Some(2.0))),
+        ],
+        offerings: vec![with_lecturers(offering("S", 1, &[0]), &[0, 1])],
+        constraints: with_preference(vec![preference_rule("c-pref", PREFERENCE_WEIGHT)]),
+        ..ProblemSpec::new(two_day_grid())
+    })
+}
+
+/// One Session whose Offering requires **no** lecturer, with the rule enabled.
+///
+/// `required_lecturer_count` is a `uint32` defaulting to 0, so this is reachable
+/// rather than theoretical — a tenant-defined `staff_meeting` kind is the real
+/// case. The counted set is empty, the mean is undefined, and the cost must be
+/// 0 from an all-zero table row rather than from a branch at read time.
+pub fn no_lecturers_with_preference_enabled() -> Problem {
+    assemble(ProblemSpec {
+        rooms: rooms(1),
+        persons: vec![person_with_preference(
+            "nobody",
+            &[],
+            preference(&[1], &[], Some(2.0)),
+        )],
+        offerings: vec![offering("S", 1, &[0])],
+        constraints: with_preference(vec![preference_rule("c-pref", PREFERENCE_WEIGHT)]),
+        ..ProblemSpec::new(two_day_grid())
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Seeded — randomized instances for the drift and determinism tests
 // ---------------------------------------------------------------------------
 
@@ -515,6 +605,24 @@ pub fn two_day_grid() -> SlotTable {
 /// exists only to give properties (monotonicity, feasibility, delta agreement)
 /// more than one shape to hold over. Correctness fixtures stay hand-written.
 pub fn seeded_instance(seed: u64) -> Problem {
+    seeded(seed, false)
+}
+
+/// The same shapes, with `PersonPreferenceFit` enabled and roughly half the
+/// people stating a preference — for the drift assertion, which otherwise would
+/// never see the term at all.
+///
+/// Some Offerings get a second lecturer here, so the multi-lecturer mean is
+/// exercised under the drift assertion and not only by the hand-computed
+/// fixture.
+pub fn seeded_preference_instance(seed: u64) -> Problem {
+    seeded(seed, true)
+}
+
+/// The preference draws come from their own RNG, consumed after the main one is
+/// finished with, so `seeded_instance(seed)` produces byte-identical instances
+/// to before this fixture existed.
+fn seeded(seed: u64, preferences: bool) -> Problem {
     let mut rng = Rng::new(seed);
 
     let blocks = 2 + rng.below(3) as u32; // 2..4
@@ -535,7 +643,7 @@ pub fn seeded_instance(seed: u64) -> Problem {
         .collect();
 
     let n_people = 2 + rng.below(4);
-    let people: Vec<Person> = (0..n_people)
+    let mut people: Vec<Person> = (0..n_people)
         .map(|i| person(&format!("P{i}"), &[(rng.below(n_groups)) as u32]))
         .collect();
 
@@ -562,12 +670,48 @@ pub fn seeded_instance(seed: u64) -> Problem {
         soft("online", 1.0 + rng.below(4) as f64, SoftParams::MinimizeOnline),
     ];
 
+    let mut constraints = with_soft(soft_set);
+
+    let mut offerings = offerings;
+    if preferences {
+        let mut prng = Rng::new(seed ^ 0x9e37_79b9_7f4a_7c15);
+
+        for (i, p) in people.iter_mut().enumerate() {
+            if prng.below(2) == 0 {
+                continue;
+            }
+            // One day the grid teaches on, so the value is not narrowed away;
+            // the block axis is stated only sometimes, which is what makes the
+            // divisor 1 for some people and 2 for others.
+            let days = vec![[1u32, 2, 6][i % 3]];
+            let blocks = if prng.below(2) == 0 { vec![] } else { vec![prng.below(2) as u32] };
+            let multiplier = match prng.below(3) {
+                0 => None,
+                1 => Some(0.5),
+                _ => Some(2.0),
+            };
+            p.preferred = Some(preference(&days, &blocks, multiplier));
+        }
+
+        for o in &mut offerings {
+            if prng.below(2) == 0 {
+                let extra = PersonIdx(prng.below(n_people) as u32);
+                if !o.lecturers.contains(&extra) {
+                    o.lecturers.push(extra);
+                }
+            }
+        }
+
+        constraints.person_preference_fit =
+            vec![preference_rule("c-pref", 1.0 + prng.below(4) as f64)];
+    }
+
     assemble(ProblemSpec {
         rooms: room_list,
         groups: group_list,
         persons: people,
         offerings,
-        constraints: with_soft(soft_set),
+        constraints,
         ..ProblemSpec::new(slots)
     })
 }

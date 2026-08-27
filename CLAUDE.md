@@ -56,6 +56,8 @@ Check any change against these. Each links to the decision behind it.
 - [ ] Locked and out-of-scope Sessions never moved (v1: hard lock) — [ADR-0008](docs/adr/0008-one-solve-mechanism-scope-plus-lock-policy.md)
 - [ ] Group conflict checks use precomputed ancestor+descendant sets, never a live tree walk
 - [ ] Move evaluation stays behind the trait boundary — [ADR-0013](docs/adr/0013-move-evaluation-behind-a-trait.md)
+- [ ] No soft term is ever negative; a preference charges what it did *not* meet — [ADR-0026](docs/adr/0026-personpreferencefit-charges-the-unmet-fraction.md)
+- [ ] If lecturer-pool selection is ever built, `preferences.rs`'s table key is wrong — [ADR-0026](docs/adr/0026-personpreferencefit-charges-the-unmet-fraction.md)
 - [ ] The solver tolerates infeasible input; the app's "warn and allow" UX produces it
 - [ ] Tests use move budgets, never wall-clock budgets — [ADR-0006](docs/adr/0006-two-budgets-and-the-limit-of-determinism.md)
 
@@ -91,7 +93,7 @@ the behaviour they exercise, and kept separate from the generator on purpose
 ```bash
 git clone --recurse-submodules …     # or: git submodule update --init --recursive
 
-cargo test --workspace               # 183 tests
+cargo test --workspace               # 210 tests
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo fmt --all --check
 
@@ -121,7 +123,8 @@ and move budgets only, because a wall-clock-terminated run is not reproducible.
 ```bash
 cargo run --release -p calendry-solver-gen --bin bench -- \
     [preset...] [--gen-seed N] [--seeds N] [--moves N] [--wall S] \
-    [--calibrate] [--diagnose N] [--evaluate] [--elective RATIO]
+    [--calibrate] [--diagnose N] [--evaluate] [--elective RATIO] \
+    [--preferences RATIO]
 ```
 
 ### Poking the service by hand
@@ -154,11 +157,17 @@ cd ../.. && git add vendor/calendry-proto && git commit -m "proto: bump to v0.3.
 
 ## What is built, and what is not
 
-**Every catalogue constraint type the schema defines is implemented, with one
-exception.** `PersonPreferenceFit` arrived in schema v0.7.0 and is refused as
-`UNIMPLEMENTED`; everything else is evaluated. The conversion layer's match is
-exhaustive with no `_ =>` arm, so a new type in the schema is a compile error
-rather than a silently ignored setting — which is the property that mattered.
+**Every catalogue constraint type the schema defines is implemented.**
+`PersonPreferenceFit` was the last holdout — it arrived in schema v0.7.0 and was
+refused as `UNIMPLEMENTED` until it was built
+([ADR-0026](docs/adr/0026-personpreferencefit-charges-the-unmet-fraction.md)).
+What is still refused is one *parameter* of it: a non-empty
+`PersonPreferenceFit.roles`, because the counted set is lecturers only and
+widening it silently is the failure that decision exists to prevent. The
+conversion layer's match is exhaustive with no `_ =>` arm, so a new type in the
+schema is a compile error rather than a silently ignored setting — which is the
+property that mattered, and is how `PersonPreferenceFit` announced itself when
+the 0.7.0 pin landed.
 
 The catalogue is no longer exactly fourteen types, and counting them is not a
 useful check: `MinimizeBlockUsage` replaced two types with one carrying flags
@@ -193,18 +202,36 @@ schema pipeline never exercised end to end. See
 
 ---
 
-## Three constraint shapes — read before adding a type
+## Four constraint shapes — read before adding a type
 
 1. **Pairwise, keyed by `(entity, slot)`** — the four structural double-booking
    types. Occupancy bitsets; the search can never violate them. Note that the
    room axis exempts non-exclusive Rooms
    ([ADR-0022](docs/adr/0022-a-virtual-room-is-not-an-exclusive-resource.md)).
-2. **Unary, keyed by `(slot, room)`** — the soft types, and also `LecturerVeto`,
-   which despite its name depends only on one Session's slot and its lecturers.
-   Precomputed lookup tables and masks; O(1) exact deltas.
+2. **Unary, keyed by `(slot, room)`** — the six soft types, and also
+   `LecturerVeto`, which despite its name depends only on one Session's slot and
+   its lecturers. Precomputed lookup tables and masks; O(1) exact deltas.
 3. **Aggregate over a set** — `OnlineOnsiteSameDay` and `MaxOnlineShare`, in
    `aggregates.rs`. Neither is expressible as a slot-keyed bitset, and **neither
    is a filter any more**.
+4. **Per-placement, keyed by `(placement, day, block)`** — `PersonPreferenceFit`
+   alone, in `preferences.rs`. It is *unary* in the sense that matters (its cost
+   depends on the candidate and nothing else already placed, so it accumulates as
+   an exact delta and `ruin_worst` can rank it), but it cannot share shape 2's
+   table: that table is keyed by a *profile*, the instance set applying to one
+   tenant `kind`, and a preference cost depends on **who leads this placement**.
+   One profile per distinct preference signature is one profile per placement.
+
+   The key drops the week axis, and that is the whole reason the table is
+   affordable: a preference is a recurring weekly shape, so `placement × (day,
+   block)` holds the same information as `placement × slot` in 1.1 M entries
+   instead of 25 M. It is only valid while a placement's lecturer set is fixed
+   before the search starts — true today because lecturer-*pool* selection
+   returns `UNIMPLEMENTED`, and a silent mis-pricing the day it lands. See
+   [ADR-0026](docs/adr/0026-personpreferencefit-charges-the-unmet-fraction.md),
+   which also records why the term charges the **unmet** fraction rather than
+   rewarding the met one, and why `hard_penalty` must count
+   `weight × MAX_WEIGHT_MULTIPLIER` per placement rather than `weight`.
 
 Within shape 3 the two types still differ, and the difference is load-bearing —
 it is what "hard" and "soft" reduce to once neither can be a filter:
@@ -236,6 +263,11 @@ to both ([ADR-0025](docs/adr/0025-maxonlineshare-is-not-enforced-by-the-search.m
 * **Attendance, and both Group-scoped aggregate types**, propagate **downward
   only**. A cohort Session implicates its classes' members; a class Session does
   not implicate the cohort.
+* **`PersonPreferenceFit` does not propagate at all.** It counts a placement's
+  *lecturers*, never its attendees, so no Group axis enters it. That is a scope
+  decision rather than an omission: an attendee set averages ~65 people at
+  benchmark scale, so counting them would let a 200-student cohort's aggregate
+  preference outweigh the person teaching.
 
 ## Other things worth knowing before changing this code
 

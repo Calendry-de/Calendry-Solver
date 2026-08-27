@@ -15,6 +15,7 @@ pub mod constraints;
 pub mod evaluator;
 pub mod groups;
 pub mod ids;
+pub mod preferences;
 pub mod problem;
 pub mod rng;
 pub mod search;
@@ -27,6 +28,7 @@ pub mod testing;
 pub use aggregates::{ShareInstance, ShareWindow};
 pub use constraints::{ConstraintType, Violation};
 pub use groups::{GroupClosure, GroupCycle};
+pub use preferences::{Preference, PreferenceInstance};
 pub use problem::{
     ConstraintInstance, ConstraintSet, Immovable, Problem, ProblemBuilder, ProblemSpec, ScopeSpec,
 };

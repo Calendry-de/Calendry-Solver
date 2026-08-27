@@ -213,7 +213,8 @@ impl<'p> Trial<'p> {
         }
         self.solution.set(p, Some(at));
         let o = self.problem.offering_of(p);
-        self.soft += self.problem.soft.cost(o.soft_profile, at.start, at.room);
+        self.soft += self.problem.soft.cost(o.soft_profile, at.start, at.room)
+            + self.problem.preferences.cost(p, at.start);
         self.unplaced -= 1;
         self.journal.push(Change::Placed(p, at));
         true
@@ -227,7 +228,8 @@ impl<'p> Trial<'p> {
         debug_assert!(released, "a placed Session's span must still resolve");
         self.solution.set(p, None);
         let o = self.problem.offering_of(p);
-        self.soft -= self.problem.soft.cost(o.soft_profile, at.start, at.room);
+        self.soft -= self.problem.soft.cost(o.soft_profile, at.start, at.room)
+            + self.problem.preferences.cost(p, at.start);
         self.unplaced += 1;
         self.journal.push(Change::Removed(p, at));
         Some(at)
@@ -596,7 +598,16 @@ fn ruin_worst(
         .map(|&p| {
             let pl = current.get(p).unwrap();
             let o = problem.offering_of(p);
-            (p, problem.soft.cost(o.soft_profile, pl.start, pl.room))
+            // The preference cost is included because it IS placement-local:
+            // this operator's whole job is to rank placements by what they cost,
+            // and a Session sitting on a slot its lecturer asked to avoid is
+            // exactly what it should pick up. `day_mix_cost` and `aggregate`
+            // stay out because a cell there belongs to no single placement.
+            (
+                p,
+                problem.soft.cost(o.soft_profile, pl.start, pl.room)
+                    + problem.preferences.cost(p, pl.start),
+            )
         })
         .collect();
     // Descending cost, ties by index so the choice is deterministic.
@@ -769,7 +780,8 @@ pub fn recompute_objective(problem: &Problem, solution: &Solution) -> Objective 
         match solution.get(p) {
             Some(pl) => {
                 let o = problem.offering_of(p);
-                soft += problem.soft.cost(o.soft_profile, pl.start, pl.room);
+                soft += problem.soft.cost(o.soft_profile, pl.start, pl.room)
+                    + problem.preferences.cost(p, pl.start);
             }
             None => unplaced += 1,
         }
@@ -818,7 +830,49 @@ pub fn soft_breakdown(problem: &Problem, solution: &Solution) -> Vec<SoftCompone
             weighted: mixed_cells as f64 * inst.weight,
         });
 
+    /*
+     * The preference instances come separately for the same reason the day-mix
+     * ones do — they are not in `problem.soft` — but unlike day-mix their cost
+     * IS already inside `Objective::soft`. What this loop rebuilds is the
+     * per-instance attribution, which the accumulated total cannot supply once
+     * two instances with different kind scopes have been summed into one number.
+     *
+     * `raw_count` is "placed Sessions that missed something a lecturer asked
+     * for", the question a person actually asks, and `weighted` is exactly what
+     * the objective charged for them.
+     */
+    let preference = problem
+        .constraints
+        .person_preference_fit
+        .iter()
+        .map(|inst| {
+            let mut count = 0u64;
+            let mut weighted = 0.0f64;
+
+            for p in problem.placement_ids() {
+                let Some(pl) = solution.get(p) else { continue };
+                if !inst.covers(&problem.offering_of(p).kind) {
+                    continue;
+                }
+                // The UNMET fraction, so a Session whose lecturers got exactly what
+                // they asked for reports nothing rather than reporting a success.
+                let unmet = problem.preferences.unmet(p, pl.start);
+                if unmet > 0.0 {
+                    count += 1;
+                }
+                weighted += inst.weight * unmet;
+            }
+
+            SoftComponent {
+                constraint_id: inst.id.clone(),
+                constraint_type: constraints::ConstraintType::PersonPreferenceFit.as_str(),
+                raw_count: count,
+                weighted,
+            }
+        });
+
     day_mix
+        .chain(preference)
         .chain(problem.soft.instances.iter().map(|inst| {
             let mut count = 0u64;
             let mut weighted = 0.0f64;
@@ -880,9 +934,13 @@ pub fn objectives_agree(a: Objective, b: Objective) -> bool {
 /// accepted roughly half the time at the start. Derived from the instance
 /// rather than tuned.
 fn initial_temperature(problem: &Problem) -> f64 {
-    if problem.soft.is_empty() {
+    // `PersonPreferenceFit` counts here too, or a run whose ONLY soft rule is
+    // the preference type would start at `MIN_TEMPERATURE` and hill-climb.
+    let n = problem.soft.instances.len() + problem.preferences.instances.len();
+    if n == 0 {
         return tuning::MIN_TEMPERATURE;
     }
-    let avg = problem.soft.total_weight / problem.soft.instances.len() as f64;
+    let total = problem.soft.total_weight + problem.preferences.total_weight;
+    let avg = total / n as f64;
     (avg / std::f64::consts::LN_2).max(tuning::MIN_TEMPERATURE)
 }

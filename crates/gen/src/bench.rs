@@ -117,6 +117,9 @@ pub struct Args {
     /// placements. 0 = skip. Implies skipping the solve.
     pub diagnose: usize,
     pub elective: Option<f64>,
+    /// Fraction of lecturers stating a preference. Also switches
+    /// `PersonPreferenceFit` on, which no preset does.
+    pub preferences: Option<f64>,
     /// Attribute `evaluate_hard` across its four phases.
     pub evaluate: bool,
 }
@@ -149,6 +152,7 @@ impl Default for Args {
             calibrate: false,
             diagnose: 0,
             elective: None,
+            preferences: None,
             evaluate: false,
         }
     }
@@ -194,6 +198,15 @@ impl Args {
                             })?,
                     );
                 }
+                "--preferences" => {
+                    a.preferences = Some(
+                        it.next()
+                            .and_then(|v| v.parse::<f64>().ok())
+                            .ok_or_else(|| ArgError::NotARatio {
+                                flag: "--preferences".to_string(),
+                            })?,
+                    );
+                }
                 other => match Preset::parse(other) {
                     Some(p) => a.presets.push(p),
                     None => {
@@ -230,6 +243,9 @@ pub fn run(args: &Args) -> Report {
         let mut params = preset.params();
         if let Some(e) = args.elective {
             params.elective_ratio = e;
+        }
+        if let Some(r) = args.preferences {
+            params.preference_ratio = r;
         }
         r.line(format_args!("\n{:=<78}", ""));
         r.line(format_args!("{}", preset.name()));
@@ -890,6 +906,15 @@ mod tests {
     fn the_elective_override_parses_as_a_ratio() {
         let args = Args::parse(["--elective", "0.35"]).expect("valid ratio");
         assert_eq!(args.elective, Some(0.35));
+    }
+
+    #[test]
+    fn preferences_are_off_unless_asked_for() {
+        // The presets are what `docs/PERFORMANCE.md` reports, so the flag has to
+        // be the only way `PersonPreferenceFit` enters a benchmark instance.
+        assert_eq!(Args::parse(["small-school"]).expect("valid").preferences, None);
+        let args = Args::parse(["--preferences", "0.4"]).expect("valid ratio");
+        assert_eq!(args.preferences, Some(0.4));
     }
 
     #[test]

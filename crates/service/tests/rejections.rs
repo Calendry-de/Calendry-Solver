@@ -497,6 +497,10 @@ fn every_refusal_maps_to_invalid_argument_or_unimplemented_and_nothing_else() {
         ConvertError::MinimizeMovementUnsupported,
         ConvertError::LockPolicyUnset,
         ConvertError::LecturerPoolUnsupported { offering: "o".into(), required: 1, candidates: 3 },
+        ConvertError::PreferenceRolesUnsupported {
+            constraint: "c".into(),
+            roles: vec!["Student".into()],
+        },
     ];
 
     for e in cases {

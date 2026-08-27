@@ -266,6 +266,7 @@ fn overlapping_problem(offerings: u32, sessions: u32, shared: usize) -> Problem 
         role_tags: vec![],
         groups: vec![],
         blackouts: vec![],
+        preferred: None,
     };
 
     // `shared` people common to every Offering...

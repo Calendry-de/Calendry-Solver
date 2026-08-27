@@ -27,6 +27,7 @@ use std::collections::{HashMap, HashSet};
 
 use calendry_solver_core::aggregates::{DayMixInstance, ShareInstance, ShareWindow};
 use calendry_solver_core::ids::{GroupIdx, OfferingIdx, PersonIdx, RoomIdx, SlotIdx};
+use calendry_solver_core::preferences::{Preference, PreferenceInstance};
 use calendry_solver_core::problem::{
     ConstraintInstance, ConstraintSet, FixedSpec, Immovable, OfferingSpec, PlacementVar, Problem,
     ProblemSpec, ScopeSpec, Unavailability, classify_immovable,
@@ -270,6 +271,22 @@ fn build_persons(
                 groups: groups.require_all(&p.group_ids, GroupIdx, |group| {
                     ConvertError::UnknownGroup { context: format!("person '{}'", p.id), group }
                 })?,
+                // NOTE THE INVERTED EMPTINESS against `blackouts` below: an
+                // absent `Preference` and one with two empty axes both mean "no
+                // preference", where an empty axis on an `Unavailability` means
+                // "every value on that axis". The two messages are structurally
+                // identical and semantically opposite, which is why the wire
+                // keeps them separate and why this conversion does too.
+                //
+                // Narrowing to the grid and clamping the multiplier happen in
+                // `PreferenceModel::build`, alongside the rest of the table —
+                // not here — so there is one place that decides what a stale
+                // stored value means.
+                preferred: p.preferred.as_ref().map(|pref| Preference {
+                    days: pref.days.clone(),
+                    blocks: pref.blocks.clone(),
+                    weight_multiplier: pref.weight_multiplier,
+                }),
                 // An empty list on an axis means "every value on that axis", which
                 // is preserved verbatim rather than normalised here — the grid is
                 // what resolves it, in `Problem::build`.
@@ -707,20 +724,41 @@ fn build_constraints(input: &pb::SolverInput) -> Result<ConstraintSet, ConvertEr
             Some(Params::MinimizeOnline(_)) => {
                 set.soft.push(soft_instance(c, SoftParams::MinimizeOnline)?);
             }
-            // Accepted by the schema, not yet evaluated here. REFUSED rather
-            // than ignored: a caller that enables this rule and receives a
-            // successful run would reasonably conclude the solver honoured it,
-            // and a preference silently priced at nothing is the exact failure
-            // the app side spent a design pass avoiding. Same shape as
-            // LockPolicy::MINIMIZE_MOVEMENT, which returns UNIMPLEMENTED for the
-            // same reason.
-            //
-            // The app does not send this yet — its catalogue entry deliberately
-            // has no wire field — so this branch is unreachable from the current
-            // client and exists for any peer that gets ahead of it.
-            Some(Params::PersonPreferenceFit(_)) => {
-                return Err(ConvertError::PersonPreferenceFitUnsupported {
-                    constraint: c.id.clone(),
+            /*
+             * SOFT, and its own list rather than `set.soft`, because a
+             * preference cost is keyed by PLACEMENT — it depends on who leads
+             * the Session — and `SoftModel` is a `(profile, slot, room)` table.
+             * Same reason `OnlineOnsiteSameDay` has its own list.
+             *
+             * `roles` is REFUSED when non-empty rather than approximated. Empty
+             * means "lecturers only", which is the decided scope: a Session's
+             * attendee set includes every member of every attached Group's
+             * descendant closure, so counting attendees would let a 200-student
+             * cohort's aggregate preference outweigh the person teaching. The
+             * field exists so that scope stays decidable without another schema
+             * bump; until it is decided, widening the counted set silently is
+             * exactly the failure the offering-scope skip exists to prevent.
+             */
+            Some(Params::PersonPreferenceFit(p)) => {
+                if !p.roles.is_empty() {
+                    return Err(ConvertError::PreferenceRolesUnsupported {
+                        constraint: c.id.clone(),
+                        roles: p.roles.clone(),
+                    });
+                }
+                if c.weight < 0.0 || c.weight.is_nan() {
+                    // The same fault class as every other soft weight, so the
+                    // same variant. A negative weight here would invert the type
+                    // into "penalize honouring a preference".
+                    return Err(ConvertError::NegativeSoftWeight {
+                        constraint: c.id.clone(),
+                        weight: c.weight,
+                    });
+                }
+                set.person_preference_fit.push(PreferenceInstance {
+                    id: c.id.clone(),
+                    kinds: c.applies_to_kinds.clone(),
+                    weight: c.weight,
                 });
             }
             None => {
@@ -729,15 +767,14 @@ fn build_constraints(input: &pb::SolverInput) -> Result<ConstraintSet, ConvertEr
         }
     }
 
-    // Every one of the 14 catalogue types is implemented. The one UNIMPLEMENTED
-    // branch that remains is `PersonPreferenceFit`, which the schema carries
-    // from 0.7.0 and this service does not yet evaluate.
+    // Every catalogue type the schema defines is now evaluated, including
+    // `PersonPreferenceFit`. What is still refused is one PARAMETER of it — a
+    // non-empty `roles` — rather than the type.
     //
     // The property that matters is unchanged: a new type added to the schema
     // fails to COMPILE against this match rather than being silently ignored.
-    // That is what produced the branch above — the 0.7.0 pin would not build
-    // until the variant was handled explicitly, which is the intended way to
-    // learn that the contract grew.
+    // That is how `PersonPreferenceFit` announced itself when the 0.7.0 pin
+    // landed, and it is why there is no `_ =>` arm.
     Ok(set)
 }
 

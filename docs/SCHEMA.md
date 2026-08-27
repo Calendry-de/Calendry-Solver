@@ -16,9 +16,19 @@ Submodule `vendor/calendry-proto` is pinned to `6107eb2` = **`v0.7.0`**, up from
   `buf breaking` rejects it. Senders should emit the new type; this repo's
   fixtures were migrated, and the `deprecated` warning is a hard error under the
   lint policy, so a new use cannot land quietly.
-* **`PersonPreferenceFit`**, plus a `preferred` field on `Person`. Neither is
-  evaluated: the conversion layer refuses the constraint as `UNIMPLEMENTED`, and
-  `preferred` is read by nothing. `None` is the "no stated preference" case.
+* **`PersonPreferenceFit`**, plus a `preferred` field on `Person`. **Both are now
+  evaluated** — [ADR-0026](adr/0026-personpreferencefit-charges-the-unmet-fraction.md).
+  `None` is the "no stated preference" case, and note the emptiness is INVERTED
+  against `Unavailability`: an empty axis there means "every value on that axis",
+  an empty `Preference` means no preference at all. The one part still refused is
+  a non-empty `PersonPreferenceFit.roles`, which returns `UNIMPLEMENTED` rather
+  than widening the counted set beyond lecturers.
+
+  This is also the field whose plumbing was silently incomplete for a while: it
+  crossed the wire from `v0.7.0` and the conversion layer dropped it, so the
+  app's assembly was write-only against a solver that could not read it.
+  `crates/service/tests/person_preference_wire.rs` pins both halves now, because
+  each can fail while the other looks healthy.
 * **`OnlineOnsiteSameDay` carries a weight**, since it is priced rather than
   forbidden — [ADR-0023](adr/0023-onlineonsitesameday-is-priced-not-forbidden.md).
   A tenant that has not been backfilled sends weight 0, which reads as "count it,
