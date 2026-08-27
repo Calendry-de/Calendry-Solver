@@ -102,6 +102,13 @@ CI runs all of the above plus rustdoc and a release benchmark smoke run
 ([ADR-0020](docs/adr/0020-workspace-lints-and-ci-are-the-gate.md)). Lints live in
 the root `Cargo.toml` and are inherited by every crate.
 
+Every job that compiles goes through `.github/actions/rust-build-env`, which owns
+the pinned submodule, **`protoc`**, the toolchain and the cache. protoc is the one
+that bites: it is a build dependency of `crates/proto` that no `Cargo.toml`
+declares, so a workspace is green on any machine that happens to have it and
+fails in CI on the first run. Add compiling jobs through that action, not by
+hand.
+
 There is a second workflow, `.github/workflows/docker.yml`, building the image
 from the root `Dockerfile`. It is independent of the gate above — a red test does
 not stop an image build and vice versa.

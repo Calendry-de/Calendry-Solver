@@ -1,0 +1,73 @@
+name: Rust build environment
+description: >
+  Everything needed before cargo can compile this workspace: the pinned proto
+  submodule, protoc, a toolchain, and the build cache.
+
+# ONE DEFINITION, because four jobs compile and a fifth would forget one of these.
+#
+# `protoc` is the trap. It is a build dependency of `crates/proto`, not a Rust
+# dependency, so nothing in Cargo.toml mentions it and `cargo build` succeeds on
+# any machine that happens to have it installed. The first CI run failed on
+# exactly this — prost-build could not find `protoc`, in four jobs at once, after
+# the workspace had been green locally all session.
+#
+# Sourced from apt, matching the Dockerfile, so the image build and CI cannot
+# drift onto different protoc versions.
+#
+# Expects the caller to have run `actions/checkout` already. It deliberately does
+# NOT check out again: the submodule is initialised from the pin instead, which is
+# cheaper than a second clone and means no job carries a `submodules:` flag it
+# could omit.
+
+inputs:
+  components:
+    description: Extra rustup components, comma-separated (e.g. clippy, rustfmt).
+    required: false
+    default: ""
+  cache-key:
+    description: Cargo cache suffix, so jobs on different profiles do not evict each other.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    # `--init --recursive`, and never `--remote`. `--remote` would move the pin to
+    # whatever the tracked branch points at today, which is the schema drift the
+    # submodule exists to prevent — see
+    # docs/adr/0003-proto-schema-as-a-pinned-submodule.md. This checks out the
+    # exact revision recorded in the tree.
+    - name: Check out the pinned proto submodule
+      shell: bash
+      run: git submodule update --init --recursive
+
+    # A missing submodule and a missing protoc produce similar-looking build.rs
+    # failures. Naming which one it was costs one line here and saves a guess.
+    - name: Verify the proto submodule is present
+      shell: bash
+      run: |
+        if [ ! -f vendor/calendry-proto/proto/calendry/solver/v1/service.proto ]; then
+          echo "::error::vendor/calendry-proto is not checked out."
+          echo "::error::Run: git submodule update --init --recursive"
+          exit 1
+        fi
+        echo "proto submodule at $(git -C vendor/calendry-proto rev-parse --short HEAD)" \
+          "($(git -C vendor/calendry-proto describe --tags --always))"
+
+    - name: Install protoc
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends protobuf-compiler
+        # Printed because the floor is real: the schema uses proto3 `optional`,
+        # which needs protoc >= 3.15. Debian and Ubuntu ship 3.21, comfortably
+        # over, but a silent downgrade should be visible in the log.
+        protoc --version
+
+    - uses: dtolnay/rust-toolchain@stable
+      with:
+        components: ${{ inputs.components }}
+
+    - uses: Swatinem/rust-cache@v2
+      with:
+        key: ${{ inputs.cache-key }}

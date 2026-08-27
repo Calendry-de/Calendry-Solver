@@ -3,10 +3,14 @@ name: CI
 # The gate this repository did not have. Until now clippy ran only when a human
 # typed it, and without `-D warnings` — so a warning was advice, not a failure.
 #
-# The proto submodule is required for the build: `crates/proto/build.rs` has no
-# sibling-checkout fallback by design, so a missing submodule is a hard error
-# quoting `git submodule update --init --recursive`. Every job therefore checks
-# out with `submodules: recursive`.
+# Every job that compiles goes through `.github/actions/rust-build-env`, which
+# owns the proto submodule, the toolchain, `protoc` and the cache. See that file
+# for why protoc is the part that bites: it is a build dependency nothing in
+# Cargo.toml declares, so a workspace can be green on every developer machine and
+# fail in CI on the first run.
+#
+# `fmt` is deliberately the exception — it parses, it does not compile, so it
+# needs none of that and stays a fast first signal.
 
 on:
   push:
@@ -40,12 +44,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/rust-build-env
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@v2
+          cache-key: clippy
       # --locked so a lockfile drift fails here rather than silently resolving
       # to a different dependency set than a developer has locally.
       - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
@@ -55,10 +57,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/rust-build-env
         with:
-          submodules: recursive
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+          cache-key: test
       - run: cargo test --workspace --all-features --locked
 
   docs:
@@ -66,10 +67,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/rust-build-env
         with:
-          submodules: recursive
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+          cache-key: docs
       # A broken intra-doc link is the one documentation defect that rots
       # silently, because nothing else ever resolves those paths.
       - run: cargo doc --workspace --no-deps --all-features --locked
@@ -85,8 +85,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/rust-build-env
         with:
-          submodules: recursive
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+          cache-key: release
       - run: cargo run --release --locked -p calendry-solver-gen --bin bench -- small-school --moves 20000

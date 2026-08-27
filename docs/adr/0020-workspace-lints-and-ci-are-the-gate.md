@@ -37,3 +37,35 @@ private.
 
 Revisit if the crate ever ships as a public API, where a field with no
 explanation is a genuine cost to a reader who cannot open the source.
+
+## `protoc` is a build dependency nothing declares
+
+The first CI run failed in four jobs at once with `Could not find protoc`, after
+the workspace had been green locally all session. That is not a flake and it is
+worth recording, because the shape recurs: **`protoc` is a build dependency of
+`crates/proto` that appears in no `Cargo.toml`**, so `cargo build` succeeds on any
+machine that happens to have it and there is no local signal that it is missing.
+
+`.github/actions/rust-build-env` is the single definition of what a compiling job
+needs — the pinned submodule, protoc, a toolchain, the cache. Four jobs compile
+and a fifth would have forgotten one of them. `fmt` deliberately stays outside it:
+it parses rather than compiles, so it needs none of that and remains a fast first
+signal.
+
+Sourced from **apt, matching the `Dockerfile`**, rather than from a third-party
+setup action — so the image build and CI cannot drift onto different protoc
+versions. The version floor is real: the schema uses proto3 `optional`, which
+needs protoc >= 3.15; Debian and Ubuntu ship 3.21. The action prints
+`protoc --version` so a silent downgrade is visible in the log.
+
+The composite action initialises the submodule with `--init --recursive` and
+**never `--remote`** ([ADR-0003](0003-proto-schema-as-a-pinned-submodule.md)), and
+checks for the checkout separately from installing protoc — the two produce
+similar-looking `build.rs` failures, and naming which one it was costs one line.
+
+Considered and rejected: vendoring protoc into the build (via `protobuf-src` or a
+`protoc-bin-vendored` dependency) would make the build hermetic and remove this
+class of failure entirely. It also pins a protoc version in `Cargo.toml`, builds
+it from source on some paths, and diverges from how the Dockerfile sources it.
+The failure mode here is loud and immediate rather than silent, so consistency
+with the image won.
