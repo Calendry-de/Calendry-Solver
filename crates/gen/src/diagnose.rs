@@ -134,6 +134,8 @@ fn single(axis: fn(&mut Enforce), base: Enforce) -> Enforce {
         exam_spacing_same_day: false,
         exam_spacing_window: false,
         minimize_weekday_imbalance: false,
+        minimize_location_change_group: false,
+        minimize_location_change_person: false,
     };
     axis(&mut e);
     axis(&mut probe);
@@ -158,6 +160,10 @@ fn single(axis: fn(&mut Enforce), base: Enforce) -> Enforce {
         exam_spacing_same_day: e.exam_spacing_same_day && base.exam_spacing_same_day,
         exam_spacing_window: e.exam_spacing_window && base.exam_spacing_window,
         minimize_weekday_imbalance: e.minimize_weekday_imbalance && base.minimize_weekday_imbalance,
+        minimize_location_change_group: e.minimize_location_change_group
+            && base.minimize_location_change_group,
+        minimize_location_change_person: e.minimize_location_change_person
+            && base.minimize_location_change_person,
     }
 }
 

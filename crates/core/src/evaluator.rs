@@ -156,6 +156,10 @@ fn score_one(problem: &Problem, solution: &Solution, state: &SearchState, mv: &M
     let max_weekly_teaching_load_delta =
         state.max_weekly_teaching_load_delta(problem, &candidate, &span);
 
+    // Same ranking-signal contract as `max_daily_span_delta` — over
+    // distinct-location excess instead of span-excess.
+    let location_change_delta = state.location_change_delta(problem, &candidate, &span);
+
     // Same ranking-signal contract as `compactness_delta` — see its own
     // comment above — for the Offering-scoped counterpart.
     let scheduling_pattern_delta = state.scheduling_pattern_delta(problem, &candidate, &span);
@@ -195,6 +199,7 @@ fn score_one(problem: &Problem, solution: &Solution, state: &SearchState, mv: &M
             + max_daily_span_delta
             + max_weekly_teaching_load_delta
             + imbalance_delta
+            + location_change_delta
             + scheduling_pattern_delta,
     )
 }

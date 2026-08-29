@@ -387,6 +387,11 @@ pub struct Objective {
     /// cost`, not maintained as a running total: unlike variance's natural
     /// unboundedness per placement, groups x weeks is small enough to rescan.
     pub imbalance_cost: f64,
+    /// Distinct-location excess over the configured cap, summed over every
+    /// currently-occupied `(Group-or-Person, day)` cell and already multiplied
+    /// by each axis's configured weight — same "belongs to a day, not a
+    /// placement" reason `max_daily_span_cost` lives outside `soft`.
+    pub location_change_cost: f64,
     /// `DistributedPatternAdherence` and `BlockPatternAdherence` together,
     /// already multiplied by each type's configured weight. Read whole off
     /// `Aggregates`' running totals for the same reason `compactness_cost` is:
@@ -419,6 +424,7 @@ impl Objective {
             + self.exam_same_day_cost
             + self.exam_window_cost
             + self.imbalance_cost
+            + self.location_change_cost
             + self.scheduling_pattern_cost
     }
 }
@@ -445,6 +451,7 @@ mod tests {
             is_virtual: virt,
             features: vec![],
             federation_owned: false,
+            location: String::new(),
         }
     }
 
@@ -634,6 +641,7 @@ mod tests {
             exam_same_day_cost: 0.0,
             exam_window_cost: 0.0,
             imbalance_cost: 0.0,
+            location_change_cost: 0.0,
             scheduling_pattern_cost: 0.0,
         };
         let one_unplaced = Objective {
@@ -648,6 +656,7 @@ mod tests {
             exam_same_day_cost: 0.0,
             exam_window_cost: 0.0,
             imbalance_cost: 0.0,
+            location_change_cost: 0.0,
             scheduling_pattern_cost: 0.0,
         };
         assert!(one_unplaced.total(hard_penalty) > all_soft_bad.total(hard_penalty));
@@ -679,6 +688,7 @@ mod tests {
             exam_same_day_cost: 0.0,
             exam_window_cost: 0.0,
             imbalance_cost: 0.0,
+            location_change_cost: 0.0,
             scheduling_pattern_cost: 0.0,
         };
         let one_unplaced = Objective {
@@ -693,6 +703,7 @@ mod tests {
             exam_same_day_cost: 0.0,
             exam_window_cost: 0.0,
             imbalance_cost: 0.0,
+            location_change_cost: 0.0,
             scheduling_pattern_cost: 0.0,
         };
 

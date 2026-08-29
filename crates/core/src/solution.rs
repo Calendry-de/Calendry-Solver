@@ -577,6 +577,16 @@ impl SearchState {
         days
     }
 
+    /// The distinct `Room.location` indices `who` occupies — `MinimizeLocationChange`'s
+    /// own input, deduplicated so a Session split across two Rooms in the same
+    /// building counts as touching ONE location, not two.
+    fn locations_of(problem: &Problem, who: &Occupant<'_>) -> Vec<u32> {
+        let mut locations: Vec<u32> = who.all_rooms().map(|r| problem.room_location(r)).collect();
+        locations.sort_unstable();
+        locations.dedup();
+        locations
+    }
+
     /// Whether this Session could occupy `span`.
     ///
     /// Covers the four structural types, `LecturerVeto`/`GroupVeto` (unary
@@ -836,6 +846,40 @@ impl SearchState {
         delta
     }
 
+    /// The `MinimizeLocationChange` cost DELTA of placing `who` at `span` —
+    /// mirrors [`Self::max_daily_span_delta`], over distinct-location excess
+    /// instead of span-excess.
+    pub fn location_change_delta(
+        &self,
+        problem: &Problem,
+        who: &Occupant<'_>,
+        span: &[SlotIdx],
+    ) -> f64 {
+        if span.is_empty()
+            || (!who.enforce.minimize_location_change_group
+                && !who.enforce.minimize_location_change_person)
+        {
+            return 0.0;
+        }
+        let day = problem.slots.flags(span[0]).day_index;
+        let locations = Self::locations_of(problem, who);
+        let mut delta = 0.0;
+        if who.enforce.minimize_location_change_group {
+            delta += self
+                .aggregates
+                .group_location_delta(who.subtree_groups, day, &locations)
+                as f64
+                * problem.location_change_group_weight;
+        }
+        if who.enforce.minimize_location_change_person {
+            delta += self
+                .aggregates
+                .person_location_delta(who.attendees, day, &locations) as f64
+                * problem.location_change_person_weight;
+        }
+        delta
+    }
+
     /// The `MaxWeeklyTeachingLoad` cost DELTA of placing `who` at `span` —
     /// the read-only preview, mirroring [`Self::max_daily_span_delta`].
     /// Keyed by `who.lecturers` and the WEEK `span` falls in, not by day —
@@ -940,6 +984,28 @@ impl SearchState {
             } else {
                 self.aggregates
                     .remove_teaching_load(who.lecturers, week, span.len() as u32);
+            }
+        }
+        if who.enforce.minimize_location_change_group || who.enforce.minimize_location_change_person
+        {
+            let locations = Self::locations_of(problem, who);
+            if who.enforce.minimize_location_change_group {
+                if add {
+                    self.aggregates
+                        .add_group_location(who.subtree_groups, day, &locations);
+                } else {
+                    self.aggregates
+                        .remove_group_location(who.subtree_groups, day, &locations);
+                }
+            }
+            if who.enforce.minimize_location_change_person {
+                if add {
+                    self.aggregates
+                        .add_person_location(who.attendees, day, &locations);
+                } else {
+                    self.aggregates
+                        .remove_person_location(who.attendees, day, &locations);
+                }
             }
         }
 
@@ -1094,6 +1160,18 @@ impl SearchState {
             );
         }
 
+        if who.enforce.minimize_location_change_group || who.enforce.minimize_location_change_person
+        {
+            let day = problem.slots.flags(span[0]).day_index;
+            score += self.aggregates.location_change_ruin_cost(
+                who.subtree_groups,
+                who.attendees,
+                day,
+                problem.location_change_group_weight,
+                problem.location_change_person_weight,
+            );
+        }
+
         if let Some(offering) = who.offering {
             use crate::problem::SchedulingPattern;
             if who.enforce.distributed_pattern
@@ -1199,6 +1277,20 @@ impl SearchState {
         self.aggregates.max_daily_span_cost(
             problem.max_daily_span_group_weight,
             problem.max_daily_span_person_weight,
+        )
+    }
+
+    /// What the currently over-cap distinct-location days cost, at the
+    /// configured weight(s). Mirrors [`Self::max_daily_span_cost`].
+    pub fn location_change_cost(&self, problem: &Problem) -> f64 {
+        if problem.location_change_group_weight == 0.0
+            && problem.location_change_person_weight == 0.0
+        {
+            return 0.0;
+        }
+        self.aggregates.location_change_cost(
+            problem.location_change_group_weight,
+            problem.location_change_person_weight,
         )
     }
 

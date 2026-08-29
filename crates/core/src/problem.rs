@@ -8,8 +8,8 @@
 use crate::aggregates::{
     Aggregates, CompactnessInstance, DayMixInstance, ExamSpacingSameDayInstance,
     ExamSpacingWindowInstance, MaxConsecutiveInstance, MaxDailySpanInstance,
-    MaxWeeklyTeachingLoadInstance, MinimizeWeekdayImbalanceInstance, PatternAdherenceInstance,
-    ShareInstance,
+    MaxWeeklyTeachingLoadInstance, MinimizeLocationChangeInstance,
+    MinimizeWeekdayImbalanceInstance, PatternAdherenceInstance, ShareInstance,
 };
 use crate::bitset::BitSet;
 use crate::groups::{GroupClosure, GroupCycle};
@@ -29,6 +29,11 @@ pub struct Room {
     pub is_virtual: bool,
     pub features: Vec<String>,
     pub federation_owned: bool,
+    /// Free-text building/campus identifier. `""` means unconfigured —
+    /// naturally inert for `MinimizeLocationChange`, since every Room sharing
+    /// that empty string counts as the SAME location rather than as distinct
+    /// ones.
+    pub location: String,
 }
 
 impl Room {
@@ -291,6 +296,11 @@ pub struct ConstraintSet {
     /// its active days, rather than clustering on some and leaving others
     /// empty. See [`crate::aggregates::MinimizeWeekdayImbalanceInstance`].
     pub minimize_weekday_imbalance: Vec<MinimizeWeekdayImbalanceInstance>,
+    /// SOFT, aggregate over a day. Penalizes a Group's or Person's day for
+    /// touching more than a configured number of distinct `Room.location`
+    /// values — reduces cross-campus walking between back-to-back Sessions.
+    /// See [`crate::aggregates::MinimizeLocationChangeInstance`].
+    pub minimize_location_change: Vec<MinimizeLocationChangeInstance>,
 }
 
 /// One `ProtectedBlock` instance. The FIRST hard type whose values
@@ -381,6 +391,8 @@ pub struct Enforce {
     pub exam_spacing_same_day: bool,
     pub exam_spacing_window: bool,
     pub minimize_weekday_imbalance: bool,
+    pub minimize_location_change_group: bool,
+    pub minimize_location_change_person: bool,
 }
 
 impl ConstraintSet {
@@ -426,6 +438,14 @@ impl ConstraintSet {
                 .minimize_weekday_imbalance
                 .iter()
                 .any(|c| c.covers(kind)),
+            minimize_location_change_group: self
+                .minimize_location_change
+                .iter()
+                .any(|c| c.group && c.covers(kind)),
+            minimize_location_change_person: self
+                .minimize_location_change
+                .iter()
+                .any(|c| c.person && c.covers(kind)),
         }
     }
 }
@@ -936,6 +956,15 @@ pub struct Problem {
     pub distributed_pattern_weight: f64,
     /// Summed weight of every configured `BlockPatternAdherence`.
     pub block_pattern_weight: f64,
+    /// Summed weight of every configured `MinimizeLocationChange` instance
+    /// covering the Group axis. Zero when not configured, or when no
+    /// instance selects it.
+    pub location_change_group_weight: f64,
+    /// The Person-axis counterpart of `location_change_group_weight`.
+    pub location_change_person_weight: f64,
+    /// `Room.location`, interned to a dense index parallel to [`Self::rooms`].
+    /// See [`Problem::room_location`].
+    room_location: Vec<u32>,
 
     /// Whether each Offering is being actively placed by this run, indexed by
     /// [`OfferingIdx`]. Read it through [`Problem::in_scope`].
@@ -997,6 +1026,21 @@ impl Problem {
         kinds.dedup();
 
         let soft = SoftModel::build(constraints.soft.clone(), &slots, &rooms, &kinds);
+
+        // `Room.location` interned to a dense index, first-seen order — a
+        // pure function of the Room list, so any deterministic assignment is
+        // fine; `MinimizeLocationChange` only cares which Rooms SHARE an
+        // index, not what the index itself is.
+        let mut location_index: std::collections::HashMap<String, u32> =
+            std::collections::HashMap::new();
+        let room_location: Vec<u32> = rooms
+            .iter()
+            .map(|r| {
+                let next = location_index.len() as u32;
+                *location_index.entry(r.location.clone()).or_insert(next)
+            })
+            .collect();
+        let n_locations = location_index.len();
 
         // Blackout -> slot mask, resolved against the tenant's grid. Unary, so
         // it precomputes once per Offering.
@@ -1130,6 +1174,8 @@ impl Problem {
             constraints.exam_spacing_window.clone(),
             constraints.minimize_weekday_imbalance.clone(),
             slots.active_days().len(),
+            constraints.minimize_location_change.clone(),
+            n_locations,
         );
 
         let day_mix_weight: f64 = constraints
@@ -1202,6 +1248,18 @@ impl Problem {
         let imbalance_weight: f64 = constraints
             .minimize_weekday_imbalance
             .iter()
+            .map(|i| i.weight)
+            .sum();
+        let location_change_group_weight: f64 = constraints
+            .minimize_location_change
+            .iter()
+            .filter(|i| i.group)
+            .map(|i| i.weight)
+            .sum();
+        let location_change_person_weight: f64 = constraints
+            .minimize_location_change
+            .iter()
+            .filter(|i| i.person)
             .map(|i| i.weight)
             .sum();
         let distributed_pattern_weight: f64 = constraints
@@ -1338,6 +1396,9 @@ impl Problem {
             imbalance_weight,
             distributed_pattern_weight,
             block_pattern_weight,
+            location_change_group_weight,
+            location_change_person_weight,
+            room_location,
             in_scope,
             placement_counts,
             immovable_counts,
@@ -1481,6 +1542,14 @@ impl Problem {
                 i.weight * (excess / (excess + 1.0))
             })
             .sum()
+    }
+
+    /// The dense location index `Room.location` was interned to — the key
+    /// `MinimizeLocationChange` groups distinct Rooms by. Two Rooms share an
+    /// index exactly when their `location` strings are equal.
+    #[inline]
+    pub fn room_location(&self, r: RoomIdx) -> u32 {
+        self.room_location[r.get()]
     }
 
     /// A stable label for a placement, preferring the existing Session id.

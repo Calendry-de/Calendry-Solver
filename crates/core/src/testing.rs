@@ -58,7 +58,15 @@ pub fn room(id: &str) -> Room {
         is_virtual: false,
         features: vec![],
         federation_owned: false,
+        location: String::new(),
     }
+}
+
+/// `room` with a real `location` — most fixtures leave it empty, which is
+/// inert for `MinimizeLocationChange`; a test exercising it needs Rooms in
+/// genuinely different locations.
+pub fn room_at(id: &str, location: &str) -> Room {
+    Room { location: location.to_string(), ..room(id) }
 }
 
 pub fn rooms(n: u32) -> Vec<Room> {
@@ -238,6 +246,7 @@ pub fn all_constraints() -> ConstraintSet {
         exam_spacing_same_day: Vec::new(),
         exam_spacing_window: Vec::new(),
         minimize_weekday_imbalance: Vec::new(),
+        minimize_location_change: Vec::new(),
         // Weight 5 mirrors the app catalogue's `defaultWeight` for this type,
         // so a fixture's day-mix cost reads the same as a real tenant's.
         online_onsite_same_day: day_mix("c-mix", 5.0),

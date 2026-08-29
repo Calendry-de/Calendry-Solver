@@ -28,7 +28,8 @@ use std::collections::{HashMap, HashSet};
 use calendry_solver_core::aggregates::{
     CompactnessInstance, DayMixInstance, ExamSpacingSameDayInstance, ExamSpacingWindowInstance,
     MaxConsecutiveInstance, MaxDailySpanInstance, MaxWeeklyTeachingLoadInstance,
-    MinimizeWeekdayImbalanceInstance, PatternAdherenceInstance, ShareInstance, ShareWindow,
+    MinimizeLocationChangeInstance, MinimizeWeekdayImbalanceInstance, PatternAdherenceInstance,
+    ShareInstance, ShareWindow,
 };
 use calendry_solver_core::ids::{GroupIdx, OfferingIdx, PersonIdx, RoomIdx, SlotIdx};
 use calendry_solver_core::preferences::{Preference, PreferenceInstance};
@@ -247,6 +248,7 @@ fn build_rooms(input: &pb::SolverInput) -> Vec<Room> {
             is_virtual: r.is_virtual,
             features: r.feature_tags.clone(),
             federation_owned: matches!(r.owner, Some(pb::room::Owner::FederationId(_))),
+            location: r.location.clone(),
         })
         .collect()
 }
@@ -1130,11 +1132,37 @@ fn build_constraints(input: &pb::SolverInput) -> Result<ConstraintSet, ConvertEr
                     waste_ratio_threshold: p.waste_ratio_threshold,
                 });
             }
-            Some(Params::MinimizeLocationChange(_)) => {
-                return Err(ConvertError::ConstraintTypeUnimplemented {
-                    constraint: c.id.clone(),
-                    constraint_type: "MinimizeLocationChange",
-                });
+            // Built — see `crate::aggregates::MinimizeLocationChangeInstance`.
+            // Same `CompactnessScope` parsing as `Compactness`/
+            // `MaxDailySpan` above.
+            Some(Params::MinimizeLocationChange(p)) => {
+                if c.weight < 0.0 || c.weight.is_nan() {
+                    return Err(ConvertError::NegativeSoftWeight {
+                        constraint: c.id.clone(),
+                        weight: c.weight,
+                    });
+                }
+                let (mut group, mut person) = (false, false);
+                for &s in &p.scope {
+                    match pb::CompactnessScope::try_from(s) {
+                        Ok(pb::CompactnessScope::Group) => group = true,
+                        Ok(pb::CompactnessScope::Person) => person = true,
+                        _ => {}
+                    }
+                }
+                if p.scope.is_empty() {
+                    group = true;
+                    person = true;
+                }
+                set.minimize_location_change
+                    .push(MinimizeLocationChangeInstance {
+                        id: c.id.clone(),
+                        kinds: c.applies_to_kinds.clone(),
+                        weight: c.weight,
+                        group,
+                        person,
+                        max_locations_per_day: p.max_locations_per_day,
+                    });
             }
             // Built — see `crate::aggregates::MaxConsecutiveInstance`. Same
             // `CompactnessScope` parsing as `Compactness` above, including

@@ -249,6 +249,10 @@ fn build_rooms(params: &InstanceParams, rng: &mut Rng) -> Vec<Room> {
             is_virtual: false,
             features,
             federation_owned: false,
+            // Left unconfigured: the generator does not calibrate
+            // `MinimizeLocationChange`'s firing rate, the same reason
+            // `Group.size` is left at 0 for `GroupSizeFitsRoom` below.
+            location: String::new(),
         });
     }
 
@@ -265,6 +269,7 @@ fn build_rooms(params: &InstanceParams, rng: &mut Rng) -> Vec<Room> {
             is_virtual: true,
             features: FEATURES.iter().map(ToString::to_string).collect(),
             federation_owned: false,
+            location: String::new(),
         });
     }
 
@@ -803,6 +808,10 @@ fn build_constraints(params: &InstanceParams, slots: &SlotTable) -> ConstraintSe
         exam_spacing_same_day: Vec::new(),
         exam_spacing_window: Vec::new(),
         minimize_weekday_imbalance: Vec::new(),
+        // OFF for the same reason `group_size_fits_room` above is: the
+        // generator does not assign `Room.location`, so this check's firing
+        // rate here would be uncalibrated noise rather than a signal.
+        minimize_location_change: Vec::new(),
         // Weight 5 mirrors the app catalogue's `defaultWeight`, so generated
         // benchmark instances price a mixed day the way a real tenant does.
         online_onsite_same_day: vec![DayMixInstance {

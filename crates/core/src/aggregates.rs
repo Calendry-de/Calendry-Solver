@@ -229,6 +229,29 @@ impl MinimizeWeekdayImbalanceInstance {
     }
 }
 
+/// One configured `MinimizeLocationChange` rule — same `group`/`person` axis
+/// split as `CompactnessInstance` and siblings, plus the distinct-location
+/// cap none of those have an equivalent of. A day counts as a violation once
+/// it touches MORE than `max_locations_per_day` distinct `Room.location`
+/// values.
+#[derive(Clone, Debug)]
+pub struct MinimizeLocationChangeInstance {
+    pub id: String,
+    /// Empty means all kinds.
+    pub kinds: Vec<String>,
+    pub weight: f64,
+    pub group: bool,
+    pub person: bool,
+    pub max_locations_per_day: u32,
+}
+
+impl MinimizeLocationChangeInstance {
+    #[inline]
+    pub fn covers(&self, kind: &str) -> bool {
+        self.kinds.is_empty() || self.kinds.iter().any(|k| k == kind)
+    }
+}
+
 /// One configured `DistributedPatternAdherence` or `BlockPatternAdherence` —
 /// identical shape, kept as one type since both are just "id, kind scope,
 /// weight" with the actual per-pattern logic living in `Aggregates` instead.
@@ -433,6 +456,39 @@ pub struct Aggregates {
     /// `day_index` values; no separate week/weekday decomposition needed.
     active_days_count: usize,
     imbalance_rules: Vec<MinimizeWeekdayImbalanceInstance>,
+
+    /// `[group * n_days * n_locations + day * n_locations + loc]` —
+    /// occurrence count of Sessions this Group has in each distinct
+    /// `Room.location` on each day. The inner axis is LOCATION rather than
+    /// slot or day alone, unlike every array above.
+    location_group_loc: Vec<u32>,
+    /// The Person counterpart.
+    location_person_loc: Vec<u32>,
+    /// `[group * n_days + day]` — how many DISTINCT locations this Group's
+    /// Sessions currently touch that day. Maintained incrementally as
+    /// `location_group_loc` cells cross 0<->positive: an exact integer
+    /// transition, unlike the `imbalance`/`exam_same_day` family's fresh
+    /// rescans, which exist specifically to sidestep floating-point drift
+    /// that does not apply to a plain distinct count.
+    location_group_distinct: Vec<u32>,
+    location_person_distinct: Vec<u32>,
+    /// The TIGHTEST `max_locations_per_day` among every enabled instance
+    /// covering each axis, same "whichever binds hardest" convention as
+    /// `span_group_threshold`/`span_person_threshold`. `u32::MAX` when
+    /// nothing configures that axis.
+    location_group_threshold: u32,
+    location_person_threshold: u32,
+    /// Running sum of excess-over-threshold distinct locations over every
+    /// currently occupied `(entity, day)` cell, maintained as a delta exactly
+    /// like `span_group_excess_total`/`span_person_excess_total`.
+    location_group_excess_total: u32,
+    location_person_excess_total: u32,
+    /// Distinct `Room.location` values across the whole tenant. `1` when
+    /// `MinimizeLocationChange` is not configured — never `0`, so a `% `/
+    /// index arithmetic against it never divides by zero.
+    n_locations: usize,
+
+    location_rules: Vec<MinimizeLocationChangeInstance>,
 }
 
 impl Aggregates {
@@ -457,6 +513,8 @@ impl Aggregates {
         exam_window_rules: Vec<ExamSpacingWindowInstance>,
         imbalance_rules: Vec<MinimizeWeekdayImbalanceInstance>,
         active_days_count: usize,
+        location_rules: Vec<MinimizeLocationChangeInstance>,
+        n_locations: usize,
     ) -> Self {
         let groups = n_groups.max(1);
         let counters = rules
@@ -524,6 +582,22 @@ impl Aggregates {
             .unwrap_or(u32::MAX);
 
         let track_imbalance = !imbalance_rules.is_empty();
+
+        let track_location_group = location_rules.iter().any(|r| r.group);
+        let track_location_person = location_rules.iter().any(|r| r.person);
+        let location_group_threshold = location_rules
+            .iter()
+            .filter(|r| r.group)
+            .map(|r| r.max_locations_per_day)
+            .min()
+            .unwrap_or(u32::MAX);
+        let location_person_threshold = location_rules
+            .iter()
+            .filter(|r| r.person)
+            .map(|r| r.max_locations_per_day)
+            .min()
+            .unwrap_or(u32::MAX);
+        let locations = n_locations.max(1);
 
         Self {
             online_day: vec![0; groups * n_days.max(1)],
@@ -610,6 +684,32 @@ impl Aggregates {
             },
             active_days_count: active_days_count.max(1),
             imbalance_rules,
+            location_group_loc: if track_location_group {
+                vec![0; groups * n_days.max(1) * locations]
+            } else {
+                Vec::new()
+            },
+            location_person_loc: if track_location_person {
+                vec![0; n_persons.max(1) * n_days.max(1) * locations]
+            } else {
+                Vec::new()
+            },
+            location_group_distinct: if track_location_group {
+                vec![0; groups * n_days.max(1)]
+            } else {
+                Vec::new()
+            },
+            location_person_distinct: if track_location_person {
+                vec![0; n_persons.max(1) * n_days.max(1)]
+            } else {
+                Vec::new()
+            },
+            location_group_threshold,
+            location_person_threshold,
+            location_group_excess_total: 0,
+            location_person_excess_total: 0,
+            n_locations: locations,
+            location_rules,
         }
     }
 
@@ -1994,6 +2094,205 @@ impl Aggregates {
         cost
     }
 
+    // -- location change -------------------------------------------------------
+
+    pub fn location_rules(&self) -> &[MinimizeLocationChangeInstance] {
+        &self.location_rules
+    }
+
+    /// The distinct-location-excess DELTA `MinimizeLocationChange` would
+    /// experience if `groups` gained one Session touching `locations` (already
+    /// deduplicated by the caller) on `day` — the read-only preview, mirroring
+    /// [`Self::group_span_delta`]. Unlike the run/span/gap counters, this does
+    /// not need a before/after rescan of a whole row: `location_group_distinct`
+    /// is already the maintained distinct count, so only locations this
+    /// (group, day) does not already touch can move it.
+    pub fn group_location_delta(&self, groups: &[GroupIdx], day: u32, locations: &[u32]) -> i64 {
+        if self.location_group_loc.is_empty() || locations.is_empty() {
+            return 0;
+        }
+        let mut delta = 0i64;
+        for &g in groups {
+            let cell = g.get() * self.n_days + day as usize;
+            let row = cell * self.n_locations;
+            let newly_touched = locations
+                .iter()
+                .filter(|&&loc| self.location_group_loc[row + loc as usize] == 0)
+                .count() as u32;
+            if newly_touched == 0 {
+                continue;
+            }
+            let before =
+                self.location_group_distinct[cell].saturating_sub(self.location_group_threshold);
+            let after = (self.location_group_distinct[cell] + newly_touched)
+                .saturating_sub(self.location_group_threshold);
+            delta += i64::from(after) - i64::from(before);
+        }
+        delta
+    }
+
+    /// See [`Self::group_location_delta`]; the Person counterpart, over
+    /// `who.attendees` rather than `who.subtree_groups`.
+    pub fn person_location_delta(&self, persons: &[PersonIdx], day: u32, locations: &[u32]) -> i64 {
+        if self.location_person_loc.is_empty() || locations.is_empty() {
+            return 0;
+        }
+        let mut delta = 0i64;
+        for &p in persons {
+            let cell = p.get() * self.n_days + day as usize;
+            let row = cell * self.n_locations;
+            let newly_touched = locations
+                .iter()
+                .filter(|&&loc| self.location_person_loc[row + loc as usize] == 0)
+                .count() as u32;
+            if newly_touched == 0 {
+                continue;
+            }
+            let before =
+                self.location_person_distinct[cell].saturating_sub(self.location_person_threshold);
+            let after = (self.location_person_distinct[cell] + newly_touched)
+                .saturating_sub(self.location_person_threshold);
+            delta += i64::from(after) - i64::from(before);
+        }
+        delta
+    }
+
+    /// Mark `locations` (deduplicated) touched by `groups` on `day`, updating
+    /// `location_group_excess_total` by the exact delta — mirrors
+    /// [`Self::add_group_span`], one location at a time rather than one
+    /// row-rescan, since each location's contribution to the distinct count is
+    /// independent and additive.
+    pub fn add_group_location(&mut self, groups: &[GroupIdx], day: u32, locations: &[u32]) {
+        if self.location_group_loc.is_empty() {
+            return;
+        }
+        for &g in groups {
+            let cell = g.get() * self.n_days + day as usize;
+            let row = cell * self.n_locations;
+            for &loc in locations {
+                let idx = row + loc as usize;
+                self.location_group_loc[idx] += 1;
+                if self.location_group_loc[idx] == 1 {
+                    let before = self.location_group_distinct[cell]
+                        .saturating_sub(self.location_group_threshold);
+                    self.location_group_distinct[cell] += 1;
+                    let after = self.location_group_distinct[cell]
+                        .saturating_sub(self.location_group_threshold);
+                    self.location_group_excess_total += after - before;
+                }
+            }
+        }
+    }
+
+    pub fn remove_group_location(&mut self, groups: &[GroupIdx], day: u32, locations: &[u32]) {
+        if self.location_group_loc.is_empty() {
+            return;
+        }
+        for &g in groups {
+            let cell = g.get() * self.n_days + day as usize;
+            let row = cell * self.n_locations;
+            for &loc in locations {
+                let idx = row + loc as usize;
+                self.location_group_loc[idx] = self.location_group_loc[idx].saturating_sub(1);
+                if self.location_group_loc[idx] == 0 {
+                    let before = self.location_group_distinct[cell]
+                        .saturating_sub(self.location_group_threshold);
+                    self.location_group_distinct[cell] =
+                        self.location_group_distinct[cell].saturating_sub(1);
+                    let after = self.location_group_distinct[cell]
+                        .saturating_sub(self.location_group_threshold);
+                    self.location_group_excess_total -= before - after;
+                }
+            }
+        }
+    }
+
+    /// See [`Self::add_group_location`]; the Person counterpart.
+    pub fn add_person_location(&mut self, persons: &[PersonIdx], day: u32, locations: &[u32]) {
+        if self.location_person_loc.is_empty() {
+            return;
+        }
+        for &p in persons {
+            let cell = p.get() * self.n_days + day as usize;
+            let row = cell * self.n_locations;
+            for &loc in locations {
+                let idx = row + loc as usize;
+                self.location_person_loc[idx] += 1;
+                if self.location_person_loc[idx] == 1 {
+                    let before = self.location_person_distinct[cell]
+                        .saturating_sub(self.location_person_threshold);
+                    self.location_person_distinct[cell] += 1;
+                    let after = self.location_person_distinct[cell]
+                        .saturating_sub(self.location_person_threshold);
+                    self.location_person_excess_total += after - before;
+                }
+            }
+        }
+    }
+
+    pub fn remove_person_location(&mut self, persons: &[PersonIdx], day: u32, locations: &[u32]) {
+        if self.location_person_loc.is_empty() {
+            return;
+        }
+        for &p in persons {
+            let cell = p.get() * self.n_days + day as usize;
+            let row = cell * self.n_locations;
+            for &loc in locations {
+                let idx = row + loc as usize;
+                self.location_person_loc[idx] = self.location_person_loc[idx].saturating_sub(1);
+                if self.location_person_loc[idx] == 0 {
+                    let before = self.location_person_distinct[cell]
+                        .saturating_sub(self.location_person_threshold);
+                    self.location_person_distinct[cell] =
+                        self.location_person_distinct[cell].saturating_sub(1);
+                    let after = self.location_person_distinct[cell]
+                        .saturating_sub(self.location_person_threshold);
+                    self.location_person_excess_total -= before - after;
+                }
+            }
+        }
+    }
+
+    /// What the currently over-cap distinct-location days cost, at the
+    /// configured weight(s) — O(1), read straight off
+    /// `location_group_excess_total`/`location_person_excess_total` rather
+    /// than rescanned. Mirrors [`Self::max_daily_span_cost`].
+    pub fn location_change_cost(&self, group_weight: f64, person_weight: f64) -> f64 {
+        self.location_group_excess_total as f64 * group_weight
+            + self.location_person_excess_total as f64 * person_weight
+    }
+
+    /// Sum of `weight` over every currently over-cap `(entity, day)` cell this
+    /// occupant participates in, for `ruin_worst`'s attribution. Mirrors
+    /// [`Self::max_daily_span_ruin_cost`].
+    pub fn location_change_ruin_cost(
+        &self,
+        groups: &[GroupIdx],
+        persons: &[PersonIdx],
+        day: u32,
+        group_weight: f64,
+        person_weight: f64,
+    ) -> f64 {
+        let mut cost = 0.0;
+        if group_weight != 0.0 && !self.location_group_distinct.is_empty() {
+            for &g in groups {
+                let cell = g.get() * self.n_days + day as usize;
+                if self.location_group_distinct[cell] > self.location_group_threshold {
+                    cost += group_weight;
+                }
+            }
+        }
+        if person_weight != 0.0 && !self.location_person_distinct.is_empty() {
+            for &p in persons {
+                let cell = p.get() * self.n_days + day as usize;
+                if self.location_person_distinct[cell] > self.location_person_threshold {
+                    cost += person_weight;
+                }
+            }
+        }
+        cost
+    }
+
     // -- scheduling pattern ---------------------------------------------------
 
     pub fn distributed_rules(&self) -> &[PatternAdherenceInstance] {
@@ -2377,6 +2676,8 @@ mod tests {
             vec![],
             vec![],
             1,
+            vec![],
+            1,
         );
         let g = [GroupIdx(0)];
 
@@ -2414,6 +2715,8 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
+            1,
             vec![],
             1,
         );
@@ -2464,6 +2767,8 @@ mod tests {
             vec![],
             vec![],
             1,
+            vec![],
+            1,
         );
         load(&mut term);
         assert_eq!(term.share_violations(), 0);
@@ -2487,6 +2792,8 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
+            1,
             vec![],
             1,
         );
@@ -2519,6 +2826,8 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
+            1,
             vec![],
             1,
         );
@@ -2559,6 +2868,8 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
+            1,
             vec![],
             1,
         );
@@ -2605,6 +2916,8 @@ mod tests {
             vec![],
             vec![],
             1,
+            vec![],
+            1,
         );
         let g = [GroupIdx(0)];
         a.apply_share("lecture", &g, 0, true, true);
@@ -2640,6 +2953,8 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
+            1,
             vec![],
             1,
         );
@@ -2685,6 +3000,8 @@ mod tests {
             vec![],
             vec![],
             1,
+            vec![],
+            1,
         );
         let g = [GroupIdx(0)];
 
@@ -2727,6 +3044,8 @@ mod tests {
             vec![],
             vec![],
             1,
+            vec![],
+            1,
         );
         let g = [GroupIdx(0)];
         a.add_group_compactness(&g, 0, &[SlotIdx(0)]);
@@ -2754,6 +3073,8 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
+            1,
             vec![],
             1,
         );
@@ -2791,6 +3112,8 @@ mod tests {
             vec![],
             vec![],
             1,
+            vec![],
+            1,
         );
         a.add_person_compactness(&[PersonIdx(0)], 0, &[SlotIdx(0), SlotIdx(3)]);
         assert_eq!(a.compactness_cost(0.0, 1.0), 0.0, "Person axis was never configured");
@@ -2820,6 +3143,8 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
+            1,
             vec![],
             1,
         );
@@ -2858,6 +3183,8 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
+            1,
             vec![],
             1,
         );
@@ -2905,6 +3232,8 @@ mod tests {
             vec![],
             vec![],
             1,
+            vec![],
+            1,
         );
         let o = OfferingIdx(0);
         a.add_distributed(o, 0);
@@ -2933,6 +3262,8 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
+            1,
             vec![],
             1,
         );
@@ -2968,6 +3299,8 @@ mod tests {
             vec![],
             vec![],
             1,
+            vec![],
+            1,
         );
         let o = OfferingIdx(0);
         a.add_distributed(o, 0);
@@ -3001,6 +3334,8 @@ mod tests {
             vec![],
             vec![],
             1,
+            vec![],
+            1,
         );
         a.add_distributed(OfferingIdx(0), 0);
         a.add_distributed(OfferingIdx(0), 1);
@@ -3030,6 +3365,8 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
+            1,
             vec![],
             1,
         );
@@ -3069,6 +3406,8 @@ mod tests {
             vec![],
             vec![],
             1,
+            vec![],
+            1,
         );
         let o = OfferingIdx(0);
         a.add_block(o, 0);
@@ -3102,6 +3441,8 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
+            1,
             vec![],
             1,
         );
