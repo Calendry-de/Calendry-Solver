@@ -26,13 +26,13 @@
 use std::collections::{HashMap, HashSet};
 
 use calendry_solver_core::aggregates::{
-    CompactnessInstance, DayMixInstance, ShareInstance, ShareWindow,
+    CompactnessInstance, DayMixInstance, PatternAdherenceInstance, ShareInstance, ShareWindow,
 };
 use calendry_solver_core::ids::{GroupIdx, OfferingIdx, PersonIdx, RoomIdx, SlotIdx};
 use calendry_solver_core::preferences::{Preference, PreferenceInstance};
 use calendry_solver_core::problem::{
     ConstraintInstance, ConstraintSet, FixedSpec, Immovable, OfferingSpec, PlacementVar, Problem,
-    ProblemSpec, ScopeSpec, Unavailability, classify_immovable,
+    ProblemSpec, SchedulingPattern, ScopeSpec, Unavailability, classify_immovable,
 };
 use calendry_solver_core::slots::{SlotTable, WeekKind, WeekSpec};
 use calendry_solver_core::soft::{SoftInstance, SoftParams};
@@ -442,6 +442,15 @@ fn build_offerings(
                 }
             })?,
             eligible_rooms,
+            // An unrecognized or absent value maps to `Unspecified` — the same
+            // "solve exactly as today" inert reading the wire field's own doc
+            // comment promises, not an error: a stale value here is not a
+            // structural problem the way an unknown id is.
+            scheduling_pattern: match pb::SchedulingPattern::try_from(o.scheduling_pattern) {
+                Ok(pb::SchedulingPattern::Distributed) => SchedulingPattern::Distributed,
+                Ok(pb::SchedulingPattern::Block) => SchedulingPattern::Block,
+                _ => SchedulingPattern::Unspecified,
+            },
         });
     }
 
@@ -951,6 +960,40 @@ fn build_constraints(input: &pb::SolverInput) -> Result<ConstraintSet, ConvertEr
                 return Err(ConvertError::ConstraintTypeUnimplemented {
                     constraint: c.id.clone(),
                     constraint_type: "LecturerConsistency",
+                });
+            }
+            /*
+             * SOFT, aggregate over an Offering's placed Sessions — see
+             * `crate::problem::ConstraintSet::distributed_pattern_adherence`'s
+             * own doc. Empty message: which Offerings this instance actually
+             * prices comes from `Offering.scheduling_pattern`, read at
+             * `Problem::build` time, not from anything on this message.
+             */
+            Some(Params::DistributedPatternAdherence(_)) => {
+                if c.weight < 0.0 || c.weight.is_nan() {
+                    return Err(ConvertError::NegativeSoftWeight {
+                        constraint: c.id.clone(),
+                        weight: c.weight,
+                    });
+                }
+                set.distributed_pattern_adherence
+                    .push(PatternAdherenceInstance {
+                        id: c.id.clone(),
+                        kinds: c.applies_to_kinds.clone(),
+                        weight: c.weight,
+                    });
+            }
+            Some(Params::BlockPatternAdherence(_)) => {
+                if c.weight < 0.0 || c.weight.is_nan() {
+                    return Err(ConvertError::NegativeSoftWeight {
+                        constraint: c.id.clone(),
+                        weight: c.weight,
+                    });
+                }
+                set.block_pattern_adherence.push(PatternAdherenceInstance {
+                    id: c.id.clone(),
+                    kinds: c.applies_to_kinds.clone(),
+                    weight: c.weight,
                 });
             }
             None => {

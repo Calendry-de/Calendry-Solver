@@ -84,7 +84,9 @@ fn score_one(problem: &Problem, solution: &Solution, state: &SearchState, mv: &M
         "score_batch expects the placement to be unplaced; ruin removes it first"
     );
 
-    let candidate = Occupant::of_offering(offering).with_room(mv.to.room);
+    let candidate = Occupant::of_offering(offering)
+        .with_room(mv.to.room)
+        .with_offering(problem.placement(mv.placement).offering);
     if !state.is_free(problem, &candidate, &span) {
         return Score(f64::INFINITY);
     }
@@ -124,6 +126,10 @@ fn score_one(problem: &Problem, solution: &Solution, state: &SearchState, mv: &M
     // `Objective::compactness_cost` once this candidate is actually chosen.
     let compactness_delta = state.compactness_delta(problem, &candidate, &span);
 
+    // Same ranking-signal contract as `compactness_delta` — see its own
+    // comment above — for the Offering-scoped counterpart.
+    let scheduling_pattern_delta = state.scheduling_pattern_delta(problem, &candidate, &span);
+
     Score(
         problem
             .soft
@@ -142,7 +148,8 @@ fn score_one(problem: &Problem, solution: &Solution, state: &SearchState, mv: &M
             + problem.movement_cost(mv.placement, mv.to.start, mv.to.room)
             + share_penalty
             + day_mix_penalty
-            + compactness_delta,
+            + compactness_delta
+            + scheduling_pattern_delta,
     )
 }
 

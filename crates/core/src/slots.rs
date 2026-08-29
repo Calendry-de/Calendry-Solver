@@ -185,6 +185,19 @@ impl SlotTable {
         (0..self.flags.len() as u32).map(SlotIdx)
     }
 
+    /// `slot`'s position within its RECURRING weekly shape — its position
+    /// within `active_days`, times `blocks_per_day`, plus its block — dropping
+    /// the week axis. The same collapse `PreferenceModel`'s table uses, and
+    /// arithmetic here rather than a lookup: `day_index` (from `flags`) is
+    /// already `week * active_days.len() + day_position`, so `day_index %
+    /// active_days.len()` recovers the day position with no search.
+    #[inline]
+    pub fn weekly_cell(&self, slot: SlotIdx) -> usize {
+        let f = self.flags(slot);
+        let day_position = f.day_index as usize % self.active_days.len();
+        day_position * self.blocks_per_day as usize + f.block as usize
+    }
+
     fn day_position(&self, iso_weekday: u32) -> Option<usize> {
         self.active_days.iter().position(|&d| d == iso_weekday)
     }

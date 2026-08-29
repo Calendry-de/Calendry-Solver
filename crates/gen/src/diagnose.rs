@@ -116,6 +116,10 @@ fn single(axis: fn(&mut Enforce), base: Enforce) -> Enforce {
         // guessing at one.
         compactness_group: false,
         compactness_person: false,
+        // Same reasoning as Compactness above: neither pattern type has a
+        // `would_worsen`-style predicate to probe.
+        distributed_pattern: false,
+        block_pattern: false,
     };
     axis(&mut e);
     axis(&mut probe);
@@ -129,6 +133,8 @@ fn single(axis: fn(&mut Enforce), base: Enforce) -> Enforce {
         day_mix: e.day_mix && base.day_mix,
         compactness_group: e.compactness_group && base.compactness_group,
         compactness_person: e.compactness_person && base.compactness_person,
+        distributed_pattern: e.distributed_pattern && base.distributed_pattern,
+        block_pattern: e.block_pattern && base.block_pattern,
     }
 }
 

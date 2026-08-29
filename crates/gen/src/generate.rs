@@ -13,7 +13,7 @@ use calendry_solver_core::ids::{GroupIdx, OfferingIdx, PersonIdx, RoomIdx, SlotI
 use calendry_solver_core::preferences::{Preference, PreferenceInstance};
 use calendry_solver_core::problem::{
     ConstraintInstance, ConstraintSet, FixedSpec, Group, Immovable, OfferingSpec, Person,
-    PlacementVar, Problem, ProblemSpec, Room, Unavailability,
+    PlacementVar, Problem, ProblemSpec, Room, SchedulingPattern, Unavailability,
 };
 use calendry_solver_core::rng::Rng;
 use calendry_solver_core::slots::{SlotTable, WeekKind, WeekSpec};
@@ -548,6 +548,7 @@ fn build_offerings(
             groups: vec![GroupIdx(group)],
             participants: vec![],
             eligible_rooms,
+            scheduling_pattern: SchedulingPattern::Unspecified,
         });
 
         for n in 0..params.sessions_per_offering {
@@ -597,6 +598,7 @@ fn build_offerings(
                 groups: vec![GroupIdx(group)],
                 participants: vec![],
                 eligible_rooms,
+                scheduling_pattern: SchedulingPattern::Unspecified,
             });
 
             for n in 0..params.sessions_per_offering {
@@ -810,8 +812,11 @@ fn build_constraints(params: &InstanceParams, slots: &SlotTable) -> ConstraintSe
             .collect(),
         soft,
         // Not part of any calibrated preset — `docs/PERFORMANCE.md` has no
-        // Compactness measurement to keep stable, unlike the types above.
+        // measurement of any of these three to keep stable, unlike the types
+        // above.
         compactness: Vec::new(),
+        distributed_pattern_adherence: Vec::new(),
+        block_pattern_adherence: Vec::new(),
     }
 }
 

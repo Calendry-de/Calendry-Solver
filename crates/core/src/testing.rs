@@ -29,7 +29,7 @@ use crate::ids::{GroupIdx, OfferingIdx, PersonIdx, RoomIdx, SlotIdx};
 use crate::preferences::{Preference, PreferenceInstance};
 use crate::problem::{
     ConstraintInstance, ConstraintSet, FixedSpec, Group, Immovable, OfferingSpec, Person,
-    PlacementVar, Problem, ProblemSpec, Room,
+    PlacementVar, Problem, ProblemSpec, Room, SchedulingPattern,
 };
 use crate::slots::{SlotTable, WeekKind, WeekSpec};
 
@@ -94,7 +94,16 @@ pub fn offering(id: &str, count: u32, eligible: &[u32]) -> OfferingSpec {
         groups: vec![],
         participants: vec![],
         eligible_rooms: eligible.iter().map(|&r| RoomIdx(r)).collect(),
+        scheduling_pattern: SchedulingPattern::Unspecified,
     }
+}
+
+/// `offering` with its scheduling pattern overridden — the fixtures
+/// exercising `DistributedPatternAdherence`/`BlockPatternAdherence` need this;
+/// every other fixture stays at the default `Unspecified`.
+pub fn with_pattern(mut o: OfferingSpec, pattern: SchedulingPattern) -> OfferingSpec {
+    o.scheduling_pattern = pattern;
+    o
 }
 
 pub fn with_groups(mut o: OfferingSpec, groups: &[u32]) -> OfferingSpec {
@@ -169,6 +178,8 @@ pub fn all_constraints() -> ConstraintSet {
         person_preference_fit: Vec::new(),
         soft: Vec::new(),
         compactness: Vec::new(),
+        distributed_pattern_adherence: Vec::new(),
+        block_pattern_adherence: Vec::new(),
     }
 }
 

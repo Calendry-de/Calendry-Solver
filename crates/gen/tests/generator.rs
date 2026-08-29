@@ -231,7 +231,9 @@ fn the_hierarchy_is_a_three_level_forest() {
 /// Offerings are mutually exclusive in time and their Sessions need one slot
 /// each. With `shared == 0` they are independent and can be stacked.
 fn overlapping_problem(offerings: u32, sessions: u32, shared: usize) -> Problem {
-    use calendry_solver_core::problem::{OfferingSpec, Person, ProblemBuilder, Room};
+    use calendry_solver_core::problem::{
+        OfferingSpec, Person, ProblemBuilder, Room, SchedulingPattern,
+    };
     use calendry_solver_core::slots::{SlotTable, WeekKind, WeekSpec};
 
     // Built through `ProblemBuilder`, which hands back the typed index of
@@ -287,6 +289,7 @@ fn overlapping_problem(offerings: u32, sessions: u32, shared: usize) -> Problem 
             groups: vec![],
             participants,
             eligible_rooms: vec![room],
+            scheduling_pattern: SchedulingPattern::Unspecified,
         });
     }
 

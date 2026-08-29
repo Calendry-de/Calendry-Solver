@@ -5,7 +5,9 @@
 //! (group closures, attendee lists) is precomputed here rather than in the hot
 //! loop.
 
-use crate::aggregates::{Aggregates, CompactnessInstance, DayMixInstance, ShareInstance};
+use crate::aggregates::{
+    Aggregates, CompactnessInstance, DayMixInstance, PatternAdherenceInstance, ShareInstance,
+};
 use crate::bitset::BitSet;
 use crate::groups::{GroupClosure, GroupCycle};
 use crate::ids::{GroupIdx, OfferingIdx, PersonIdx, PlacementIdx, RoomIdx, SlotIdx};
@@ -231,6 +233,17 @@ pub struct ConstraintSet {
     /// rather than reusing the mixed-day ones. See
     /// [`crate::aggregates::CompactnessInstance`].
     pub compactness: Vec<CompactnessInstance>,
+    /// SOFT, aggregate over an Offering's placed Sessions. Prices an Offering
+    /// tagged [`SchedulingPattern::Distributed`] for spreading across more
+    /// than one weekly slot. See
+    /// [`crate::aggregates::PatternAdherenceInstance`] and
+    /// `BlockPatternAdherence` for the other pattern's counterpart.
+    pub distributed_pattern_adherence: Vec<PatternAdherenceInstance>,
+    /// SOFT, aggregate over an Offering's placed Sessions across the WHOLE
+    /// TERM. Prices an Offering tagged [`SchedulingPattern::Block`] for
+    /// spreading across a wide span of weeks — the `Compactness` gap shape, at
+    /// week granularity and scoped by Offering.
+    pub block_pattern_adherence: Vec<PatternAdherenceInstance>,
 }
 
 fn any_covers(list: &[ConstraintInstance], kind: &str) -> bool {
@@ -257,6 +270,8 @@ pub struct Enforce {
     pub day_mix: bool,
     pub compactness_group: bool,
     pub compactness_person: bool,
+    pub distributed_pattern: bool,
+    pub block_pattern: bool,
 }
 
 impl ConstraintSet {
@@ -273,6 +288,11 @@ impl ConstraintSet {
             day_mix: self.online_onsite_same_day.iter().any(|c| c.covers(kind)),
             compactness_group: self.compactness.iter().any(|c| c.group && c.covers(kind)),
             compactness_person: self.compactness.iter().any(|c| c.person && c.covers(kind)),
+            distributed_pattern: self
+                .distributed_pattern_adherence
+                .iter()
+                .any(|c| c.covers(kind)),
+            block_pattern: self.block_pattern_adherence.iter().any(|c| c.covers(kind)),
         }
     }
 }
@@ -280,6 +300,21 @@ impl ConstraintSet {
 // ---------------------------------------------------------------------------
 // Input specs -> derived problem
 // ---------------------------------------------------------------------------
+
+/// How an Offering's demand should distribute across the Term. See
+/// `DistributedPatternAdherence`/`BlockPatternAdherence` in
+/// `crate::aggregates` for the two constraint types that read this.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub enum SchedulingPattern {
+    /// Untouched by either enforcing constraint type — today's implicit
+    /// behavior, unchanged.
+    #[default]
+    Unspecified,
+    /// A consistent weekly slot for the whole Term.
+    Distributed,
+    /// The whole demand concentrated into a short contiguous window.
+    Block,
+}
 
 /// An Offering as supplied, before closures are derived.
 #[derive(Clone, Debug)]
@@ -292,6 +327,7 @@ pub struct OfferingSpec {
     pub groups: Vec<GroupIdx>,
     pub participants: Vec<PersonIdx>,
     pub eligible_rooms: Vec<RoomIdx>,
+    pub scheduling_pattern: SchedulingPattern,
 }
 
 /// Immovable occupancy as supplied, before closures are derived.
@@ -355,6 +391,7 @@ pub struct Offering {
     /// attended by its classes, but a class Session does not implicate the
     /// cohort.
     pub subtree_groups: Vec<GroupIdx>,
+    pub scheduling_pattern: SchedulingPattern,
 }
 
 #[derive(Clone, Debug)]
@@ -373,6 +410,11 @@ pub struct FixedOccupancy {
     pub reason: Immovable,
     pub enforce: Enforce,
     pub subtree_groups: Vec<GroupIdx>,
+    /// Resolved from `offering`'s own `scheduling_pattern`, so a locked or
+    /// past Session of a patterned Offering still counts toward its
+    /// distinct-slot/idle-week tracking. `Unspecified` — inert — for an
+    /// ad-hoc Session realizing no Offering.
+    pub scheduling_pattern: SchedulingPattern,
 }
 
 /// Which Offerings this run is actively placing.
@@ -642,6 +684,10 @@ pub struct Problem {
     pub compactness_group_weight: f64,
     /// The Person-axis counterpart of `compactness_group_weight`.
     pub compactness_person_weight: f64,
+    /// Summed weight of every configured `DistributedPatternAdherence`.
+    pub distributed_pattern_weight: f64,
+    /// Summed weight of every configured `BlockPatternAdherence`.
+    pub block_pattern_weight: f64,
 
     /// Whether each Offering is being actively placed by this run, indexed by
     /// [`OfferingIdx`]. Read it through [`Problem::in_scope`].
@@ -761,6 +807,7 @@ impl Problem {
                 duration_blocks: o.duration_blocks,
                 lecturers: o.lecturers,
                 eligible_rooms: o.eligible_rooms,
+                scheduling_pattern: o.scheduling_pattern,
             })
             .collect();
 
@@ -772,6 +819,10 @@ impl Problem {
                 conflict_groups: closure.expand_conflict(&f.groups),
                 attendees: attendees_of(&f.groups, &f.persons),
                 own_groups: f.groups,
+                scheduling_pattern: f
+                    .offering
+                    .and_then(|o| derived_offerings.get(o.get()))
+                    .map_or(SchedulingPattern::Unspecified, |o| o.scheduling_pattern),
                 session_id: f.session_id,
                 offering: f.offering,
                 kind: f.kind,
@@ -783,6 +834,8 @@ impl Problem {
             })
             .collect();
 
+        let weekly_cells = slots.active_days().len() * slots.blocks_per_day() as usize;
+
         let aggregate_template = Aggregates::new(
             groups.len(),
             slots.day_count(),
@@ -792,6 +845,10 @@ impl Problem {
             slots.len(),
             slots.blocks_per_day() as usize,
             constraints.compactness.clone(),
+            derived_offerings.len(),
+            weekly_cells,
+            constraints.distributed_pattern_adherence.clone(),
+            constraints.block_pattern_adherence.clone(),
         );
 
         let day_mix_weight: f64 = constraints
@@ -810,6 +867,16 @@ impl Problem {
             .compactness
             .iter()
             .filter(|i| i.person)
+            .map(|i| i.weight)
+            .sum();
+        let distributed_pattern_weight: f64 = constraints
+            .distributed_pattern_adherence
+            .iter()
+            .map(|i| i.weight)
+            .sum();
+        let block_pattern_weight: f64 = constraints
+            .block_pattern_adherence
+            .iter()
             .map(|i| i.weight)
             .sum();
 
@@ -908,6 +975,8 @@ impl Problem {
             movement_weight,
             compactness_group_weight,
             compactness_person_weight,
+            distributed_pattern_weight,
+            block_pattern_weight,
             in_scope,
             placement_counts,
             immovable_counts,
@@ -1088,6 +1157,7 @@ mod tests {
                 groups: vec![GroupIdx(0)],
                 participants: vec![],
                 eligible_rooms: vec![],
+                scheduling_pattern: SchedulingPattern::Unspecified,
             },
             OfferingSpec {
                 id: "leaf".into(),
@@ -1098,6 +1168,7 @@ mod tests {
                 groups: vec![GroupIdx(2)],
                 participants: vec![],
                 eligible_rooms: vec![],
+                scheduling_pattern: SchedulingPattern::Unspecified,
             },
         ];
 
@@ -1131,6 +1202,7 @@ mod tests {
             groups: vec![],
             participants: vec![],
             eligible_rooms: vec![],
+            scheduling_pattern: SchedulingPattern::Unspecified,
         }
     }
 

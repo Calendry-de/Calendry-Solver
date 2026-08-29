@@ -198,6 +198,7 @@ impl<'p> Trial<'p> {
             soft: self.soft,
             day_mix_cost: self.state.day_mix_cost(self.problem),
             compactness_cost: self.state.compactness_cost(self.problem),
+            scheduling_pattern_cost: self.state.scheduling_pattern_cost(self.problem),
         }
     }
 
@@ -658,7 +659,9 @@ fn ruin_worst(
                     .cost(p, pl.start, &problem.rooms[pl.room.get()].features)
                 + problem.movement_cost(p, pl.start, pl.room);
             if let Some(span) = problem.slots.span(pl.start, o.duration_blocks) {
-                let occupant = Occupant::of_offering(o).with_room(pl.room);
+                let occupant = Occupant::of_offering(o)
+                    .with_room(pl.room)
+                    .with_offering(problem.placement(p).offering);
                 cost += state.aggregate_ruin_score(problem, &occupant, &span);
             }
             (p, cost)
@@ -854,6 +857,7 @@ pub fn recompute_objective(problem: &Problem, solution: &Solution) -> Objective 
         soft,
         day_mix_cost: state.day_mix_cost(problem),
         compactness_cost: state.compactness_cost(problem),
+        scheduling_pattern_cost: state.scheduling_pattern_cost(problem),
     }
 }
 
@@ -991,6 +995,8 @@ pub fn objectives_agree(a: Objective, b: Objective) -> bool {
         && (a.day_mix_cost - b.day_mix_cost).abs() <= 1e-9 * (1.0 + a.day_mix_cost.abs())
         && (a.compactness_cost - b.compactness_cost).abs()
             <= 1e-9 * (1.0 + a.compactness_cost.abs())
+        && (a.scheduling_pattern_cost - b.scheduling_pattern_cost).abs()
+            <= 1e-9 * (1.0 + a.scheduling_pattern_cost.abs())
 }
 
 /// Set so a move worsening the objective by the average instance weight is

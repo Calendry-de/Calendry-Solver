@@ -61,6 +61,12 @@ pub struct Occupant<'a> {
     /// `own_groups` expanded downward only — the scope for the two
     /// Group-aggregate types.
     pub subtree_groups: &'a [GroupIdx],
+    /// `None` for an ad-hoc Session realizing no Offering. Needed only by the
+    /// two per-Offering aggregate types (`DistributedPatternAdherence`/
+    /// `BlockPatternAdherence`), which key their counters by Offering rather
+    /// than by Group or Person.
+    pub offering: Option<crate::ids::OfferingIdx>,
+    pub scheduling_pattern: crate::problem::SchedulingPattern,
     /// Slots blocked by this Session's lecturers' blackouts. `None` for
     /// immovable occupancy, which is never re-placed.
     pub veto_slots: Option<&'a crate::bitset::BitSet>,
@@ -80,6 +86,8 @@ impl<'a> Occupant<'a> {
             conflict_groups: &o.conflict_groups,
             attendees: &o.attendees,
             subtree_groups: &o.subtree_groups,
+            offering: None,
+            scheduling_pattern: o.scheduling_pattern,
             veto_slots: Some(&o.veto_slots),
             group_veto_slots: Some(&o.group_veto_slots),
             enforce: o.enforce,
@@ -95,6 +103,8 @@ impl<'a> Occupant<'a> {
             conflict_groups: &f.conflict_groups,
             attendees: &f.attendees,
             subtree_groups: &f.subtree_groups,
+            offering: f.offering,
+            scheduling_pattern: f.scheduling_pattern,
             // Immovable occupancy is never re-placed, so its own blackout mask
             // is irrelevant; it still contributes to every other counter.
             veto_slots: None,
@@ -105,6 +115,14 @@ impl<'a> Occupant<'a> {
 
     pub fn with_room(mut self, room: RoomIdx) -> Self {
         self.room = Some(room);
+        self
+    }
+
+    /// This Session with `offering` set — see the field's own doc for why
+    /// `of_offering` cannot set it directly (it is built from `&Offering`
+    /// alone, with no index of its own to attach).
+    pub fn with_offering(mut self, offering: crate::ids::OfferingIdx) -> Self {
+        self.offering = Some(offering);
         self
     }
 
@@ -368,7 +386,13 @@ impl SearchState {
     ) -> Option<(Occupant<'p>, Vec<SlotIdx>)> {
         let o = problem.offering_of(p);
         let span = problem.slots.span(at.start, o.duration_blocks)?;
-        Some((Occupant::of_offering(o).with_room(at.room), span))
+        let offering = problem.placement(p).offering;
+        Some((
+            Occupant::of_offering(o)
+                .with_room(at.room)
+                .with_offering(offering),
+            span,
+        ))
     }
 
     /// Mark placement `p` busy at `at`.
@@ -590,6 +614,34 @@ impl SearchState {
             }
         }
 
+        // Scheduling pattern: keyed by Offering, so unlike every axis above it
+        // needs `who.offering` — `None` for an ad-hoc Session, which has
+        // nothing for either pattern to mean. Gated on BOTH the kind-scoped
+        // `Enforce` flag AND the Offering's own tagged pattern: an instance
+        // enabled for this kind still only prices the Offerings actually
+        // tagged for its pattern.
+        if let Some(offering) = who.offering {
+            use crate::problem::SchedulingPattern;
+            if who.enforce.distributed_pattern
+                && who.scheduling_pattern == SchedulingPattern::Distributed
+            {
+                let cell = problem.slots.weekly_cell(span[0]);
+                if add {
+                    self.aggregates.add_distributed(offering, cell);
+                } else {
+                    self.aggregates.remove_distributed(offering, cell);
+                }
+            }
+            if who.enforce.block_pattern && who.scheduling_pattern == SchedulingPattern::Block {
+                let week = problem.slots.flags(span[0]).week;
+                if add {
+                    self.aggregates.add_block(offering, week);
+                } else {
+                    self.aggregates.remove_block(offering, week);
+                }
+            }
+        }
+
         if who.subtree_groups.is_empty() {
             return;
         }
@@ -653,6 +705,22 @@ impl SearchState {
             );
         }
 
+        if let Some(offering) = who.offering {
+            use crate::problem::SchedulingPattern;
+            if who.enforce.distributed_pattern
+                && who.scheduling_pattern == SchedulingPattern::Distributed
+            {
+                score += self
+                    .aggregates
+                    .distributed_ruin_cost(offering, problem.distributed_pattern_weight);
+            }
+            if who.enforce.block_pattern && who.scheduling_pattern == SchedulingPattern::Block {
+                score += self
+                    .aggregates
+                    .block_ruin_cost(offering, problem.block_pattern_weight);
+            }
+        }
+
         if who.subtree_groups.is_empty() {
             return score;
         }
@@ -689,6 +757,47 @@ impl SearchState {
         }
         self.aggregates
             .compactness_cost(problem.compactness_group_weight, problem.compactness_person_weight)
+    }
+
+    /// What every Offering's scheduling-pattern adherence currently costs, at
+    /// the configured weights. Same read-off-a-running-total treatment as
+    /// `compactness_cost`.
+    pub fn scheduling_pattern_cost(&self, problem: &Problem) -> f64 {
+        self.aggregates
+            .distributed_cost(problem.distributed_pattern_weight)
+            + self.aggregates.block_cost(problem.block_pattern_weight)
+    }
+
+    /// The scheduling-pattern cost DELTA of placing `who` at `span` — a
+    /// ranking signal for repair candidates, exactly like
+    /// `compactness_delta`: not filed as an exact per-placement charge, only
+    /// pointing the right way. The authoritative charge is what `mark`/
+    /// `unmark` maintain in `Objective::scheduling_pattern_cost`.
+    pub fn scheduling_pattern_delta(
+        &self,
+        problem: &Problem,
+        who: &Occupant<'_>,
+        span: &[SlotIdx],
+    ) -> f64 {
+        let Some(offering) = who.offering else {
+            return 0.0;
+        };
+        if span.is_empty() {
+            return 0.0;
+        }
+        use crate::problem::SchedulingPattern;
+        match who.scheduling_pattern {
+            SchedulingPattern::Distributed if who.enforce.distributed_pattern => {
+                let cell = problem.slots.weekly_cell(span[0]);
+                self.aggregates.distributed_delta(offering, cell) as f64
+                    * problem.distributed_pattern_weight
+            }
+            SchedulingPattern::Block if who.enforce.block_pattern => {
+                let week = problem.slots.flags(span[0]).week;
+                self.aggregates.block_delta(offering, week) as f64 * problem.block_pattern_weight
+            }
+            _ => 0.0,
+        }
     }
 
     /// Whether placing this Session here would push a share cell over its

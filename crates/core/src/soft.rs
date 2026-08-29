@@ -358,6 +358,12 @@ pub struct Objective {
     /// belongs to a day, not to any one placement, so it is read whole off
     /// `Aggregates`' running totals rather than accumulated as a delta.
     pub compactness_cost: f64,
+    /// `DistributedPatternAdherence` and `BlockPatternAdherence` together,
+    /// already multiplied by each type's configured weight. Read whole off
+    /// `Aggregates`' running totals for the same reason `compactness_cost` is:
+    /// both belong to an Offering's whole placed set, not to any one
+    /// placement.
+    pub scheduling_pattern_cost: f64,
 }
 
 impl Objective {
@@ -374,7 +380,11 @@ impl Objective {
 
     #[inline]
     pub fn total(&self, hard_penalty: f64) -> f64 {
-        self.hard() as f64 * hard_penalty + self.soft + self.day_mix_cost + self.compactness_cost
+        self.hard() as f64 * hard_penalty
+            + self.soft
+            + self.day_mix_cost
+            + self.compactness_cost
+            + self.scheduling_pattern_cost
     }
 }
 
@@ -583,6 +593,7 @@ mod tests {
             soft: 7.0 * 4.0,
             day_mix_cost: 0.0,
             compactness_cost: 0.0,
+            scheduling_pattern_cost: 0.0,
         };
         let one_unplaced = Objective {
             unplaced: 1,
@@ -590,6 +601,7 @@ mod tests {
             soft: 0.0,
             day_mix_cost: 0.0,
             compactness_cost: 0.0,
+            scheduling_pattern_cost: 0.0,
         };
         assert!(one_unplaced.total(hard_penalty) > all_soft_bad.total(hard_penalty));
     }
@@ -614,6 +626,7 @@ mod tests {
             soft: 7.0 * 4.0,
             day_mix_cost: day_mix_weight * cells,
             compactness_cost: 0.0,
+            scheduling_pattern_cost: 0.0,
         };
         let one_unplaced = Objective {
             unplaced: 1,
@@ -621,6 +634,7 @@ mod tests {
             soft: 0.0,
             day_mix_cost: 0.0,
             compactness_cost: 0.0,
+            scheduling_pattern_cost: 0.0,
         };
 
         assert!(one_unplaced.total(hard_penalty) > everything_mixed.total(hard_penalty));

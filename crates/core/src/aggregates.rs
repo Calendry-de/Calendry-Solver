@@ -28,7 +28,7 @@
 //!   exactly how `ExactFrequency` already behaves for unplaced Sessions, rather
 //!   than a new exception.
 
-use crate::ids::{GroupIdx, PersonIdx, SlotIdx};
+use crate::ids::{GroupIdx, OfferingIdx, PersonIdx, SlotIdx};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum ShareWindow {
@@ -114,6 +114,24 @@ impl CompactnessInstance {
     }
 }
 
+/// One configured `DistributedPatternAdherence` or `BlockPatternAdherence` —
+/// identical shape, kept as one type since both are just "id, kind scope,
+/// weight" with the actual per-pattern logic living in `Aggregates` instead.
+#[derive(Clone, Debug)]
+pub struct PatternAdherenceInstance {
+    pub id: String,
+    /// Empty means all kinds.
+    pub kinds: Vec<String>,
+    pub weight: f64,
+}
+
+impl PatternAdherenceInstance {
+    #[inline]
+    pub fn covers(&self, kind: &str) -> bool {
+        self.kinds.is_empty() || self.kinds.iter().any(|k| k == kind)
+    }
+}
+
 /// Per-instance counters for one `MaxOnlineShare` rule.
 #[derive(Clone, Debug)]
 struct ShareCounters {
@@ -185,6 +203,32 @@ pub struct Aggregates {
     blocks_per_day: usize,
 
     compactness_rules: Vec<CompactnessInstance>,
+
+    /// `[offering * weekly_cells + cell]` — how many of that Offering's
+    /// currently-placed Sessions occupy that weekly `(weekday, block)` slot.
+    /// Same "no week axis" collapse `PreferenceModel`'s table uses, and for
+    /// the same reason: a slot Offering O uses in week 3 is the same slot for
+    /// this purpose as one it uses in week 7. Empty when
+    /// `DistributedPatternAdherence` is not configured for any kind.
+    distributed_cell: Vec<u32>,
+    /// `[offering]` — how many DISTINCT weekly cells are currently nonzero for
+    /// that Offering. `distributed_total` is the sum of `nonzero - 1` (floored
+    /// at 0) over every Offering, maintained as a delta exactly like the gap
+    /// totals above, not rescanned.
+    distributed_nonzero: Vec<u32>,
+    distributed_total: u32,
+    weekly_cells: usize,
+
+    /// `[offering * n_weeks + week]` — the `BlockPatternAdherence` counterpart
+    /// of `group_slot`, at week granularity instead of block granularity and
+    /// scoped by Offering instead of Group/Person. Empty when
+    /// `BlockPatternAdherence` is not configured for any kind.
+    block_week: Vec<u32>,
+    block_gap_total: u32,
+    n_weeks: usize,
+
+    distributed_rules: Vec<PatternAdherenceInstance>,
+    block_rules: Vec<PatternAdherenceInstance>,
 }
 
 impl Aggregates {
@@ -198,6 +242,10 @@ impl Aggregates {
         n_slots: usize,
         blocks_per_day: usize,
         compactness_rules: Vec<CompactnessInstance>,
+        n_offerings: usize,
+        weekly_cells: usize,
+        distributed_rules: Vec<PatternAdherenceInstance>,
+        block_rules: Vec<PatternAdherenceInstance>,
     ) -> Self {
         let groups = n_groups.max(1);
         let counters = rules
@@ -214,6 +262,9 @@ impl Aggregates {
         let track_group = compactness_rules.iter().any(|r| r.group);
         let track_person = compactness_rules.iter().any(|r| r.person);
         let slots = n_slots.max(1);
+        let offerings = n_offerings.max(1);
+        let cells = weekly_cells.max(1);
+        let weeks = n_weeks.max(1);
 
         Self {
             online_day: vec![0; groups * n_days.max(1)],
@@ -228,6 +279,27 @@ impl Aggregates {
             n_slots: slots,
             blocks_per_day: blocks_per_day.max(1),
             compactness_rules,
+            distributed_cell: if distributed_rules.is_empty() {
+                Vec::new()
+            } else {
+                vec![0; offerings * cells]
+            },
+            distributed_nonzero: if distributed_rules.is_empty() {
+                Vec::new()
+            } else {
+                vec![0; offerings]
+            },
+            distributed_total: 0,
+            weekly_cells: cells,
+            block_week: if block_rules.is_empty() {
+                Vec::new()
+            } else {
+                vec![0; offerings * weeks]
+            },
+            block_gap_total: 0,
+            n_weeks: weeks,
+            distributed_rules,
+            block_rules,
         }
     }
 
@@ -589,6 +661,178 @@ impl Aggregates {
         cost
     }
 
+    // -- scheduling pattern ---------------------------------------------------
+
+    pub fn distributed_rules(&self) -> &[PatternAdherenceInstance] {
+        &self.distributed_rules
+    }
+
+    pub fn block_rules(&self) -> &[PatternAdherenceInstance] {
+        &self.block_rules
+    }
+
+    #[inline]
+    fn distributed_index(&self, offering: OfferingIdx, cell: usize) -> usize {
+        offering.get() * self.weekly_cells + cell
+    }
+
+    /// Mark one Session of `offering` occupying weekly `cell`, updating
+    /// `distributed_total` by the exact delta. A no-op when
+    /// `DistributedPatternAdherence` is not configured for any kind.
+    pub fn add_distributed(&mut self, offering: OfferingIdx, cell: usize) {
+        if self.distributed_cell.is_empty() {
+            return;
+        }
+        let idx = self.distributed_index(offering, cell);
+        self.distributed_cell[idx] += 1;
+        if self.distributed_cell[idx] == 1 {
+            let o = offering.get();
+            let before = self.distributed_nonzero[o].saturating_sub(1);
+            self.distributed_nonzero[o] += 1;
+            let after = self.distributed_nonzero[o].saturating_sub(1);
+            self.distributed_total += after - before;
+        }
+    }
+
+    pub fn remove_distributed(&mut self, offering: OfferingIdx, cell: usize) {
+        if self.distributed_cell.is_empty() {
+            return;
+        }
+        let idx = self.distributed_index(offering, cell);
+        self.distributed_cell[idx] = self.distributed_cell[idx].saturating_sub(1);
+        if self.distributed_cell[idx] == 0 {
+            let o = offering.get();
+            let before = self.distributed_nonzero[o].saturating_sub(1);
+            self.distributed_nonzero[o] = self.distributed_nonzero[o].saturating_sub(1);
+            let after = self.distributed_nonzero[o].saturating_sub(1);
+            self.distributed_total -= before - after;
+        }
+    }
+
+    /// What every Offering's distinct-weekly-slot count over one currently
+    /// costs, at the configured weight. O(1), read off `distributed_total`.
+    pub fn distributed_cost(&self, weight: f64) -> f64 {
+        self.distributed_total as f64 * weight
+    }
+
+    /// Read-only preview of `add_distributed`'s delta, for ranking a candidate
+    /// before it is committed — see `group_compactness_delta`'s exact same
+    /// contract.
+    pub fn distributed_delta(&self, offering: OfferingIdx, cell: usize) -> i64 {
+        if self.distributed_cell.is_empty() {
+            return 0;
+        }
+        let idx = self.distributed_index(offering, cell);
+        if self.distributed_cell[idx] > 0 {
+            return 0; // this weekly slot is already in use; one more Session there adds nothing new
+        }
+        let o = offering.get();
+        let before = self.distributed_nonzero[o].saturating_sub(1);
+        let after = (self.distributed_nonzero[o] + 1).saturating_sub(1);
+        (after - before) as i64
+    }
+
+    /// For `ruin_worst`: every placement of an Offering currently using more
+    /// than one distinct weekly slot is charged, matching the day-mix/
+    /// compactness convention of attributing to every occupant of a
+    /// currently-bad cell rather than only the provably-useful ones.
+    pub fn distributed_ruin_cost(&self, offering: OfferingIdx, weight: f64) -> f64 {
+        if weight == 0.0 || self.distributed_nonzero.is_empty() {
+            return 0.0;
+        }
+        if self.distributed_nonzero[offering.get()] > 1 { weight } else { 0.0 }
+    }
+
+    #[inline]
+    fn block_row(&self, offering: OfferingIdx) -> usize {
+        offering.get() * self.n_weeks
+    }
+
+    /// Mark one Session of `offering` occupying `week`, updating
+    /// `block_gap_total` by the exact delta — the `Compactness` gap shape, at
+    /// week granularity and scoped by Offering. A no-op when
+    /// `BlockPatternAdherence` is not configured for any kind.
+    pub fn add_block(&mut self, offering: OfferingIdx, week: u32) {
+        if self.block_week.is_empty() {
+            return;
+        }
+        let row = self.block_row(offering);
+        let cells = &mut self.block_week[row..row + self.n_weeks];
+        let before = Self::gap_u32(cells);
+        cells[week as usize] += 1;
+        let after = Self::gap_u32(cells);
+        self.block_gap_total =
+            (i64::from(self.block_gap_total) + i64::from(after) - i64::from(before)) as u32;
+    }
+
+    pub fn remove_block(&mut self, offering: OfferingIdx, week: u32) {
+        if self.block_week.is_empty() {
+            return;
+        }
+        let row = self.block_row(offering);
+        let cells = &mut self.block_week[row..row + self.n_weeks];
+        let before = Self::gap_u32(cells);
+        cells[week as usize] = cells[week as usize].saturating_sub(1);
+        let after = Self::gap_u32(cells);
+        self.block_gap_total =
+            (i64::from(self.block_gap_total) + i64::from(after) - i64::from(before)) as u32;
+    }
+
+    /// What every Offering's idle-weeks count currently costs, at the
+    /// configured weight. O(1), read off `block_gap_total`.
+    pub fn block_cost(&self, weight: f64) -> f64 {
+        self.block_gap_total as f64 * weight
+    }
+
+    /// Read-only preview of `add_block`'s delta — see
+    /// `group_compactness_delta`'s exact same contract.
+    pub fn block_delta(&self, offering: OfferingIdx, week: u32) -> i64 {
+        if self.block_week.is_empty() {
+            return 0;
+        }
+        let row = self.block_row(offering);
+        let cells = &self.block_week[row..row + self.n_weeks];
+        let before = Self::gap_u32(cells);
+        let after = Self::gap_u32_with_index(cells, week as usize);
+        i64::from(after) - i64::from(before)
+    }
+
+    /// For `ruin_worst`: every placement of an Offering currently spanning any
+    /// idle week is charged. Same convention as `distributed_ruin_cost`.
+    pub fn block_ruin_cost(&self, offering: OfferingIdx, weight: f64) -> f64 {
+        if weight == 0.0 || self.block_week.is_empty() {
+            return 0.0;
+        }
+        let row = self.block_row(offering);
+        if Self::gap_u32(&self.block_week[row..row + self.n_weeks]) > 0 {
+            weight
+        } else {
+            0.0
+        }
+    }
+
+    /// Like [`Self::gap_u32_with`], but treating a single index (a WEEK, not a
+    /// span of slots) as already occupied. `BlockPatternAdherence`'s candidate
+    /// touches exactly one week per Session, unlike a compactness Session's
+    /// span which can cover more than one block.
+    #[inline]
+    fn gap_u32_with_index(cells: &[u32], extra: usize) -> u32 {
+        let mut first = None;
+        let mut last = 0usize;
+        let mut occupied = 0u32;
+        for (i, &c) in cells.iter().enumerate() {
+            if c > 0 || i == extra {
+                first.get_or_insert(i);
+                last = i;
+                occupied += 1;
+            }
+        }
+        match first {
+            Some(f) => (last - f + 1) as u32 - occupied,
+            None => 0,
+        }
+    }
+
     // -- share -------------------------------------------------------------
 
     /// Add or remove one Session from every rule covering `kind`, keeping the
@@ -780,7 +1024,7 @@ mod tests {
 
     #[test]
     fn day_mix_blocks_only_the_opposite_mode() {
-        let mut a = Aggregates::new(2, 3, 1, vec![], 0, 0, 1, vec![]);
+        let mut a = Aggregates::new(2, 3, 1, vec![], 0, 0, 1, vec![], 0, 0, vec![], vec![]);
         let g = [GroupIdx(0)];
 
         assert!(a.day_mix_allows(&g, &[0], true), "empty day accepts anything");
@@ -799,8 +1043,20 @@ mod tests {
 
     #[test]
     fn share_violation_tracks_a_moving_denominator() {
-        let mut a =
-            Aggregates::new(1, 1, 1, vec![rule(0.5, ShareWindow::PerTerm)], 0, 0, 1, vec![]);
+        let mut a = Aggregates::new(
+            1,
+            1,
+            1,
+            vec![rule(0.5, ShareWindow::PerTerm)],
+            0,
+            0,
+            1,
+            vec![],
+            0,
+            0,
+            vec![],
+            vec![],
+        );
         let g = [GroupIdx(0)];
 
         // 1 online of 1 total = 100% > 50%.
@@ -828,14 +1084,38 @@ mod tests {
         };
 
         // PER_TERM: 2 online of 4 = 50%, allowed.
-        let mut term =
-            Aggregates::new(1, 1, 2, vec![rule(0.5, ShareWindow::PerTerm)], 0, 0, 1, vec![]);
+        let mut term = Aggregates::new(
+            1,
+            1,
+            2,
+            vec![rule(0.5, ShareWindow::PerTerm)],
+            0,
+            0,
+            1,
+            vec![],
+            0,
+            0,
+            vec![],
+            vec![],
+        );
         load(&mut term);
         assert_eq!(term.share_violations(), 0);
 
         // PER_WEEK: week 0 is 2 of 2 = 100%, violated.
-        let mut week =
-            Aggregates::new(1, 1, 2, vec![rule(0.5, ShareWindow::PerWeek)], 0, 0, 1, vec![]);
+        let mut week = Aggregates::new(
+            1,
+            1,
+            2,
+            vec![rule(0.5, ShareWindow::PerWeek)],
+            0,
+            0,
+            1,
+            vec![],
+            0,
+            0,
+            vec![],
+            vec![],
+        );
         load(&mut week);
         assert_eq!(week.share_violations(), 1);
     }
@@ -855,6 +1135,10 @@ mod tests {
             0,
             0,
             1,
+            vec![],
+            0,
+            0,
+            vec![],
             vec![],
         );
         a.apply_share("staff_meeting", &[GroupIdx(0)], 0, true, true);
@@ -876,7 +1160,7 @@ mod tests {
             max_ratio: 0.5,
             window: ShareWindow::PerTerm,
         };
-        let mut a = Aggregates::new(1, 1, 1, vec![scoped], 0, 0, 1, vec![]);
+        let mut a = Aggregates::new(1, 1, 1, vec![scoped], 0, 0, 1, vec![], 0, 0, vec![], vec![]);
         let g = [GroupIdx(0)];
         // 2 online of 2 total = 100% > 50%: violated.
         a.apply_share("lecture", &g, 0, true, true);
@@ -900,8 +1184,20 @@ mod tests {
 
     #[test]
     fn share_violation_cost_is_zero_once_the_cell_stops_violating() {
-        let mut a =
-            Aggregates::new(1, 1, 1, vec![rule(0.5, ShareWindow::PerTerm)], 0, 0, 1, vec![]);
+        let mut a = Aggregates::new(
+            1,
+            1,
+            1,
+            vec![rule(0.5, ShareWindow::PerTerm)],
+            0,
+            0,
+            1,
+            vec![],
+            0,
+            0,
+            vec![],
+            vec![],
+        );
         let g = [GroupIdx(0)];
         a.apply_share("lecture", &g, 0, true, true);
         assert_eq!(a.share_violation_cost("lecture", &g, 0, 100.0), 100.0);
@@ -918,7 +1214,7 @@ mod tests {
     /// cell are charged — the asymmetry above does not apply here.
     #[test]
     fn day_mix_violation_cost_charges_both_modes_in_a_mixed_cell() {
-        let mut a = Aggregates::new(1, 2, 1, vec![], 0, 0, 1, vec![]);
+        let mut a = Aggregates::new(1, 2, 1, vec![], 0, 0, 1, vec![], 0, 0, vec![], vec![]);
         let g = [GroupIdx(0)];
         a.add_day_mode(&g, &[0], true);
         assert_eq!(a.day_mix_violation_cost(&g, &[0], 10.0), 0.0, "one mode alone is not mixed");
@@ -941,7 +1237,20 @@ mod tests {
     #[test]
     fn group_compactness_counts_idle_blocks_between_first_and_last() {
         // 4 blocks/day, 1 day, 1 group.
-        let mut a = Aggregates::new(1, 1, 1, vec![], 0, 4, 4, vec![compactness_rule(true, false)]);
+        let mut a = Aggregates::new(
+            1,
+            1,
+            1,
+            vec![],
+            0,
+            4,
+            4,
+            vec![compactness_rule(true, false)],
+            0,
+            0,
+            vec![],
+            vec![],
+        );
         let g = [GroupIdx(0)];
 
         a.add_group_compactness(&g, 0, &[SlotIdx(0)]);
@@ -963,7 +1272,20 @@ mod tests {
 
     #[test]
     fn compactness_cost_is_zero_at_zero_weight_regardless_of_gaps() {
-        let mut a = Aggregates::new(1, 1, 1, vec![], 0, 4, 4, vec![compactness_rule(true, false)]);
+        let mut a = Aggregates::new(
+            1,
+            1,
+            1,
+            vec![],
+            0,
+            4,
+            4,
+            vec![compactness_rule(true, false)],
+            0,
+            0,
+            vec![],
+            vec![],
+        );
         let g = [GroupIdx(0)];
         a.add_group_compactness(&g, 0, &[SlotIdx(0)]);
         a.add_group_compactness(&g, 0, &[SlotIdx(3)]);
@@ -972,7 +1294,20 @@ mod tests {
 
     #[test]
     fn person_compactness_uses_the_same_gap_rule_as_group() {
-        let mut a = Aggregates::new(0, 1, 1, vec![], 1, 4, 4, vec![compactness_rule(false, true)]);
+        let mut a = Aggregates::new(
+            0,
+            1,
+            1,
+            vec![],
+            1,
+            4,
+            4,
+            vec![compactness_rule(false, true)],
+            0,
+            0,
+            vec![],
+            vec![],
+        );
         let p = [PersonIdx(0)];
 
         a.add_person_compactness(&p, 0, &[SlotIdx(0)]);
@@ -987,7 +1322,20 @@ mod tests {
     fn an_axis_not_selected_by_any_rule_is_never_allocated_or_tracked() {
         // Only the Group axis is configured — Person tracking must be a no-op,
         // not silently inert data that still costs memory.
-        let mut a = Aggregates::new(1, 1, 1, vec![], 1, 4, 4, vec![compactness_rule(true, false)]);
+        let mut a = Aggregates::new(
+            1,
+            1,
+            1,
+            vec![],
+            1,
+            4,
+            4,
+            vec![compactness_rule(true, false)],
+            0,
+            0,
+            vec![],
+            vec![],
+        );
         a.add_person_compactness(&[PersonIdx(0)], 0, &[SlotIdx(0), SlotIdx(3)]);
         assert_eq!(a.compactness_cost(0.0, 1.0), 0.0, "Person axis was never configured");
     }
@@ -998,7 +1346,20 @@ mod tests {
         // once (group_double_booking disabled) — removing ONE must not clear
         // the block the other still holds. A bitset would get this wrong; the
         // count must not.
-        let mut a = Aggregates::new(1, 1, 1, vec![], 0, 4, 4, vec![compactness_rule(true, false)]);
+        let mut a = Aggregates::new(
+            1,
+            1,
+            1,
+            vec![],
+            0,
+            4,
+            4,
+            vec![compactness_rule(true, false)],
+            0,
+            0,
+            vec![],
+            vec![],
+        );
         let g = [GroupIdx(0)];
         a.add_group_compactness(&g, 0, &[SlotIdx(0)]);
         a.add_group_compactness(&g, 0, &[SlotIdx(1)]);
@@ -1016,7 +1377,20 @@ mod tests {
 
     #[test]
     fn the_read_only_delta_preview_matches_what_add_actually_charges() {
-        let mut a = Aggregates::new(1, 1, 1, vec![], 0, 4, 4, vec![compactness_rule(true, false)]);
+        let mut a = Aggregates::new(
+            1,
+            1,
+            1,
+            vec![],
+            0,
+            4,
+            4,
+            vec![compactness_rule(true, false)],
+            0,
+            0,
+            vec![],
+            vec![],
+        );
         let g = [GroupIdx(0)];
         a.add_group_compactness(&g, 0, &[SlotIdx(0)]);
 
@@ -1030,5 +1404,106 @@ mod tests {
             after - before,
             "the preview must match the real charge exactly"
         );
+    }
+
+    // -- scheduling pattern ---------------------------------------------------
+
+    fn pattern_rule() -> PatternAdherenceInstance {
+        PatternAdherenceInstance { id: "p".into(), kinds: vec![], weight: 1.0 }
+    }
+
+    #[test]
+    fn distributed_costs_nothing_for_one_consistent_weekly_slot() {
+        // 3 weeks, weekly_cells = 2 (say Monday/Tuesday), 1 Offering.
+        let mut a =
+            Aggregates::new(0, 0, 3, vec![], 0, 0, 1, vec![], 1, 2, vec![pattern_rule()], vec![]);
+        let o = OfferingIdx(0);
+        a.add_distributed(o, 0);
+        a.add_distributed(o, 0);
+        a.add_distributed(o, 0);
+        assert_eq!(a.distributed_cost(1.0), 0.0, "every Session shares one weekly slot");
+    }
+
+    #[test]
+    fn distributed_charges_per_extra_distinct_slot() {
+        let mut a =
+            Aggregates::new(0, 0, 3, vec![], 0, 0, 1, vec![], 1, 2, vec![pattern_rule()], vec![]);
+        let o = OfferingIdx(0);
+        a.add_distributed(o, 0);
+        assert_eq!(a.distributed_cost(1.0), 0.0, "the first slot used is free");
+        a.add_distributed(o, 1);
+        assert_eq!(a.distributed_cost(1.0), 1.0, "a second distinct slot costs one");
+
+        a.remove_distributed(o, 1);
+        assert_eq!(a.distributed_cost(1.0), 0.0, "back to one slot, back to zero");
+    }
+
+    #[test]
+    fn distributed_delta_preview_matches_the_real_charge() {
+        let mut a =
+            Aggregates::new(0, 0, 3, vec![], 0, 0, 1, vec![], 1, 2, vec![pattern_rule()], vec![]);
+        let o = OfferingIdx(0);
+        a.add_distributed(o, 0);
+
+        let preview = a.distributed_delta(o, 1);
+        let before = a.distributed_cost(1.0);
+        a.add_distributed(o, 1);
+        let after = a.distributed_cost(1.0);
+        assert_eq!(preview as f64, after - before);
+    }
+
+    #[test]
+    fn distributed_is_independent_per_offering() {
+        let mut a =
+            Aggregates::new(0, 0, 3, vec![], 0, 0, 1, vec![], 2, 2, vec![pattern_rule()], vec![]);
+        a.add_distributed(OfferingIdx(0), 0);
+        a.add_distributed(OfferingIdx(0), 1);
+        // Offering 1 uses only one slot: must not be charged for Offering 0's spread.
+        a.add_distributed(OfferingIdx(1), 0);
+        assert_eq!(a.distributed_cost(1.0), 1.0, "only Offering 0 contributes");
+    }
+
+    #[test]
+    fn block_counts_idle_weeks_between_first_and_last() {
+        // 5 weeks, 1 Offering.
+        let mut a =
+            Aggregates::new(0, 0, 5, vec![], 0, 0, 1, vec![], 1, 1, vec![], vec![pattern_rule()]);
+        let o = OfferingIdx(0);
+        a.add_block(o, 0);
+        assert_eq!(a.block_cost(1.0), 0.0, "one week has nothing between");
+
+        a.add_block(o, 3);
+        assert_eq!(a.block_cost(1.0), 2.0, "weeks 1 and 2 sit idle between 0 and 3");
+
+        a.add_block(o, 1);
+        assert_eq!(a.block_cost(1.0), 1.0, "only week 2 is idle now");
+
+        a.remove_block(o, 3);
+        assert_eq!(a.block_cost(1.0), 0.0, "0 and 1 are adjacent: no gap left");
+    }
+
+    #[test]
+    fn block_delta_preview_matches_the_real_charge() {
+        let mut a =
+            Aggregates::new(0, 0, 5, vec![], 0, 0, 1, vec![], 1, 1, vec![], vec![pattern_rule()]);
+        let o = OfferingIdx(0);
+        a.add_block(o, 0);
+
+        let preview = a.block_delta(o, 3);
+        let before = a.block_cost(1.0);
+        a.add_block(o, 3);
+        let after = a.block_cost(1.0);
+        assert_eq!(preview as f64, after - before);
+    }
+
+    #[test]
+    fn an_axis_not_configured_costs_nothing_regardless_of_activity() {
+        // Only BLOCK is configured; DISTRIBUTED tracking must be entirely
+        // absent, not merely zero-weighted.
+        let mut a =
+            Aggregates::new(0, 0, 5, vec![], 0, 0, 1, vec![], 1, 2, vec![], vec![pattern_rule()]);
+        a.add_distributed(OfferingIdx(0), 0);
+        a.add_distributed(OfferingIdx(0), 1);
+        assert_eq!(a.distributed_cost(1.0), 0.0, "distributed was never configured");
     }
 }
