@@ -31,9 +31,9 @@ use calendry_solver_core::aggregates::{
 use calendry_solver_core::ids::{GroupIdx, OfferingIdx, PersonIdx, RoomIdx, SlotIdx};
 use calendry_solver_core::preferences::{Preference, PreferenceInstance};
 use calendry_solver_core::problem::{
-    ConstraintInstance, ConstraintSet, FixedSpec, Immovable, MaxConcurrentOnlineInstance,
-    OfferingSpec, PlacementVar, Problem, ProblemSpec, Room, SchedulingPattern, ScopeSpec,
-    Unavailability, classify_immovable,
+    CapacityWasteInstance, ConstraintInstance, ConstraintSet, FixedSpec, Immovable,
+    MaxConcurrentOnlineInstance, OfferingSpec, PlacementVar, Problem, ProblemSpec, Room,
+    SchedulingPattern, ScopeSpec, Unavailability, classify_immovable,
 };
 use calendry_solver_core::slots::{SlotTable, WeekKind, WeekSpec};
 use calendry_solver_core::soft::{SoftInstance, SoftParams};
@@ -469,6 +469,7 @@ fn build_offerings(
             eligible_rooms,
             required_room_count: o.required_room_count,
             eligible_room_combinations,
+            min_capacity: o.min_capacity,
             // An unrecognized or absent value maps to `Unspecified` — the same
             // "solve exactly as today" inert reading the wire field's own doc
             // comment promises, not an error: a stale value here is not a
@@ -1112,10 +1113,19 @@ fn build_constraints(input: &pb::SolverInput) -> Result<ConstraintSet, ConvertEr
             // an evaluator, same discipline `LecturerConsistency` above uses:
             // a tenant configuring one of these gets a clear refusal, never a
             // silently inert setting.
-            Some(Params::MinimizeCapacityWaste(_)) => {
-                return Err(ConvertError::ConstraintTypeUnimplemented {
-                    constraint: c.id.clone(),
-                    constraint_type: "MinimizeCapacityWaste",
+            // Built — see `crate::problem::Problem::capacity_waste_cost`.
+            Some(Params::MinimizeCapacityWaste(p)) => {
+                if c.weight < 0.0 || c.weight.is_nan() {
+                    return Err(ConvertError::NegativeSoftWeight {
+                        constraint: c.id.clone(),
+                        weight: c.weight,
+                    });
+                }
+                set.minimize_capacity_waste.push(CapacityWasteInstance {
+                    id: c.id.clone(),
+                    kinds: c.applies_to_kinds.clone(),
+                    weight: c.weight,
+                    waste_ratio_threshold: p.waste_ratio_threshold,
                 });
             }
             Some(Params::MinimizeLocationChange(_)) => {

@@ -551,6 +551,7 @@ fn build_offerings(
             eligible_rooms,
             required_room_count: 0,
             eligible_room_combinations: vec![],
+            min_capacity: 0,
             scheduling_pattern: SchedulingPattern::Unspecified,
         });
 
@@ -603,6 +604,7 @@ fn build_offerings(
                 eligible_rooms,
                 required_room_count: 0,
                 eligible_room_combinations: vec![],
+                min_capacity: 0,
                 scheduling_pattern: SchedulingPattern::Unspecified,
             });
 
@@ -793,6 +795,7 @@ fn build_constraints(params: &InstanceParams, slots: &SlotTable) -> ConstraintSe
         // asserting on in the benchmark baseline.
         group_size_fits_room: Vec::new(),
         max_concurrent_online_sessions: Vec::new(),
+        minimize_capacity_waste: Vec::new(),
         // Weight 5 mirrors the app catalogue's `defaultWeight`, so generated
         // benchmark instances price a mixed day the way a real tenant does.
         online_onsite_same_day: vec![DayMixInstance {

@@ -215,6 +215,10 @@ impl<'p> Trial<'p> {
         }
         self.solution.set(p, Some(at));
         let o = self.problem.offering_of(p);
+        let capacity: u32 = at
+            .all_rooms()
+            .map(|r| self.problem.rooms[r.get()].capacity)
+            .sum();
         self.soft += at
             .all_rooms()
             .map(|r| self.problem.soft.cost(o.soft_profile, at.start, r))
@@ -224,7 +228,8 @@ impl<'p> Trial<'p> {
                 at.start,
                 &self.problem.rooms[at.room.get()].features,
             )
-            + self.problem.movement_cost(p, at.start, at.room);
+            + self.problem.movement_cost(p, at.start, at.room)
+            + self.problem.capacity_waste_cost(o, capacity);
         self.unplaced -= 1;
         self.journal.push(Change::Placed(p, at));
         true
@@ -238,6 +243,10 @@ impl<'p> Trial<'p> {
         debug_assert!(released, "a placed Session's span must still resolve");
         self.solution.set(p, None);
         let o = self.problem.offering_of(p);
+        let capacity: u32 = at
+            .all_rooms()
+            .map(|r| self.problem.rooms[r.get()].capacity)
+            .sum();
         self.soft -= at
             .all_rooms()
             .map(|r| self.problem.soft.cost(o.soft_profile, at.start, r))
@@ -247,7 +256,8 @@ impl<'p> Trial<'p> {
                 at.start,
                 &self.problem.rooms[at.room.get()].features,
             )
-            + self.problem.movement_cost(p, at.start, at.room);
+            + self.problem.movement_cost(p, at.start, at.room)
+            + self.problem.capacity_waste_cost(o, capacity);
         self.unplaced += 1;
         self.journal.push(Change::Removed(p, at));
         Some(at)
@@ -660,6 +670,10 @@ fn ruin_worst(
             // by what they cost, and a Session sitting on a slot its lecturer
             // asked to avoid — or away from where a minimize-movement policy
             // wants it — is exactly what it should pick up.
+            let capacity: u32 = pl
+                .all_rooms()
+                .map(|r| problem.rooms[r.get()].capacity)
+                .sum();
             let mut cost = pl
                 .all_rooms()
                 .map(|r| problem.soft.cost(o.soft_profile, pl.start, r))
@@ -667,7 +681,8 @@ fn ruin_worst(
                 + problem
                     .preferences
                     .cost(p, pl.start, &problem.rooms[pl.room.get()].features)
-                + problem.movement_cost(p, pl.start, pl.room);
+                + problem.movement_cost(p, pl.start, pl.room)
+                + problem.capacity_waste_cost(o, capacity);
             if let Some(span) = problem.slots.span(pl.start, o.duration_blocks) {
                 let occupant = Occupant::of_offering(o)
                     .with_room(pl.room)
@@ -852,6 +867,10 @@ pub fn recompute_objective(problem: &Problem, solution: &Solution) -> Objective 
         match solution.get(p) {
             Some(pl) => {
                 let o = problem.offering_of(p);
+                let capacity: u32 = pl
+                    .all_rooms()
+                    .map(|r| problem.rooms[r.get()].capacity)
+                    .sum();
                 soft += pl
                     .all_rooms()
                     .map(|r| problem.soft.cost(o.soft_profile, pl.start, r))
@@ -859,7 +878,8 @@ pub fn recompute_objective(problem: &Problem, solution: &Solution) -> Objective 
                     + problem
                         .preferences
                         .cost(p, pl.start, &problem.rooms[pl.room.get()].features)
-                    + problem.movement_cost(p, pl.start, pl.room);
+                    + problem.movement_cost(p, pl.start, pl.room)
+                    + problem.capacity_waste_cost(o, capacity);
             }
             None => unplaced += 1,
         }

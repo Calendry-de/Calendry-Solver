@@ -414,10 +414,6 @@ fn every_staged_p2_type_is_unimplemented_not_invalid() {
 
     let cases: Vec<(&str, Params)> = vec![
         (
-            "MinimizeCapacityWaste",
-            Params::MinimizeCapacityWaste(pb::MinimizeCapacityWaste::default()),
-        ),
-        (
             "MinimizeLocationChange",
             Params::MinimizeLocationChange(pb::MinimizeLocationChange::default()),
         ),

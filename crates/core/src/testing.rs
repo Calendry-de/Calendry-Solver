@@ -103,6 +103,7 @@ pub fn offering(id: &str, count: u32, eligible: &[u32]) -> OfferingSpec {
         eligible_rooms: eligible.iter().map(|&r| RoomIdx(r)).collect(),
         required_room_count: 0,
         eligible_room_combinations: vec![],
+        min_capacity: 0,
         scheduling_pattern: SchedulingPattern::Unspecified,
     }
 }
@@ -165,6 +166,11 @@ pub fn with_lecturers(mut o: OfferingSpec, lecturers: &[u32]) -> OfferingSpec {
     o
 }
 
+pub fn with_min_capacity(mut o: OfferingSpec, min_capacity: u32) -> OfferingSpec {
+    o.min_capacity = min_capacity;
+    o
+}
+
 /// Expand each Offering into `required_session_count` placement variables.
 ///
 /// Thin wrapper over [`ProblemSpec::expand_placements`], kept because a few
@@ -224,6 +230,7 @@ pub fn all_constraints() -> ConstraintSet {
         // `size: 0`, so this can never fire unless a test sets a real size.
         group_size_fits_room: inst("c-group-size"),
         max_concurrent_online_sessions: Vec::new(),
+        minimize_capacity_waste: Vec::new(),
         // Weight 5 mirrors the app catalogue's `defaultWeight` for this type,
         // so a fixture's day-mix cost reads the same as a real tenant's.
         online_onsite_same_day: day_mix("c-mix", 5.0),

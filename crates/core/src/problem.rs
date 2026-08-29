@@ -253,6 +253,30 @@ pub struct ConstraintSet {
     /// independent of kind — see [`Problem::max_concurrent_online`], the
     /// derived scalar the search actually enforces.
     pub max_concurrent_online_sessions: Vec<MaxConcurrentOnlineInstance>,
+    /// SOFT, per-`(offering, room)`. Rewards a good Room-size fit — see
+    /// [`Problem::capacity_waste_cost`].
+    pub minimize_capacity_waste: Vec<CapacityWasteInstance>,
+}
+
+/// One `MinimizeCapacityWaste` instance. Not a `SoftParams` variant: unlike
+/// every table-based soft type, its cost depends on THIS Offering's own
+/// `min_capacity`, not only on `(kind-profile, slot, room)` — the same
+/// reason `PersonPreferenceFit` lives outside `SoftModel` (ADR-0026), though
+/// this needs neither slot nor day/block, so [`Problem::capacity_waste_cost`]
+/// is a plain formula rather than its own precomputed model.
+#[derive(Clone, Debug)]
+pub struct CapacityWasteInstance {
+    pub id: String,
+    pub kinds: Vec<String>,
+    pub weight: f64,
+    pub waste_ratio_threshold: f64,
+}
+
+impl CapacityWasteInstance {
+    #[inline]
+    pub fn covers(&self, kind: &str) -> bool {
+        self.kinds.is_empty() || self.kinds.iter().any(|k| k == kind)
+    }
 }
 
 /// One `MaxConcurrentOnlineSessions` instance. Not a plain
@@ -359,6 +383,14 @@ pub struct OfferingSpec {
     /// unless `required_room_count > 1`.
     pub eligible_room_combinations: Vec<(RoomIdx, [Option<RoomIdx>; MAX_ADDITIONAL_ROOMS])>,
     pub scheduling_pattern: SchedulingPattern,
+    /// The tenant-declared minimum, already spent as a HARD eligibility
+    /// filter in `convert::build_offerings` (`eligible_rooms`/
+    /// `eligible_room_combinations` never contain a Room too small for it).
+    /// Kept here too, unlike before, because `MinimizeCapacityWaste` needs
+    /// the RAW number to grade how much LARGER the assigned Room is — a
+    /// question the eligibility filter's boolean pass/fail already answered
+    /// and discarded. `0` means no requirement was ever stated.
+    pub min_capacity: u32,
 }
 
 /// Immovable occupancy as supplied, before closures are derived.
@@ -414,6 +446,8 @@ pub struct Offering {
     pub required_room_count: u32,
     /// See [`OfferingSpec::eligible_room_combinations`].
     pub eligible_room_combinations: Vec<(RoomIdx, [Option<RoomIdx>; MAX_ADDITIONAL_ROOMS])>,
+    /// See [`OfferingSpec::min_capacity`].
+    pub min_capacity: u32,
     pub enforce: Enforce,
     /// Index into the soft cost tables for this Offering's `kind`.
     pub soft_profile: usize,
@@ -907,6 +941,7 @@ impl Problem {
                 eligible_rooms: o.eligible_rooms,
                 required_room_count: o.required_room_count,
                 eligible_room_combinations: o.eligible_room_combinations,
+                min_capacity: o.min_capacity,
                 scheduling_pattern: o.scheduling_pattern,
             })
             .collect();
@@ -990,6 +1025,11 @@ impl Problem {
             .iter()
             .map(|i| i.weight)
             .sum();
+        let capacity_waste_weight: f64 = constraints
+            .minimize_capacity_waste
+            .iter()
+            .map(|i| i.weight)
+            .sum();
 
         // Built here rather than beside `SoftModel` above because it keys on
         // the PLACEMENT, so it needs the derived Offerings — a placement's
@@ -1032,11 +1072,18 @@ impl Problem {
          * movable ones stays safe for the same reason `soft.total_weight`
          * already does — a placement a term does not apply to costs it
          * nothing, which only widens the bound.
+         *
+         * THE CAPACITY-WASTE TERM IS BOUNDED THE SAME WAY `MinimizeRoomRank`
+         * IS: `capacity_waste_cost`'s saturating curve caps each covering
+         * instance's contribution at its own `weight`, so summing every
+         * instance's weight is the per-placement ceiling, same shape as
+         * `soft.total_weight`.
          */
         let hard_penalty = soft.total_weight * placements.len() as f64
             + preferences.max_cost_per_placement() * placements.len() as f64
             + day_mix_weight * aggregate_template.day_mix_cell_count() as f64
             + movement_weight * placements.len() as f64
+            + capacity_waste_weight * placements.len() as f64
             + 1.0;
 
         let n = derived_offerings.len();
@@ -1198,6 +1245,42 @@ impl Problem {
         }
     }
 
+    /// SOFT. Rewards a good Room-size fit: charges every enabled
+    /// `MinimizeCapacityWaste` instance covering `offering.kind`, scaled by
+    /// how far `capacity / offering.min_capacity` exceeds the instance's
+    /// `waste_ratio_threshold`. `capacity` is the caller's SUM across every
+    /// Room in a placement — the same "capacity is summed" convention
+    /// Multi-room Sessions established for eligibility, not a per-Room ratio
+    /// summed across the set, which would price the identical fit
+    /// differently depending on how many Rooms happened to supply it.
+    ///
+    /// `min_capacity == 0` is never penalized — a ratio against zero is
+    /// meaningless, and this Offering never asked for a minimum at all.
+    ///
+    /// WHY A SATURATING CURVE, not a raw ratio multiplier: `hard_penalty`
+    /// relies on every soft-side term being bounded by ITS OWN weight per
+    /// placement (see the derivation above), and a raw ratio has no natural
+    /// ceiling the way `MinimizeRoomRank` has the room set's own rank span
+    /// to normalize against — a 500-seat hall for a 1-person tutorial would
+    /// otherwise blow the bound open. `excess / (excess + 1)` approaches 1.0
+    /// as the ratio grows without needing a configured "worst case".
+    #[inline]
+    pub fn capacity_waste_cost(&self, offering: &Offering, capacity: u32) -> f64 {
+        if offering.min_capacity == 0 {
+            return 0.0;
+        }
+        let ratio = capacity as f64 / offering.min_capacity as f64;
+        self.constraints
+            .minimize_capacity_waste
+            .iter()
+            .filter(|i| i.covers(&offering.kind))
+            .map(|i| {
+                let excess = (ratio - i.waste_ratio_threshold).max(0.0);
+                i.weight * (excess / (excess + 1.0))
+            })
+            .sum()
+    }
+
     /// A stable label for a placement, preferring the existing Session id.
     pub fn placement_label(&self, p: PlacementIdx) -> String {
         let var = self.placement(p);
@@ -1271,6 +1354,7 @@ mod tests {
                 eligible_rooms: vec![],
                 required_room_count: 0,
                 eligible_room_combinations: vec![],
+                min_capacity: 0,
                 scheduling_pattern: SchedulingPattern::Unspecified,
             },
             OfferingSpec {
@@ -1284,6 +1368,7 @@ mod tests {
                 eligible_rooms: vec![],
                 required_room_count: 0,
                 eligible_room_combinations: vec![],
+                min_capacity: 0,
                 scheduling_pattern: SchedulingPattern::Unspecified,
             },
         ];
@@ -1320,6 +1405,7 @@ mod tests {
             eligible_rooms: vec![],
             required_room_count: 0,
             eligible_room_combinations: vec![],
+            min_capacity: 0,
             scheduling_pattern: SchedulingPattern::Unspecified,
         }
     }

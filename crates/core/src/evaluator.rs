@@ -131,6 +131,12 @@ fn score_one(problem: &Problem, solution: &Solution, state: &SearchState, mv: &M
     // comment above — for the Offering-scoped counterpart.
     let scheduling_pattern_delta = state.scheduling_pattern_delta(problem, &candidate, &span);
 
+    let capacity: u32 = mv
+        .to
+        .all_rooms()
+        .map(|r| problem.rooms[r.get()].capacity)
+        .sum();
+
     Score(
         mv.to
             .all_rooms()
@@ -141,13 +147,16 @@ fn score_one(problem: &Problem, solution: &Solution, state: &SearchState, mv: &M
             // so the delta the objective will record is the number read here.
             // The movement cost is exact for the same reason: it depends only
             // on this placement's `original` and the candidate, nothing else
-            // already placed.
+            // already placed. The capacity-waste cost is exact too — it
+            // depends only on this Offering's `min_capacity` and the
+            // candidate's own Room set.
             + problem.preferences.cost(
                 mv.placement,
                 mv.to.start,
                 &problem.rooms[mv.to.room.get()].features,
             )
             + problem.movement_cost(mv.placement, mv.to.start, mv.to.room)
+            + problem.capacity_waste_cost(offering, capacity)
             + share_penalty
             + day_mix_penalty
             + compactness_delta
