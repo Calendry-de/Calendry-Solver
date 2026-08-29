@@ -76,14 +76,26 @@ and must be done as a deliberate calibration change, not as a side effect.
 Separated from the above because it is live rather than tracked, and because the
 change belongs in `calendry`.
 
-The app sends `maxMoves: 50_000` with `maxWallMillis: 10_000` — a quarter of the
+**Update, verified 2026-08-29: this is no longer accurate.** The paragraph below
+described the app's budget as it stood before this ADR was acted on; the app now
+defaults to `maxMoves: 30_000_000` with `maxWallMillis: 30_000`, deliberately so
+the move budget binds rather than the wall clock (only move-budget termination is
+reproducible, [ADR-0006](0006-two-budgets-and-the-limit-of-determinism.md)). At
+that budget the search actually anneals: re-measured against the `ruin_worst` fix
+above, large-university's `MaxOnlineShare` violations go 308 → **0** and
+`OnlineOnsiteSameDay` mixed-day violations go 30,290 → **0**, reproducibly across
+seeds, in ~16s of the 30s allowance — see `PERFORMANCE.md`. The two levers this
+ADR called complementary have now both been spent, and together they close the
+gap the virtual-room fix opened.
+
+<details>
+<summary>Superseded — the app's budget as it stood when this ADR was written</summary>
+
+The app sent `maxMoves: 50_000` with `maxWallMillis: 10_000` — a quarter of the
 bench default that produced every number here, roughly 21 iterations and about
-0.35% of a large instance repaired. The move budget binds long before the wall
-budget, so around 9.7 of the 10 granted seconds go unused, and 5M moves (2.28 s
-at the largest preset) would fit inside the existing allowance with room to
+0.35% of a large instance repaired. The move budget bound long before the wall
+budget, so around 9.7 of the 10 granted seconds went unused, and 5M moves (2.28 s
+at the largest preset) would have fit inside the existing allowance with room to
 spare.
 
-Raising `max_moves` is also the **determinism-safe** axis: only move-budget
-termination is reproducible ([ADR-0006](0006-two-budgets-and-the-limit-of-determinism.md)),
-so spending the budget there preserves the guarantee while leaning on the wall
-clock destroys it.
+</details>

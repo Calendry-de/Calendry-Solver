@@ -278,6 +278,35 @@ outcome, not a sign the fix is broken. **Do not read a lack of movement at schoo
 scale as a reason to tune anything** — see ADR-0025's own warning against
 recalibrating to a violation count.
 
+### The other lever: the app's real move budget, re-measured 2026-08-29
+
+ADR-0025 named the move budget as the complementary fix to `ruin_worst` — LNS
+cannot anneal a rounding error away in the handful of iterations a 200k-move
+bench default buys. The app's *actual* default is not that bench default; it is
+`maxMoves: 30_000_000` / `maxWallMillis: 30_000`. Measured at that budget, on the
+same `ruin_worst`-fixed build, clean `origin/main` (`fca3a03`), release:
+
+| preset | aggregate @200k → @30M | day_mix @200k → @30M | violations @200k → @30M | solve time @30M |
+|---|---|---|---|---|
+| small-school | 3 → 2 | 250 → 0 | — | ~5.3s |
+| large-school | 22 → 11 | 1,035 → 0 | — | ~6.0s |
+| small-university | 0 → 0 | 1,050 → 0 | — | ~7.4s |
+| large-university | 308 → **0** | 30,290 → **0** | 388 → **80** | ~16.2s |
+
+large-university's 80 remaining violations are exactly the structural baseline
+ADR-0025 measured as unchanged by the virtual-room fix — i.e. nothing left
+attributable to `MaxOnlineShare` or `OnlineOnsiteSameDay`. Reproduced across 3
+seeds at large-university (aggregate 0, day_mix 0, violations 80 on all three).
+Solve time stays well inside the app's 30s wall allowance at every preset, so the
+budget is not merely large enough on paper — it is large enough in practice, with
+room to spare.
+
+**Conclusion: the two levers ADR-0025 called complementary, not alternatives,
+both are now spent, and together they close the regression.** No preset was
+recalibrated to get here — `max_online_share` and the generator's eligible-room
+filter are untouched; only the ruin-selection fix and the already-shipped app
+move budget did this.
+
 ## `PersonPreferenceFit` costs no measurable time
 
 Measured because the whole representation was chosen to make it true, so a claim
