@@ -70,17 +70,28 @@ fn a_grid_with_no_active_days_is_refused() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn the_v2_minimize_movement_policy_is_unimplemented_not_invalid() {
+fn a_negative_minimize_movement_weight_is_refused() {
     let mut s = scope(&[]);
     s.outside_scope_policy = pb::LockPolicy::MinimizeMovement as i32;
+    s.minimize_movement_weight = -1.0;
 
     let e = reject(&base_input(), &s);
-    assert!(matches!(e, ConvertError::MinimizeMovementUnsupported), "{e}");
+    assert!(matches!(e, ConvertError::NegativeMovementWeight { weight } if weight == -1.0), "{e}");
     assert_eq!(
         code_of(&e),
-        Code::Unimplemented,
-        "the caller cannot fix this by changing their data"
+        Code::InvalidArgument,
+        "the caller can fix this by sending a non-negative weight"
     );
+}
+
+#[test]
+fn a_nan_minimize_movement_weight_is_refused() {
+    let mut s = scope(&[]);
+    s.outside_scope_policy = pb::LockPolicy::MinimizeMovement as i32;
+    s.minimize_movement_weight = f64::NAN;
+
+    let e = reject(&base_input(), &s);
+    assert!(matches!(e, ConvertError::NegativeMovementWeight { weight } if weight.is_nan()), "{e}");
 }
 
 #[test]
@@ -541,7 +552,7 @@ fn every_refusal_maps_to_invalid_argument_or_unimplemented_and_nothing_else() {
         ConvertError::ShareWindowUnset { constraint: "c".into() },
         ConvertError::NotAnIsoWeekday { constraint: "c".into(), day: 9 },
         ConvertError::NegativeSoftWeight { constraint: "c".into(), weight: -1.0 },
-        ConvertError::MinimizeMovementUnsupported,
+        ConvertError::NegativeMovementWeight { weight: -1.0 },
         ConvertError::LockPolicyUnset,
         ConvertError::LecturerPoolUnsupported { offering: "o".into(), required: 1, candidates: 3 },
         ConvertError::PreferenceRolesUnsupported {

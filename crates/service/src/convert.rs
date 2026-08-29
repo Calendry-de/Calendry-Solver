@@ -40,7 +40,7 @@ use crate::dates;
 use crate::error::{ConvertError, Resolver};
 
 pub fn convert(input: &pb::SolverInput, scope: &pb::SolveScope) -> Result<Problem, ConvertError> {
-    check_lock_policy(scope)?;
+    let lock_policy = check_lock_policy(scope)?;
 
     let slots = build_grid(input)?;
     let rooms = build_rooms(input);
@@ -63,8 +63,15 @@ pub fn convert(input: &pb::SolverInput, scope: &pb::SolveScope) -> Result<Proble
         offerings: Resolver::new(&offering_index),
     };
 
-    let (placements, mut fixed) =
-        partition_sessions(input, &slots, &indexes, &offerings, &scope_offerings, reference)?;
+    let (placements, mut fixed) = partition_sessions(
+        input,
+        &slots,
+        &indexes,
+        &offerings,
+        &scope_offerings,
+        reference,
+        lock_policy,
+    )?;
 
     fixed.extend(build_external_occupancy(input, &slots, &room_index, &rooms)?);
 
@@ -99,6 +106,7 @@ pub fn convert(input: &pb::SolverInput, scope: &pb::SolveScope) -> Result<Proble
         fixed,
         constraints,
         scope: ScopeSpec::Offerings(in_scope),
+        movement_weight: lock_policy.movement_weight(),
         ..ProblemSpec::new(slots)
     })?)
 }
@@ -107,10 +115,37 @@ pub fn convert(input: &pb::SolverInput, scope: &pb::SolveScope) -> Result<Proble
 // Scope & lock policy
 // ---------------------------------------------------------------------------
 
-fn check_lock_policy(scope: &pb::SolveScope) -> Result<(), ConvertError> {
+/// The lock policy this conversion will honor, resolved from the wire enum
+/// plus (for v2) its weight. `Copy` because it is threaded through
+/// `partition_sessions` and read once per existing Session.
+#[derive(Copy, Clone, Debug)]
+enum ResolvedLockPolicy {
+    /// v1: everything outside scope is hard-locked, via `FixedSpec`.
+    Hard,
+    /// v2: an out-of-scope Session becomes a movable `PlacementVar` carrying
+    /// its `original` slot/room, charged `weight` if the search leaves it.
+    MinimizeMovement { weight: f64 },
+}
+
+impl ResolvedLockPolicy {
+    fn movement_weight(self) -> f64 {
+        match self {
+            Self::Hard => 0.0,
+            Self::MinimizeMovement { weight } => weight,
+        }
+    }
+}
+
+fn check_lock_policy(scope: &pb::SolveScope) -> Result<ResolvedLockPolicy, ConvertError> {
     match pb::LockPolicy::try_from(scope.outside_scope_policy) {
-        Ok(pb::LockPolicy::Hard) => Ok(()),
-        Ok(pb::LockPolicy::MinimizeMovement) => Err(ConvertError::MinimizeMovementUnsupported),
+        Ok(pb::LockPolicy::Hard) => Ok(ResolvedLockPolicy::Hard),
+        Ok(pb::LockPolicy::MinimizeMovement) => {
+            let weight = scope.minimize_movement_weight;
+            if weight < 0.0 || weight.is_nan() {
+                return Err(ConvertError::NegativeMovementWeight { weight });
+            }
+            Ok(ResolvedLockPolicy::MinimizeMovement { weight })
+        }
         _ => Err(ConvertError::LockPolicyUnset),
     }
 }
@@ -419,11 +454,20 @@ fn partition_sessions(
     offerings: &[OfferingSpec],
     scope_offerings: &HashSet<String>,
     reference: Option<SlotIdx>,
+    lock_policy: ResolvedLockPolicy,
 ) -> Result<(Vec<PlacementVar>, Vec<FixedSpec>), ConvertError> {
     let mut fixed = Vec::new();
     // Existing in-scope Sessions, per Offering, so a re-solve preserves Session
     // ids instead of churning them downstream.
     let mut reusable: HashMap<String, Vec<String>> = HashMap::new();
+    // Existing out-of-scope Sessions made movable by
+    // `LOCK_POLICY_MINIMIZE_MOVEMENT`, one `PlacementVar` per Session, carrying
+    // `original` so the search can be charged for leaving it. Kept separate
+    // from `reusable`/the outstanding-count loop below: those are about NEW
+    // demand for an in-scope Offering, and this is neither — no new Session is
+    // needed, and the Offering is not in scope.
+    let mut movable_out_of_scope: Vec<PlacementVar> = Vec::new();
+    let mut movable_occurrence: HashMap<usize, u32> = HashMap::new();
 
     for s in &input.existing_sessions {
         let sr = s
@@ -453,7 +497,43 @@ fn partition_sessions(
         // the caller's "warn and allow" editing UX produces both.
         let offering = ix.offerings.optional(&s.offering_id, OfferingIdx);
 
-        match classify_immovable(start, reference, s.is_locked, in_scope) {
+        let reason = classify_immovable(start, reference, s.is_locked, in_scope);
+
+        // The ONLY variant v2 relaxes (ADR-0008), and only when it CAN be
+        // relaxed: a `PlacementVar` has no room for its own lecturers/groups —
+        // every other placement is governed entirely by its Offering — so an
+        // ad-hoc Session (no Offering) has nothing to attach "movable" to and
+        // stays hard-locked regardless of policy. The moment a Session becomes
+        // movable it is a placement like any other for its Offering, so unlike
+        // `FixedSpec` below it does NOT carry its own lecturer/group/attendee
+        // snapshot — the search reads those from the Offering's current
+        // definition, same as it does for every other placement.
+        let movable = matches!(reason, Some(Immovable::OutOfScope))
+            && matches!(lock_policy, ResolvedLockPolicy::MinimizeMovement { .. })
+            && offering.is_some();
+
+        if movable {
+            let offering = offering.expect("checked by `movable` above");
+            let room =
+                if s.room_id.is_empty() {
+                    None
+                } else {
+                    Some(ix.rooms.require(&s.room_id, RoomIdx, |room| {
+                        ConvertError::UnknownRoom { context: format!("session '{}'", s.id), room }
+                    })?)
+                };
+            let occurrence = movable_occurrence.entry(offering.get()).or_insert(0);
+            movable_out_of_scope.push(PlacementVar {
+                offering,
+                occurrence: *occurrence,
+                existing_session_id: Some(s.id.clone()),
+                original: Some((start, room)),
+            });
+            *occurrence += 1;
+            continue;
+        }
+
+        match reason {
             Some(reason) => fixed.push(FixedSpec {
                 session_id: s.id.clone(),
                 offering,
@@ -514,6 +594,9 @@ fn partition_sessions(
     // Immovable Sessions already realizing each in-scope Offering. These are
     // Sessions that exist and are not going to move — locked, in the past, or
     // out of scope — so the run must place the REMAINDER, not the full count.
+    // A movable out-of-scope Session is deliberately NOT counted here: it left
+    // `fixed` for `movable_out_of_scope` above, and its Offering is not in
+    // scope, so no in-scope `outstanding` count below can see it either way.
     let mut already_realized = vec![0u32; offerings.len()];
     for f in &fixed {
         if let Some(o) = f.offering {
@@ -521,7 +604,7 @@ fn partition_sessions(
         }
     }
 
-    let mut placements = Vec::new();
+    let mut placements = movable_out_of_scope;
     for (i, o) in offerings.iter().enumerate() {
         if !scope_offerings.contains(&o.id) {
             continue;
@@ -539,6 +622,7 @@ fn partition_sessions(
                 offering: OfferingIdx(i as u32),
                 occurrence,
                 existing_session_id: reuse.get(occurrence as usize).cloned(),
+                original: None,
             });
         }
     }

@@ -641,6 +641,7 @@ fn split_occurrences(
                 offering: OfferingIdx(occ.offering),
                 occurrence: occ.index,
                 existing_session_id: None,
+                original: None,
             });
             continue;
         }
@@ -696,6 +697,7 @@ fn split_occurrences(
                 offering: OfferingIdx(occ.offering),
                 occurrence: occ.index,
                 existing_session_id: None,
+                original: None,
             }),
         }
     }

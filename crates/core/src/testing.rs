@@ -119,6 +119,7 @@ pub fn expand(offerings: &[OfferingSpec]) -> Vec<PlacementVar> {
                 offering: OfferingIdx(i as u32),
                 occurrence: occ,
                 existing_session_id: None,
+                original: None,
             });
         }
     }

@@ -4,7 +4,27 @@ Status, not decisions. The decision this records is
 [ADR-0003](adr/0003-proto-schema-as-a-pinned-submodule.md) — the schema lives in
 a separate repo, consumed as a pinned submodule.
 
-## Current pin: `855c145` = `v0.9.0`
+## Current pin: `03aed98`, one field past `v0.9.0` — **local, untagged, unpublished**
+
+`SolveScope.minimize_movement_weight` (field 4) was added on top of `855c145`
+while building "v2 minimize-movement repair mode" — see the correction below,
+which this pin bump directly falsifies. Deliberately not tagged or pushed from
+here: per ADR-0003, cutting a schema version is its own deliberate act, done in
+the `calendry-proto` repo, not a side effect of a solver-side change. Until that
+happens, treat `03aed98` as a status of *this workspace's* submodule checkout,
+not of the published package — `@mindcollaps/calendry-proto@0.9.0` on GitHub
+Packages still does not carry this field.
+
+* **`SolveScope.minimize_movement_weight`**, a plain `double`, not `optional` —
+  `0.0` is `LOCK_POLICY_MINIMIZE_MOVEMENT`'s own "track it, do not steer"
+  reading, the same one every other soft weight already gives a zero. Solver-side:
+  **done** — `crates/service/src/convert.rs` reads it, rejects negative/NaN
+  (`ConvertError::NegativeMovementWeight`), and `Problem::movement_cost` prices
+  it. See [ADR-0008](adr/0008-one-solve-mechanism-scope-plus-lock-policy.md)'s
+  "v2, landed 2026-08-29" section for the mechanism and the decisions that were
+  not obvious from the enum alone.
+
+## Previous pin: `855c145` = `v0.9.0`
 
 Published 2026-08-29: `@mindcollaps/calendry-proto@0.9.0` is on GitHub
 Packages (`publish.yml` ran for real on the tag push, not a dry run — verified
@@ -100,11 +120,12 @@ about for a tracked-gap entry.
   on `SolverOutput` are unchanged and remain authoritative for every existing
   caller.
 
-**`LOCK_POLICY_MINIMIZE_MOVEMENT` needed no proto change at all** — checked
-while surveying the P0 backlog for wire gaps, and it already exists (`model.
-proto`'s `LockPolicy` enum, value 2), refused today with
-`ConvertError::MinimizeMovementUnsupported`. "v2 minimize-movement repair
-mode" is entirely solver-side (search) work.
+**Correction: `LOCK_POLICY_MINIMIZE_MOVEMENT` was believed to need no proto
+change at all**, checked while surveying the P0 backlog for wire gaps — the
+enum value already existed (`model.proto`'s `LockPolicy`, value 2). That held
+right up until implementation started and found the enum had nothing to weigh
+a disturbance by, unlike every other soft term on the wire. See the pin section
+above: it needed exactly one field, `SolveScope.minimize_movement_weight`.
 
 Previously `6107eb2` = **`v0.7.0`**, up from `v0.2.0`. What arrived across those
 that this repo cares about:

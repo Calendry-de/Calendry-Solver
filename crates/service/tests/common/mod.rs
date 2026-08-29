@@ -158,11 +158,21 @@ pub fn locked_session(id: &str, offering_id: &str, at: pb::SlotRef) -> pb::Sessi
     pb::Session { is_locked: true, ..session(id, offering_id, at) }
 }
 
+/// A scope under `LOCK_POLICY_MINIMIZE_MOVEMENT`, weighted `weight`.
+pub fn minimize_movement_scope(ids: &[&str], weight: f64) -> pb::SolveScope {
+    pb::SolveScope {
+        outside_scope_policy: pb::LockPolicy::MinimizeMovement as i32,
+        minimize_movement_weight: weight,
+        ..scope(ids)
+    }
+}
+
 pub fn scope(ids: &[&str]) -> pb::SolveScope {
     pb::SolveScope {
         offering_ids: ids.iter().map(|s| (*s).to_string()).collect(),
         group_ids: vec![],
         outside_scope_policy: pb::LockPolicy::Hard as i32,
+        minimize_movement_weight: 0.0,
     }
 }
 

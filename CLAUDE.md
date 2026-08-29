@@ -53,7 +53,7 @@ Check any change against these. Each links to the decision behind it.
 - [ ] Room exclusivity is read from `Room::is_exclusive()`, never from a room id — [ADR-0022](docs/adr/0022-a-virtual-room-is-not-an-exclusive-resource.md)
 - [ ] A preset never moves to make a violation count fall — [ADR-0025](docs/adr/0025-maxonlineshare-is-not-enforced-by-the-search.md)
 - [ ] Past Sessions excluded from recalculation, always — [ADR-0008](docs/adr/0008-one-solve-mechanism-scope-plus-lock-policy.md)
-- [ ] Locked and out-of-scope Sessions never moved (v1: hard lock) — [ADR-0008](docs/adr/0008-one-solve-mechanism-scope-plus-lock-policy.md)
+- [ ] Locked and past Sessions never moved, in either version; out-of-scope Sessions are hard-locked under `LOCK_POLICY_HARD`, movable-but-penalized under `LOCK_POLICY_MINIMIZE_MOVEMENT` (the only variant v2 relaxes) — [ADR-0008](docs/adr/0008-one-solve-mechanism-scope-plus-lock-policy.md)
 - [ ] Group conflict checks use precomputed ancestor+descendant sets, never a live tree walk
 - [ ] Move evaluation stays behind the trait boundary — [ADR-0013](docs/adr/0013-move-evaluation-behind-a-trait.md)
 - [ ] No soft term is ever negative; a preference charges what it did *not* meet — [ADR-0026](docs/adr/0026-personpreferencefit-charges-the-unmet-fraction.md)
@@ -192,12 +192,22 @@ budget. That is measured, not suspected —
 [ADR-0025](docs/adr/0025-maxonlineshare-is-not-enforced-by-the-search.md), and
 read it before changing a preset.
 
+**`LOCK_POLICY_MINIMIZE_MOVEMENT` (v2) is built.** An out-of-scope Session
+becomes a movable `PlacementVar` carrying its `original` slot and room instead
+of hard-locked `FixedSpec` occupancy, charged `SolveScope.minimize_movement_weight`
+if the search leaves it — the ordinary per-placement soft-cost shape, same
+`Objective::soft` field every other exact-delta term uses.
+[ADR-0008](docs/adr/0008-one-solve-mechanism-scope-plus-lock-policy.md) covers
+the shape; `Immovable` already recorded *why* each Session is immovable, which
+is what made this a policy change rather than a rewrite — it relaxes exactly
+the `OutOfScope` variant, and only when the Session realizes a real Offering
+(an ad-hoc Session has no Offering to attach "movable" to, and stays
+hard-locked under either policy). Construction seeds a movable Session back at
+its original placement when nothing conflicts, so the search does not
+gratuitously pay the penalty for a move nobody asked for.
+
 Deliberately not built:
 
-* **v2 minimize-movement lock policy.** `LOCK_POLICY_MINIMIZE_MOVEMENT` returns
-  `UNIMPLEMENTED`. [ADR-0008](docs/adr/0008-one-solve-mechanism-scope-plus-lock-policy.md)
-  covers the shape; `Immovable` already records *why* each Session is immovable
-  so that v2 is a policy change rather than a rewrite.
 * **A GPU move-evaluation backend.** The seam exists and has two adapters; the
   backend does not. [ADR-0013](docs/adr/0013-move-evaluation-behind-a-trait.md).
 

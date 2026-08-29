@@ -214,7 +214,8 @@ impl<'p> Trial<'p> {
         self.solution.set(p, Some(at));
         let o = self.problem.offering_of(p);
         self.soft += self.problem.soft.cost(o.soft_profile, at.start, at.room)
-            + self.problem.preferences.cost(p, at.start);
+            + self.problem.preferences.cost(p, at.start)
+            + self.problem.movement_cost(p, at.start, at.room);
         self.unplaced -= 1;
         self.journal.push(Change::Placed(p, at));
         true
@@ -229,7 +230,8 @@ impl<'p> Trial<'p> {
         self.solution.set(p, None);
         let o = self.problem.offering_of(p);
         self.soft -= self.problem.soft.cost(o.soft_profile, at.start, at.room)
-            + self.problem.preferences.cost(p, at.start);
+            + self.problem.preferences.cost(p, at.start)
+            + self.problem.movement_cost(p, at.start, at.room);
         self.unplaced += 1;
         self.journal.push(Change::Removed(p, at));
         Some(at)
@@ -483,20 +485,49 @@ pub fn construct(problem: &Problem) -> (Solution, SearchState) {
         let slot_probe = Occupant::room_independent_probe(offering);
 
         let mut chosen = None;
-        'search: for slot in problem.slots.all() {
-            let Some(span) = problem.slots.span(slot, offering.duration_blocks) else {
-                continue;
-            };
-            if let Some(probe) = slot_probe.as_ref()
-                && !state.is_free(problem, probe, &span)
-            {
-                continue;
+
+        // A movable out-of-scope Session (`LOCK_POLICY_MINIMIZE_MOVEMENT`)
+        // already has a place it belongs; try exactly that first so
+        // construction does not gratuitously charge the movement penalty for
+        // a Session nothing has yet asked to move. Falling back to a
+        // DIFFERENT eligible room here would still count as "moved" by
+        // `Problem::movement_cost`, so there is no cheaper substitute worth
+        // trying before the general scan below — only the exact original
+        // counts as free.
+        //
+        // Gated on the original room still being ELIGIBLE for this Offering:
+        // a Session's Offering can be redefined after it was scheduled (a lab
+        // reassigned away from a room it used to be eligible for), and the
+        // room-eligibility filter is a business rule the search must never
+        // bypass, minimize-movement or not. An ineligible original falls
+        // through to the general scan below, which prices the resulting
+        // move — correctly, since it genuinely cannot stay.
+        if let Some((orig_start, Some(orig_room))) = problem.placement(p).original
+            && offering.eligible_rooms.contains(&orig_room)
+            && let Some(span) = problem.slots.span(orig_start, offering.duration_blocks)
+        {
+            let candidate = base.with_room(orig_room);
+            if state.is_free(problem, &candidate, &span) {
+                chosen = Some(Placement { start: orig_start, room: orig_room });
             }
-            for &room in &offering.eligible_rooms {
-                let candidate = base.with_room(room);
-                if state.is_free(problem, &candidate, &span) {
-                    chosen = Some(Placement { start: slot, room });
-                    break 'search;
+        }
+
+        if chosen.is_none() {
+            'search: for slot in problem.slots.all() {
+                let Some(span) = problem.slots.span(slot, offering.duration_blocks) else {
+                    continue;
+                };
+                if let Some(probe) = slot_probe.as_ref()
+                    && !state.is_free(problem, probe, &span)
+                {
+                    continue;
+                }
+                for &room in &offering.eligible_rooms {
+                    let candidate = base.with_room(room);
+                    if state.is_free(problem, &candidate, &span) {
+                        chosen = Some(Placement { start: slot, room });
+                        break 'search;
+                    }
                 }
             }
         }
@@ -607,12 +638,14 @@ fn ruin_worst(
         .map(|&p| {
             let pl = current.get(p).unwrap();
             let o = problem.offering_of(p);
-            // The preference cost is included because it IS placement-local:
-            // this operator's whole job is to rank placements by what they cost,
-            // and a Session sitting on a slot its lecturer asked to avoid is
-            // exactly what it should pick up.
+            // The preference and movement costs are included because they ARE
+            // placement-local: this operator's whole job is to rank placements
+            // by what they cost, and a Session sitting on a slot its lecturer
+            // asked to avoid — or away from where a minimize-movement policy
+            // wants it — is exactly what it should pick up.
             let mut cost = problem.soft.cost(o.soft_profile, pl.start, pl.room)
-                + problem.preferences.cost(p, pl.start);
+                + problem.preferences.cost(p, pl.start)
+                + problem.movement_cost(p, pl.start, pl.room);
             if let Some(span) = problem.slots.span(pl.start, o.duration_blocks) {
                 let occupant = Occupant::of_offering(o).with_room(pl.room);
                 cost += state.aggregate_ruin_score(problem, &occupant, &span);
@@ -791,7 +824,8 @@ pub fn recompute_objective(problem: &Problem, solution: &Solution) -> Objective 
             Some(pl) => {
                 let o = problem.offering_of(p);
                 soft += problem.soft.cost(o.soft_profile, pl.start, pl.room)
-                    + problem.preferences.cost(p, pl.start);
+                    + problem.preferences.cost(p, pl.start)
+                    + problem.movement_cost(p, pl.start, pl.room);
             }
             None => unplaced += 1,
         }
@@ -946,11 +980,17 @@ pub fn objectives_agree(a: Objective, b: Objective) -> bool {
 fn initial_temperature(problem: &Problem) -> f64 {
     // `PersonPreferenceFit` counts here too, or a run whose ONLY soft rule is
     // the preference type would start at `MIN_TEMPERATURE` and hill-climb.
-    let n = problem.soft.instances.len() + problem.preferences.instances.len();
+    // Minimize-movement joins them for the same reason: a scope-limited
+    // re-solve with no other soft rule configured would otherwise start cold.
+    let mut n = problem.soft.instances.len() + problem.preferences.instances.len();
+    let mut total = problem.soft.total_weight + problem.preferences.total_weight;
+    if problem.movement_weight > 0.0 {
+        n += 1;
+        total += problem.movement_weight;
+    }
     if n == 0 {
         return tuning::MIN_TEMPERATURE;
     }
-    let total = problem.soft.total_weight + problem.preferences.total_weight;
     let avg = total / n as f64;
     (avg / std::f64::consts::LN_2).max(tuning::MIN_TEMPERATURE)
 }
@@ -1041,5 +1081,140 @@ mod tests {
         // be the deterministic lowest-index rule `ruin_worst` documents.
         let chosen = ruin_worst(&problem, &solution, &state, &placed, 1);
         assert_eq!(chosen, vec![PlacementIdx(0)]);
+    }
+
+    // -------------------------------------------------------------------
+    // Minimize-movement (LOCK_POLICY_MINIMIZE_MOVEMENT)
+    // -------------------------------------------------------------------
+
+    /// A single movable placement, `original` set to `(orig_slot, orig_room)`.
+    /// Bypasses `testing::assemble`, which calls `expand_placements` and would
+    /// overwrite `original` with `None` — exactly the v1 shape these tests are
+    /// testing past.
+    fn movable_problem(rooms_n: u32, eligible: &[u32], original: (u32, u32)) -> Problem {
+        use crate::ids::OfferingIdx;
+        use crate::problem::{PlacementVar, ProblemSpec};
+        let (orig_slot, orig_room) = original;
+        let spec = ProblemSpec {
+            rooms: testing::rooms(rooms_n),
+            offerings: vec![testing::offering("o", 1, eligible)],
+            placements: vec![PlacementVar {
+                offering: OfferingIdx(0),
+                occurrence: 0,
+                existing_session_id: Some("s1".into()),
+                original: Some((SlotIdx(orig_slot), Some(RoomIdx(orig_room)))),
+            }],
+            movement_weight: 1.0,
+            ..ProblemSpec::new(testing::grid(4, 1))
+        };
+        Problem::build(spec).unwrap()
+    }
+
+    #[test]
+    fn construction_places_a_movable_session_back_at_its_original_slot_and_room() {
+        let problem = movable_problem(1, &[0], (2, 0));
+        let (solution, _) = construct(&problem);
+        assert_eq!(
+            solution.get(PlacementIdx(0)),
+            Some(Placement { start: SlotIdx(2), room: RoomIdx(0) }),
+            "nothing else competes for this slot, so construction must not \
+             gratuitously charge the movement penalty for no reason"
+        );
+    }
+
+    #[test]
+    fn construction_does_not_reuse_an_original_room_the_offering_no_longer_considers_eligible() {
+        // Room 0 was the original, but the Offering's eligibility was
+        // redefined to room 1 only. Trying the original blindly would place a
+        // Session in a room its own Offering does not consider eligible —
+        // bypassing the eligibility filter is not a smaller sin just because
+        // minimize-movement asked for it.
+        let problem = movable_problem(2, &[1], (2, 0));
+        let (solution, _) = construct(&problem);
+        assert_eq!(
+            solution.get(PlacementIdx(0)),
+            Some(Placement { start: SlotIdx(0), room: RoomIdx(1) }),
+            "must fall through to the ordinary greedy scan — earliest feasible \
+             slot, only eligible room — not the ineligible original room"
+        );
+    }
+
+    #[test]
+    fn ruin_worst_picks_up_a_movement_charge() {
+        use crate::ids::OfferingIdx;
+        use crate::problem::{PlacementVar, ProblemSpec};
+
+        // Placement 0: ordinary, no `original`, free wherever it sits.
+        // Placement 1: movable, `original` at slot 2, but PLACED at slot 1 —
+        // displaced, so it alone carries a nonzero movement cost. Deliberately
+        // the HIGHER index, so a tie-break-by-ascending-index would pick
+        // placement 0 — only reading the movement cost into the score can
+        // make this test pick placement 1 instead.
+        let spec = ProblemSpec {
+            rooms: testing::rooms(1),
+            offerings: vec![testing::offering("o", 2, &[0])],
+            placements: vec![
+                PlacementVar {
+                    offering: OfferingIdx(0),
+                    occurrence: 0,
+                    existing_session_id: None,
+                    original: None,
+                },
+                PlacementVar {
+                    offering: OfferingIdx(0),
+                    occurrence: 1,
+                    existing_session_id: Some("s1".into()),
+                    original: Some((SlotIdx(2), Some(RoomIdx(0)))),
+                },
+            ],
+            movement_weight: 1.0,
+            ..ProblemSpec::new(testing::grid(4, 1))
+        };
+        let problem = Problem::build(spec).unwrap();
+
+        let mut solution = Solution::empty(&problem);
+        let mut state = SearchState::from_fixed(&problem);
+        let placements = [
+            Placement { start: SlotIdx(0), room: RoomIdx(0) },
+            Placement { start: SlotIdx(1), room: RoomIdx(0) },
+        ];
+        let placed: Vec<PlacementIdx> = (0..2).map(PlacementIdx).collect();
+        for (&p, &pl) in placed.iter().zip(&placements) {
+            assert!(state.place(&problem, p, pl));
+            solution.set(p, Some(pl));
+        }
+
+        let chosen = ruin_worst(&problem, &solution, &state, &placed, 1);
+        assert_eq!(
+            chosen,
+            vec![PlacementIdx(1)],
+            "the displaced movable placement must outrank the free ordinary one"
+        );
+    }
+
+    /// The classic metaheuristic bug ADR-0026/ADR-0025 both guard against:
+    /// `Trial::place`/`unplace` maintain `soft` as a delta, and a term added at
+    /// only some of the read sites would quietly diverge from a from-scratch
+    /// recomputation. Exercises `place`, `unplace` and `assert_consistent`
+    /// together with a NONZERO movement cost, which the fixture in
+    /// `movable_problem` never produces on its own.
+    #[test]
+    fn incremental_objective_matches_full_recomputation_with_movement_cost() {
+        let problem = movable_problem(1, &[0], (2, 0));
+
+        let mut trial = Trial::construct(&problem);
+        trial.assert_consistent();
+
+        let at = trial
+            .unplace(PlacementIdx(0))
+            .expect("construction must have placed it");
+        assert_eq!(at, Placement { start: SlotIdx(2), room: RoomIdx(0) }, "back at its original");
+        trial.assert_consistent();
+
+        // Force it away from `original`, so the movement term is actually
+        // nonzero for the rest of this check.
+        let moved = Placement { start: SlotIdx(0), room: RoomIdx(0) };
+        assert!(trial.place(PlacementIdx(0), moved));
+        trial.assert_consistent();
     }
 }

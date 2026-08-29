@@ -418,6 +418,11 @@ pub struct ProblemSpec {
     pub fixed: Vec<FixedSpec>,
     pub constraints: ConstraintSet,
     pub scope: ScopeSpec,
+    /// Bias against disturbing a movable out-of-scope placement, under
+    /// `LOCK_POLICY_MINIMIZE_MOVEMENT`. Meaningless — and left at its default
+    /// of `0.0` — when nothing in `placements` carries an `original`, exactly
+    /// like every other soft weight with nothing to weigh.
+    pub movement_weight: f64,
 }
 
 impl ProblemSpec {
@@ -433,6 +438,7 @@ impl ProblemSpec {
             fixed: Vec::new(),
             constraints: ConstraintSet::default(),
             scope: ScopeSpec::All,
+            movement_weight: 0.0,
         }
     }
 
@@ -467,6 +473,7 @@ impl ProblemSpec {
                     offering: OfferingIdx(i as u32),
                     occurrence,
                     existing_session_id: None,
+                    original: None,
                 });
             }
         }
@@ -577,6 +584,15 @@ pub struct PlacementVar {
     /// Preserved when this occurrence corresponds to an existing in-scope
     /// Session, so a re-solve does not needlessly churn Session ids downstream.
     pub existing_session_id: Option<String>,
+    /// Where this occurrence already sat, when it is an out-of-scope Session
+    /// made movable by `LOCK_POLICY_MINIMIZE_MOVEMENT` rather than hard-locked.
+    /// `None` for every other placement variable — an in-scope Session has
+    /// nothing to be charged for leaving.
+    ///
+    /// The inner `Option<RoomIdx>` mirrors [`FixedSpec::room`]: an
+    /// online-only or not-yet-roomed Session is a real state there, so it
+    /// must be one here too rather than being forced into a room it never had.
+    pub original: Option<(SlotIdx, Option<RoomIdx>)>,
 }
 
 #[derive(Clone, Debug)]
@@ -605,6 +621,9 @@ pub struct Problem {
     /// per mixed `(group, day)` cell. Zero when the type is not configured, so
     /// the term costs nothing rather than needing a branch at every use.
     pub day_mix_weight: f64,
+    /// Bias against disturbing a movable out-of-scope placement. See
+    /// [`ProblemSpec::movement_weight`] and [`Problem::movement_cost`].
+    pub movement_weight: f64,
 
     /// Whether each Offering is being actively placed by this run, indexed by
     /// [`OfferingIdx`]. Read it through [`Problem::in_scope`].
@@ -631,6 +650,7 @@ impl Problem {
             fixed,
             constraints,
             scope,
+            movement_weight,
         } = spec;
 
         let parent_of: Vec<Option<GroupIdx>> = groups.iter().map(|g| g.parent).collect();
@@ -792,10 +812,18 @@ impl Problem {
          * configuration alone — not from how many lecturers have an override on
          * file — which is what keeps a tenant-editable column out of this
          * number. See [`crate::preferences::PreferenceModel`].
+         *
+         * THE MOVEMENT TERM IS BOUNDED LIKE `soft`: it is binary per placement
+         * (moved or not), so `movement_weight` IS its own per-placement
+         * ceiling, and multiplying by every placement rather than only the
+         * movable ones stays safe for the same reason `soft.total_weight`
+         * already does — a placement a term does not apply to costs it
+         * nothing, which only widens the bound.
          */
         let hard_penalty = soft.total_weight * placements.len() as f64
             + preferences.max_cost_per_placement() * placements.len() as f64
             + day_mix_weight * aggregate_template.day_mix_cell_count() as f64
+            + movement_weight * placements.len() as f64
             + 1.0;
 
         let n = derived_offerings.len();
@@ -842,6 +870,7 @@ impl Problem {
             aggregate_template,
             hard_penalty,
             day_mix_weight,
+            movement_weight,
             in_scope,
             placement_counts,
             immovable_counts,
@@ -931,6 +960,24 @@ impl Problem {
     #[inline]
     pub fn offering_of(&self, p: PlacementIdx) -> &Offering {
         &self.offerings[self.placements[p.get()].offering.get()]
+    }
+
+    /// What placing `p` at `(start, room)` costs under
+    /// `LOCK_POLICY_MINIMIZE_MOVEMENT`.
+    ///
+    /// `0.0` when `p` has no `original` (every in-scope placement) or when it
+    /// is placed back exactly where it was. A room-only change counts as
+    /// "moved" too — this is a single knob, not a slot/room split — so the
+    /// comparison is on the whole pair, not `start` alone. No table: unlike
+    /// [`crate::preferences::PreferenceModel`], the cost does not depend on
+    /// who leads the placement, only on where it already was, so a direct
+    /// compare is the entire computation.
+    #[inline]
+    pub fn movement_cost(&self, p: PlacementIdx, start: SlotIdx, room: RoomIdx) -> f64 {
+        match self.placements[p.get()].original {
+            Some(original) if original != (start, Some(room)) => self.movement_weight,
+            _ => 0.0,
+        }
     }
 
     /// A stable label for a placement, preferring the existing Session id.
@@ -1128,5 +1175,57 @@ mod tests {
 
         let lecture = set.enforce_for_kind("lecture");
         assert!(lecture.group && lecture.room);
+    }
+
+    /// A movable `PlacementVar`, `original` set, on a spec NOT passed through
+    /// `expand_placements` — that helper unconditionally rebuilds `placements`
+    /// from `offerings.required_session_count` with `original: None`, which is
+    /// exactly the v1 shape this is testing past.
+    fn movable_spec(weight: f64) -> ProblemSpec {
+        ProblemSpec {
+            offerings: vec![offering("o", 1)],
+            placements: vec![PlacementVar {
+                offering: OfferingIdx(0),
+                occurrence: 0,
+                existing_session_id: Some("s1".into()),
+                original: Some((SlotIdx(0), Some(RoomIdx(0)))),
+            }],
+            movement_weight: weight,
+            ..ProblemSpec::new(grid())
+        }
+    }
+
+    #[test]
+    fn movement_cost_is_zero_back_at_the_original_placement() {
+        let p = Problem::build(movable_spec(3.0)).unwrap();
+        assert_eq!(p.movement_cost(PlacementIdx(0), SlotIdx(0), RoomIdx(0)), 0.0);
+    }
+
+    #[test]
+    fn movement_cost_charges_the_weight_for_a_slot_change() {
+        let p = Problem::build(movable_spec(3.0)).unwrap();
+        assert_eq!(p.movement_cost(PlacementIdx(0), SlotIdx(1), RoomIdx(0)), 3.0);
+    }
+
+    #[test]
+    fn movement_cost_charges_the_weight_for_a_room_only_change() {
+        // The decision this test pins down: "minimize movement" is one knob,
+        // not a slot/room split. Same slot, different room, still charged —
+        // there is no cheaper way to leave a Session than to keep it exactly
+        // where it was.
+        let p = Problem::build(movable_spec(3.0)).unwrap();
+        assert_eq!(p.movement_cost(PlacementIdx(0), SlotIdx(0), RoomIdx(1)), 3.0);
+    }
+
+    #[test]
+    fn movement_cost_is_zero_without_an_original_regardless_of_weight() {
+        // Every in-scope placement — the overwhelming majority of any run —
+        // has no `original`. This is what makes it safe for `hard_penalty` and
+        // `initial_temperature` to fold `movement_weight` in unconditionally:
+        // a placement the term does not apply to costs it nothing.
+        let mut spec = movable_spec(3.0);
+        spec.placements[0].original = None;
+        let p = Problem::build(spec).unwrap();
+        assert_eq!(p.movement_cost(PlacementIdx(0), SlotIdx(1), RoomIdx(1)), 0.0);
     }
 }

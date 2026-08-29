@@ -124,7 +124,11 @@ fn score_one(problem: &Problem, solution: &Solution, state: &SearchState, mv: &M
             // EXACT, not a ranking approximation like the two penalties above:
             // a preference cost depends only on this placement and this slot,
             // so the delta the objective will record is the number read here.
+            // The movement cost is exact for the same reason: it depends only
+            // on this placement's `original` and the candidate, nothing else
+            // already placed.
             + problem.preferences.cost(mv.placement, mv.to.start)
+            + problem.movement_cost(mv.placement, mv.to.start, mv.to.room)
             + share_penalty
             + day_mix_penalty,
     )

@@ -114,18 +114,22 @@ pub enum ConvertError {
          soft type declares minimize, and a negative weight would invert it"
     )]
     NegativeSoftWeight { constraint: String, weight: f64 },
+    #[error(
+        "scope.minimize_movement_weight is {weight}; it must be >= 0 for the same reason every \
+         other soft weight must be — LOCK_POLICY_MINIMIZE_MOVEMENT declares minimize, and a \
+         negative weight would invert it"
+    )]
+    NegativeMovementWeight { weight: f64 },
+    #[error(
+        "scope.outside_scope_policy must be set; supported values are LOCK_POLICY_HARD and \
+         LOCK_POLICY_MINIMIZE_MOVEMENT"
+    )]
+    LockPolicyUnset,
 
     // -- deliberately not built yet ------------------------------------------
     //
     // Distinguished from the validation faults above because the caller cannot
     // fix these by correcting their data — the feature does not exist.
-    #[error(
-        "LOCK_POLICY_MINIMIZE_MOVEMENT is the deferred v2 policy; v1 hard-locks everything \
-         outside scope"
-    )]
-    MinimizeMovementUnsupported,
-    #[error("scope.outside_scope_policy must be set; v1 supports LOCK_POLICY_HARD")]
-    LockPolicyUnset,
     #[error(
         "offering '{offering}' asks the solver to choose {required} of {candidates} candidate \
          lecturers; v1 supports pre-assigned lecturers only"
@@ -163,8 +167,7 @@ impl ConvertError {
     pub fn is_unimplemented(&self) -> bool {
         matches!(
             self,
-            Self::MinimizeMovementUnsupported
-                | Self::LecturerPoolUnsupported { .. }
+            Self::LecturerPoolUnsupported { .. }
                 | Self::PreferenceRolesUnsupported { .. }
                 | Self::ConstraintTypeUnimplemented { .. }
         )
@@ -251,9 +254,11 @@ mod tests {
     }
 
     #[test]
-    fn unbuilt_features_map_to_unimplemented() {
-        let status: Status = ConvertError::MinimizeMovementUnsupported.into();
-        assert_eq!(status.code(), tonic::Code::Unimplemented);
+    fn a_negative_movement_weight_is_invalid_argument_not_unimplemented() {
+        // LOCK_POLICY_MINIMIZE_MOVEMENT is built; a negative weight is bad
+        // data the caller can fix, not an absent feature.
+        let status: Status = ConvertError::NegativeMovementWeight { weight: -1.0 }.into();
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
     }
 
     #[test]
