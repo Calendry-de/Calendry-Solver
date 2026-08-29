@@ -58,6 +58,7 @@ Check any change against these. Each links to the decision behind it.
 - [ ] Move evaluation stays behind the trait boundary — [ADR-0013](docs/adr/0013-move-evaluation-behind-a-trait.md)
 - [ ] No soft term is ever negative; a preference charges what it did *not* meet — [ADR-0026](docs/adr/0026-personpreferencefit-charges-the-unmet-fraction.md)
 - [ ] Group blackouts resolve through `expand_ancestry`, never `expand_subtree`/`expand_conflict` — [ADR-0027](docs/adr/0027-group-blackouts-inherit-downward.md)
+- [ ] A rule relating two named Offerings uses the ONE relation mechanism — an ordered set plus a type — never a reference of its own — [ADR-0028](docs/adr/0028-a-relation-is-an-ordered-set-of-offerings.md)
 - [ ] If lecturer-pool selection is ever built, `preferences.rs`'s table key is wrong — [ADR-0026](docs/adr/0026-personpreferencefit-charges-the-unmet-fraction.md)
 - [ ] The solver tolerates infeasible input; the app's "warn and allow" UX produces it
 - [ ] Tests use move budgets, never wall-clock budgets — [ADR-0006](docs/adr/0006-two-budgets-and-the-limit-of-determinism.md)

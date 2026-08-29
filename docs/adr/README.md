@@ -34,6 +34,7 @@ and measured to be wrong.
 | [0025](0025-maxonlineshare-is-not-enforced-by-the-search.md) | `MaxOnlineShare` is not enforced by the search, and never was |
 | [0026](0026-personpreferencefit-charges-the-unmet-fraction.md) | `PersonPreferenceFit` charges the unmet fraction, and is not a `SoftParams` variant |
 | [0027](0027-group-blackouts-inherit-downward.md) | Group blackouts inherit downward, and the query walks up |
+| [0028](0028-a-relation-is-an-ordered-set-of-offerings.md) | A distribution relation is an ordered set of Offerings plus a type |
 
 ## Benchmarking
 
