@@ -2714,9 +2714,9 @@ impl Aggregates {
 
     /// Mark `room` as this Offering's Session, updating
     /// `consistency_excess_total` by the exact delta. A full row rescan on
-    /// EVERY call, not only some — see [`Self::consistency_excess_total`]'s
-    /// own doc for why the modal Room cannot be tracked with a cheaper
-    /// incremental rule the way the distinct-count types above are.
+    /// EVERY call, not only some — see that field's own doc for why the
+    /// modal Room cannot be tracked with a cheaper incremental rule the way
+    /// the distinct-count types above are.
     pub fn add_room_consistency(&mut self, offering: OfferingIdx, room: RoomIdx) {
         if self.consistency_room.is_empty() {
             return;
