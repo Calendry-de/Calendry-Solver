@@ -550,6 +550,29 @@ pub fn two_day_grid() -> SlotTable {
     SlotTable::build(1, &[1, 6], &teaching_weeks(1)).unwrap()
 }
 
+/// One week, entirely `Break`. The institution is closed for the whole term.
+pub fn break_week_grid() -> SlotTable {
+    SlotTable::build(1, &[1], &[WeekSpec { kind: WeekKind::Break, holiday_weekdays: vec![] }])
+        .unwrap()
+}
+
+/// Slot 0 is a `Break` week, slot 1 is `Teaching` — the reverse of
+/// [`teaching_then_exam_grid`], for the same reason: it lets a test show the
+/// search actively AVOIDING the closed slot in favour of the open one, rather
+/// than merely never having a reason to leave a default that already avoided
+/// it by luck of slot order.
+pub fn break_then_teaching_grid() -> SlotTable {
+    SlotTable::build(
+        1,
+        &[1],
+        &[
+            WeekSpec { kind: WeekKind::Break, holiday_weekdays: vec![] },
+            WeekSpec { kind: WeekKind::Teaching, holiday_weekdays: vec![] },
+        ],
+    )
+    .unwrap()
+}
+
 // ---------------------------------------------------------------------------
 // Preference — PersonPreferenceFit, keyed by placement rather than by slot
 // ---------------------------------------------------------------------------

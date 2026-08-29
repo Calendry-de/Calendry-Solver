@@ -37,6 +37,21 @@ pub struct SlotFlags {
     pub is_holiday: bool,
 }
 
+impl SlotFlags {
+    /// Whether the institution is open at this slot at all.
+    ///
+    /// `Break` and `Holiday` weeks, and an individual `is_holiday` day inside
+    /// an otherwise-teaching week, both mean the same thing: nobody is
+    /// expected on site. `Exam` is deliberately NOT closed here — an exam
+    /// period is still open, just penalized for ordinary lessons (and, with
+    /// `MinimizeExamWeek.invert`, actively sought by exam-kind ones), which is
+    /// a soft preference rather than an institutional closure.
+    #[inline]
+    pub fn is_closed(&self) -> bool {
+        matches!(self.week_kind, WeekKind::Break | WeekKind::Holiday) || self.is_holiday
+    }
+}
+
 /// The tenant's grid, resolved. Built once per run.
 #[derive(Clone, Debug)]
 pub struct SlotTable {
@@ -328,6 +343,28 @@ mod tests {
 
         assert!(g.flags(g.resolve(1, 2, 0).unwrap()).is_holiday);
         assert!(!g.flags(g.resolve(1, 1, 0).unwrap()).is_holiday);
+    }
+
+    #[test]
+    fn is_closed_is_break_or_holiday_but_not_exam() {
+        let g = grid(); // week 0 Teaching, week 1 Exam with Tuesday a holiday
+        assert!(!g.flags(g.resolve(0, 1, 0).unwrap()).is_closed(), "an ordinary teaching slot");
+        assert!(
+            !g.flags(g.resolve(1, 1, 0).unwrap()).is_closed(),
+            "an exam week is still open — penalized for ordinary lessons, not closed"
+        );
+        assert!(
+            g.flags(g.resolve(1, 2, 0).unwrap()).is_closed(),
+            "a holiday day inside the exam week must still close it"
+        );
+
+        let weeks = vec![
+            WeekSpec { kind: WeekKind::Teaching, holiday_weekdays: vec![] },
+            WeekSpec { kind: WeekKind::Break, holiday_weekdays: vec![] },
+        ];
+        let g = SlotTable::build(1, &[1], &weeks).unwrap();
+        assert!(!g.flags(g.resolve(0, 1, 0).unwrap()).is_closed());
+        assert!(g.flags(g.resolve(1, 1, 0).unwrap()).is_closed(), "a break week is closed");
     }
 
     #[test]

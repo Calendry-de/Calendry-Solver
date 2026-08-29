@@ -426,7 +426,8 @@ impl SearchState {
 
     /// Whether this Session could occupy `span`.
     ///
-    /// Covers the four structural types and `LecturerVeto` (a unary slot mask).
+    /// Covers the four structural types, `LecturerVeto`/`GroupVeto` (unary
+    /// slot masks), and the calendar closure check below.
     ///
     /// TWO TYPES ARE DELIBERATELY ABSENT, for the same underlying reason:
     /// neither is a question about the candidate alone.
@@ -440,6 +441,17 @@ impl SearchState {
     /// Both are scored on the objective instead. See [`crate::aggregates`].
     pub fn is_free(&self, problem: &Problem, who: &Occupant<'_>, span: &[SlotIdx]) -> bool {
         if !self.occupancy.is_free(problem, who, span) {
+            return false;
+        }
+
+        // Not a catalogue type, and not gated by any `Enforce` flag or tenant
+        // switch: a Break/Holiday week or an individual holiday day is a fact
+        // about the calendar, the same kind of always-on rule as the grid
+        // refusing a Session that would spill past the end of its day.
+        // Existing (fixed) occupancy is untouched — this only gates where a
+        // NEW placement may land, the same way locked Sessions are never
+        // second-guessed elsewhere in this codebase.
+        if span.iter().any(|&s| problem.slots.flags(s).is_closed()) {
             return false;
         }
 
