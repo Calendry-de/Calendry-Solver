@@ -531,6 +531,49 @@ impl SearchState {
         self.aggregates.share_violations()
     }
 
+    /// What `ruin_worst` should charge this occupant for the currently
+    /// violated aggregate cells it sits in — `MaxOnlineShare` and
+    /// `OnlineOnsiteSameDay` together.
+    ///
+    /// Neither aggregate belongs to a single placement (see
+    /// [`crate::aggregates`]), so this is an attribution convention, not an
+    /// exact delta: see [`Aggregates::share_violation_cost`] and
+    /// [`Aggregates::day_mix_violation_cost`] for which occupants are charged
+    /// for which breach.
+    pub fn aggregate_ruin_score(
+        &self,
+        problem: &Problem,
+        who: &Occupant<'_>,
+        span: &[SlotIdx],
+    ) -> f64 {
+        if who.subtree_groups.is_empty() || span.is_empty() {
+            return 0.0;
+        }
+
+        let mut score = 0.0;
+
+        if Self::is_online(problem, who.room) {
+            let week = problem.slots.flags(span[0]).week;
+            score += self.aggregates.share_violation_cost(
+                who.kind,
+                who.subtree_groups,
+                week,
+                problem.hard_penalty,
+            );
+        }
+
+        if who.enforce.day_mix {
+            let days = Self::days_of(problem, span);
+            score += self.aggregates.day_mix_violation_cost(
+                who.subtree_groups,
+                &days,
+                problem.day_mix_weight,
+            );
+        }
+
+        score
+    }
+
     /// Whether placing this Session here would push a share cell over its
     /// allowance. Scored, not filtered — see [`crate::aggregates`].
     pub fn would_worsen_share(

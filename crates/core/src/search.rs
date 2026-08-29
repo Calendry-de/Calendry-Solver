@@ -558,7 +558,7 @@ fn ruin(problem: &Problem, trial: &mut Trial<'_>, rng: &mut Rng) -> Vec<Placemen
 
             let mut chosen = match rng.below(3) {
                 0 => ruin_random(&placed, k, rng),
-                1 => ruin_worst(problem, current, &placed, k),
+                1 => ruin_worst(problem, current, trial.state(), &placed, k),
                 _ => ruin_related(problem, current, &placed, k, rng),
             };
             chosen.extend_from_slice(&unplaced);
@@ -586,10 +586,19 @@ fn ruin_random(placed: &[PlacementIdx], k: usize, rng: &mut Rng) -> Vec<Placemen
     out
 }
 
-/// The placements contributing the most soft penalty.
+/// The placements contributing the most to the total objective.
+///
+/// ADR-0025: this used to rank by placement-local `soft` alone, which made it
+/// blind to `aggregate` (`MaxOnlineShare`) and `day_mix_cost` — one third of
+/// the objective at the time it was measured, since `unplaced` and `aggregate`
+/// had moved onto the hard side while this operator kept scoring as if `soft`
+/// were still the whole objective. Neither aggregate belongs to a single
+/// placement, so `state.aggregate_ruin_score` applies the attribution
+/// convention ADR-0025 settled on rather than a delta.
 fn ruin_worst(
     problem: &Problem,
     current: &Solution,
+    state: &SearchState,
     placed: &[PlacementIdx],
     k: usize,
 ) -> Vec<PlacementIdx> {
@@ -601,13 +610,14 @@ fn ruin_worst(
             // The preference cost is included because it IS placement-local:
             // this operator's whole job is to rank placements by what they cost,
             // and a Session sitting on a slot its lecturer asked to avoid is
-            // exactly what it should pick up. `day_mix_cost` and `aggregate`
-            // stay out because a cell there belongs to no single placement.
-            (
-                p,
-                problem.soft.cost(o.soft_profile, pl.start, pl.room)
-                    + problem.preferences.cost(p, pl.start),
-            )
+            // exactly what it should pick up.
+            let mut cost = problem.soft.cost(o.soft_profile, pl.start, pl.room)
+                + problem.preferences.cost(p, pl.start);
+            if let Some(span) = problem.slots.span(pl.start, o.duration_blocks) {
+                let occupant = Occupant::of_offering(o).with_room(pl.room);
+                cost += state.aggregate_ruin_score(problem, &occupant, &span);
+            }
+            (p, cost)
         })
         .collect();
     // Descending cost, ties by index so the choice is deterministic.
@@ -943,4 +953,93 @@ fn initial_temperature(problem: &Problem) -> f64 {
     let total = problem.soft.total_weight + problem.preferences.total_weight;
     let avg = total / n as f64;
     (avg / std::f64::consts::LN_2).max(tuning::MIN_TEMPERATURE)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::aggregates::ShareWindow;
+    use crate::ids::{RoomIdx, SlotIdx};
+    use crate::testing;
+
+    /// ADR-0025's falsification target: before the fix, `ruin_worst` ranked by
+    /// placement-local `soft` alone, which is blind to a `MaxOnlineShare`
+    /// breach. Four equally-costed (zero soft) Sessions of one Group at a 50%
+    /// cap, with the **on-site** one placed at the LOWEST index and the three
+    /// online ones after it — deliberately, so the old scoring's tie-break
+    /// ("descending cost, ties by ascending index") is put to the test rather
+    /// than dodged by accident.
+    ///
+    /// Old scoring: every placement costs 0.0 soft, so the tie-break alone
+    /// decides and picks placement 0 — the on-site one. That pick cannot
+    /// repair the breach: removing the on-site Session only shrinks the
+    /// denominator, which cannot lower the online count back under the
+    /// allowance. New scoring must instead score the three online placements
+    /// above zero (they sit in the one violated cell) and the on-site one at
+    /// zero, so `k=1` must return one of the online placements.
+    #[test]
+    fn ruin_worst_prefers_an_online_placement_in_a_breaching_share_cell() {
+        let problem =
+            testing::share_capped_group(vec![testing::share_rule("s", 0.5, ShareWindow::PerTerm)]);
+
+        let mut solution = Solution::empty(&problem);
+        let mut state = SearchState::from_fixed(&problem);
+
+        // Placement 0 on-site (room 1), placements 1..3 online (room 0) —
+        // on-site sits at the lowest index on purpose (see doc comment).
+        let placements = [
+            Placement { start: SlotIdx(0), room: RoomIdx(1) },
+            Placement { start: SlotIdx(1), room: RoomIdx(0) },
+            Placement { start: SlotIdx(2), room: RoomIdx(0) },
+            Placement { start: SlotIdx(3), room: RoomIdx(0) },
+        ];
+        let placed: Vec<PlacementIdx> = (0..4).map(PlacementIdx).collect();
+        for (&p, &pl) in placed.iter().zip(&placements) {
+            assert!(state.place(&problem, p, pl), "fixture placement must resolve");
+            solution.set(p, Some(pl));
+        }
+        assert_eq!(state.share_violations(), 1, "3 of 4 online is 75% > the 50% cap");
+
+        // Ruining only the on-site placement can never fix the breach. The
+        // old lowest-index tie-break would have returned exactly `[0]` here;
+        // the fixed scoring must not.
+        let chosen = ruin_worst(&problem, &solution, &state, &placed, 1);
+        assert_eq!(chosen.len(), 1);
+        assert_ne!(
+            chosen[0],
+            PlacementIdx(0),
+            "removing the on-site Session cannot repair an online-share breach"
+        );
+        assert!(
+            [PlacementIdx(1), PlacementIdx(2), PlacementIdx(3)].contains(&chosen[0]),
+            "must pick one of the three online placements sitting in the breaching cell"
+        );
+    }
+
+    /// A cell that is not violated must contribute nothing, so `ruin_worst`
+    /// falls back to soft cost (here, an explicit tie) rather than being
+    /// permanently biased toward whichever placements happen to be online.
+    #[test]
+    fn ruin_worst_is_blind_to_online_placements_outside_any_breach() {
+        let problem =
+            testing::share_capped_group(vec![testing::share_rule("s", 1.0, ShareWindow::PerTerm)]);
+
+        let mut solution = Solution::empty(&problem);
+        let mut state = SearchState::from_fixed(&problem);
+        let placements = [
+            Placement { start: SlotIdx(0), room: RoomIdx(0) },
+            Placement { start: SlotIdx(1), room: RoomIdx(1) },
+        ];
+        let placed: Vec<PlacementIdx> = (0..2).map(PlacementIdx).collect();
+        for (&p, &pl) in placed.iter().zip(&placements) {
+            assert!(state.place(&problem, p, pl));
+            solution.set(p, Some(pl));
+        }
+        assert_eq!(state.share_violations(), 0, "100% cap permits any mix");
+
+        // Both cost zero soft and zero aggregate, so the tie-break must still
+        // be the deterministic lowest-index rule `ruin_worst` documents.
+        let chosen = ruin_worst(&problem, &solution, &state, &placed, 1);
+        assert_eq!(chosen, vec![PlacementIdx(0)]);
+    }
 }

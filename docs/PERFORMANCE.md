@@ -217,29 +217,66 @@ The cost of using this lever: it reopens a performance envelope slice 6
 deliberately closed (7.79 s → 349 ms). **Spending 2.28 s where 349 ms was
 celebrated must be a conscious decision, not drift.**
 
-## What `ruin_worst` can see
+## What `ruin_worst` could see, and the fix
 
-`ruin_worst` ranks placements by `problem.soft.cost` alone — the unary table. At
-large-university soft is 29,181 of an objective of 172,885,956: **0.017%**. So the
-arm whose job is "ruin the worst thing" is steering by a rounding error, while the
-other two arms are random and related.
+`ruin_worst` used to rank placements by `problem.soft.cost` alone — the unary
+table. At large-university soft was 29,181 of an objective of 172,885,956:
+**0.017%**. So the arm whose job is "ruin the worst thing" was steering by a
+rounding error, while the other two arms are random and related.
 
-LNS does not merely fail to *stumble onto* share breaches; one third of its
-selection is actively aimed at the wrong quantity. Pricing a mixed day
+LNS did not merely fail to *stumble onto* share breaches; one third of its
+selection was actively aimed at the wrong quantity. Pricing a mixed day
 ([ADR-0023](adr/0023-onlineonsitesameday-is-priced-not-forbidden.md)) added a
-second term it cannot see, and among the *tunable* terms its visibility fell from
-100% to 45.7%.
+second term it could not see, and among the *tunable* terms its visibility had
+fallen from 100% to 45.7%.
 
-The harness prints that ratio every run, so the number moves when the code does
-rather than living in a comment. What to do about it is
-[ADR-0025](adr/0025-maxonlineshare-is-not-enforced-by-the-search.md).
-
-`PersonPreferenceFit` is the first term added since that was written which moves
-the ratio the *right* way, because it is placement-local by construction
+`PersonPreferenceFit` was the first term added since that was measured which
+moved the ratio the *right* way, because it is placement-local by construction
 ([ADR-0026](adr/0026-personpreferencefit-charges-the-unmet-fraction.md)). At
 large-university with half the lecturers stating a preference, `ruin_worst`'s
-share of the objective goes **0.0055% → 0.0114%**. Still a rounding error; the
-point is only that this term does not widen the blind spot.
+share of the objective went **0.0055% → 0.0114%**. Still a rounding error; the
+point was only that this term did not widen the blind spot.
+
+**Fixed per [ADR-0025](adr/0025-maxonlineshare-is-not-enforced-by-the-search.md):**
+by attribution, not a fourth ruin arm. `SearchState::aggregate_ruin_score` charges
+every **online** placement inside a currently-breaching `MaxOnlineShare` cell —
+removing an on-site one there cannot lower the ratio, so it is never charged —
+and every placement inside a mixed `(group, day)` cell, since either mode removed
+there can clear it. `ruin_worst` sums that alongside the existing placement-local
+`soft` term. Neither aggregate is a per-placement delta, so this is a convention
+for "which placement is responsible", not an exact attribution; see
+`crates/core/src/aggregates.rs`'s `share_violation_cost` /
+`day_mix_violation_cost` and their falsification tests in `search::tests` and
+`aggregates::tests`.
+
+The harness's diagnostic line still prints `soft` alone as a ratio of the total,
+labelled to say why: the attributed aggregate/day-mix amount is charged per
+*placement* in a breaching cell, so several placements can each carry that same
+cell's full cost — summed back into one number, it would not mean what a share of
+`total` is supposed to mean.
+
+### What it was worth
+
+Measured at the bench default (200k moves, seed 1), before and after this
+`ruin_worst` change only — nothing else moved:
+
+| preset | aggregate before → after | soft before → after | day_mix before → after |
+|---|---|---|---|
+| small-school | 3 → 3 | 1,232 → 1,837 | 225 → 250 |
+| large-school | 22 → 22 | 3,379 → 4,000 | 1,050 → 1,035 |
+| small-university | 60 → **0** | 7,164 → 7,420 | 5,195 → 1,050 |
+| large-university | 454 → **308** | 28,800 → 29,106 | 34,210 → 30,290 |
+
+`unplaced` stayed 0 and structural violations stayed unchanged at every preset —
+the fix moved nothing it should not have. It is not a uniform win: school scale
+saw no aggregate change at all, and `soft` rose slightly at three of four presets,
+because a different placement is ruined at the very first `ruin_worst` call and
+the whole run's trajectory diverges from there, even at a fixed seed. The
+large-university and small-university reductions are the real result; the other
+two presets show that "no measurable effect at this scale" is also a legitimate
+outcome, not a sign the fix is broken. **Do not read a lack of movement at school
+scale as a reason to tune anything** — see ADR-0025's own warning against
+recalibrating to a violation count.
 
 ## `PersonPreferenceFit` costs no measurable time
 

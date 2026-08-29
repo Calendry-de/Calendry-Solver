@@ -296,6 +296,68 @@ impl Aggregates {
         }
     }
 
+    /// Sum of `hard_penalty` over every currently-violated `(rule, group,
+    /// window)` cell this **online** Session participates in.
+    ///
+    /// For `ruin_worst`'s attribution convention (ADR-0025): a share breach
+    /// belongs to a group's ratio, not to any one placement, so every online
+    /// placement inside a breaching cell counts as responsible — removing one
+    /// is the only way to bring `online` back under the cell's allowance.
+    /// An on-site placement in the same cell is never charged: removing it
+    /// only shrinks `total`, which can widen the violation rather than close
+    /// it.
+    pub fn share_violation_cost(
+        &self,
+        kind: &str,
+        groups: &[GroupIdx],
+        week: u32,
+        hard_penalty: f64,
+    ) -> f64 {
+        let mut cost = 0.0;
+        for (i, rule) in self.rules.iter().enumerate() {
+            if !rule.covers(kind) {
+                continue;
+            }
+            let window = match rule.window {
+                ShareWindow::PerTerm => 0,
+                ShareWindow::PerWeek => week as usize,
+            };
+            let counters = &self.counters[i];
+            if window >= counters.windows {
+                continue;
+            }
+            for &g in groups {
+                let cell = counters.cell(g, window);
+                if counters.is_violated(rule, cell) {
+                    cost += hard_penalty;
+                }
+            }
+        }
+        cost
+    }
+
+    /// Sum of `weight` over every currently-mixed `(group, day)` cell this
+    /// Session participates in, regardless of its own delivery mode.
+    ///
+    /// Unlike a share breach, either mode removed from a mixed cell can
+    /// resolve it — the cell needs *a* removal, not specifically an online
+    /// one — so both online and on-site placements in the cell are charged.
+    pub fn day_mix_violation_cost(&self, groups: &[GroupIdx], days: &[u32], weight: f64) -> f64 {
+        if weight == 0.0 {
+            return 0.0;
+        }
+        let mut cost = 0.0;
+        for &g in groups {
+            for &d in days {
+                let c = self.day_cell(g, d);
+                if self.online_day[c] > 0 && self.onsite_day[c] > 0 {
+                    cost += weight;
+                }
+            }
+        }
+        cost
+    }
+
     /// Would adding one Session push any covering cell over its allowance?
     ///
     /// Used to *score* a candidate, never to reject it: `MaxOnlineShare` is an
@@ -449,5 +511,72 @@ mod tests {
 
         a.apply_share("lecture", &[GroupIdx(0)], 0, true, true);
         assert_eq!(a.share_violations(), 1);
+    }
+
+    /// ADR-0025: `ruin_worst` must be able to tell which placement removal
+    /// could actually repair a breach. Only the **online** one can — removing
+    /// the on-site Session only shrinks `total`, which cannot lower the
+    /// online count back under the allowance.
+    #[test]
+    fn share_violation_cost_charges_the_online_session_not_the_onsite_one() {
+        let scoped = ShareInstance {
+            id: "s".into(),
+            kinds: vec!["lecture".into()],
+            max_ratio: 0.5,
+            window: ShareWindow::PerTerm,
+        };
+        let mut a = Aggregates::new(1, 1, 1, vec![scoped]);
+        let g = [GroupIdx(0)];
+        // 2 online of 2 total = 100% > 50%: violated.
+        a.apply_share("lecture", &g, 0, true, true);
+        a.apply_share("lecture", &g, 0, true, true);
+        assert_eq!(a.share_violations(), 1);
+
+        assert_eq!(
+            a.share_violation_cost("lecture", &g, 0, 100.0),
+            100.0,
+            "one violated cell, charged at hard_penalty"
+        );
+        assert_eq!(
+            a.day_mix_violation_cost(&g, &[0], 5.0),
+            0.0,
+            "no day-mix state was touched here"
+        );
+
+        // A rule that does not cover this kind must not charge either.
+        assert_eq!(a.share_violation_cost("staff_meeting", &g, 0, 100.0), 0.0);
+    }
+
+    #[test]
+    fn share_violation_cost_is_zero_once_the_cell_stops_violating() {
+        let mut a = Aggregates::new(1, 1, 1, vec![rule(0.5, ShareWindow::PerTerm)]);
+        let g = [GroupIdx(0)];
+        a.apply_share("lecture", &g, 0, true, true);
+        assert_eq!(a.share_violation_cost("lecture", &g, 0, 100.0), 100.0);
+
+        // Widening the denominator clears the violation (see
+        // `share_violation_tracks_a_moving_denominator`), and the cost must
+        // follow it back to zero rather than staying pinned.
+        a.apply_share("lecture", &g, 0, false, true);
+        assert_eq!(a.share_violation_cost("lecture", &g, 0, 100.0), 0.0);
+    }
+
+    /// Unlike a share breach, a mixed day can be resolved by removing
+    /// *either* mode, so both the online and the on-site occupant of a mixed
+    /// cell are charged — the asymmetry above does not apply here.
+    #[test]
+    fn day_mix_violation_cost_charges_both_modes_in_a_mixed_cell() {
+        let mut a = Aggregates::new(1, 2, 1, vec![]);
+        let g = [GroupIdx(0)];
+        a.add_day_mode(&g, &[0], true);
+        assert_eq!(a.day_mix_violation_cost(&g, &[0], 10.0), 0.0, "one mode alone is not mixed");
+
+        a.add_day_mode(&g, &[0], false);
+        assert_eq!(a.day_mix_violation_cost(&g, &[0], 10.0), 10.0, "now mixed");
+        // A weight of zero (the rule disabled) must charge nothing, not skip
+        // the check silently in some other way.
+        assert_eq!(a.day_mix_violation_cost(&g, &[0], 0.0), 0.0);
+        // An untouched day on the same group is unaffected.
+        assert_eq!(a.day_mix_violation_cost(&g, &[1], 10.0), 0.0);
     }
 }

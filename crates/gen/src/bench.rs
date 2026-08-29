@@ -406,26 +406,30 @@ fn run_phases(r: &mut Report, problem: &Problem, stats: &InstanceStats, seed: u6
     ));
 
     /*
-     * WHAT `ruin_worst` CAN SEE, printed because it is now a smaller share than
-     * it was.
+     * WHAT `ruin_worst` CAN SEE, printed because it used to be a much smaller
+     * share than the total objective.
      *
-     * `ruin_worst` ranks placements by `problem.soft.cost(...)` alone — the
-     * unary table. That already missed the hard side of the objective (a
-     * tracked issue: it scores soft while `aggregate x hard_penalty` dominates
-     * the total). OnlineOnsiteSameDay becoming soft ADDS a term it also cannot
-     * see, because a mixed day belongs to a (group, day) cell and not to any
-     * one placement, so there is nothing to rank a placement by.
-     *
-     * Printed as a ratio rather than described in a comment somewhere, so the
-     * number moves when the code does.
+     * ADR-0025: `ruin_worst` used to rank placements by `problem.soft.cost(...)`
+     * alone, blind to `aggregate` (`MaxOnlineShare`, on the hard side) and
+     * `day_mix_cost` — neither belongs to a single placement, so there was
+     * nothing to rank a placement by. Fixed by attribution rather than a
+     * fourth ruin arm: `SearchState::aggregate_ruin_score` charges every
+     * *online* placement inside a breaching share cell (removing an on-site
+     * one there cannot repair the ratio) and every placement inside a mixed
+     * day (either mode removed there can). `soft` is still shown alone below,
+     * because the attributed amount is charged per placement in a breaching
+     * cell — several placements can each carry the same cell's full cost — so
+     * summing it back into one number would not mean what a share of `total`
+     * is supposed to mean.
      */
     let visible = outcome.objective.soft;
     r.line(format_args!(
-        "  ruin_worst sees {:.1} of {:.1}  ({:.4}% of the objective; day_mix {:.1} is \
-         invisible to it)",
+        "  ruin_worst: soft {:.1} of {:.1} total ({:.4}%); aggregate {} and day_mix {:.1} are \
+         also ranked now, via per-placement attribution rather than a delta",
         visible,
         total,
         if total > 0.0 { visible / total * 100.0 } else { 0.0 },
+        outcome.objective.aggregate,
         outcome.objective.day_mix_cost,
     ));
     r.line(format_args!("  violations {}", outcome.hard_violations.len()));
