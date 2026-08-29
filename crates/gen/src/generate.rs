@@ -802,6 +802,7 @@ fn build_constraints(params: &InstanceParams, slots: &SlotTable) -> ConstraintSe
         max_weekly_teaching_load: Vec::new(),
         exam_spacing_same_day: Vec::new(),
         exam_spacing_window: Vec::new(),
+        minimize_weekday_imbalance: Vec::new(),
         // Weight 5 mirrors the app catalogue's `defaultWeight`, so generated
         // benchmark instances price a mixed day the way a real tenant does.
         online_onsite_same_day: vec![DayMixInstance {

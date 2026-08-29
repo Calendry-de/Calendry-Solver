@@ -728,6 +728,25 @@ impl SearchState {
         self.aggregates.exam_window_violations() as f64 * problem.exam_window_weight
     }
 
+    /// The `MinimizeWeekdayImbalance` variance DELTA of placing `who` at
+    /// `span` — a ranking signal, mirroring [`Self::max_daily_span_delta`].
+    pub fn imbalance_delta(&self, problem: &Problem, who: &Occupant<'_>, span: &[SlotIdx]) -> f64 {
+        if !who.enforce.minimize_weekday_imbalance
+            || who.subtree_groups.is_empty()
+            || span.is_empty()
+        {
+            return 0.0;
+        }
+        let days = Self::days_of(problem, span);
+        self.aggregates.imbalance_delta(who.subtree_groups, &days) * problem.imbalance_weight
+    }
+
+    /// What every Group's current weekday imbalance costs, at the configured
+    /// weight. Read fresh off the counters, like [`Self::day_mix_cost`].
+    pub fn imbalance_cost(&self, problem: &Problem) -> f64 {
+        self.aggregates.imbalance_cost(problem.imbalance_weight)
+    }
+
     /// The compactness cost DELTA of placing `who` at `span` — a ranking
     /// signal for choosing between repair candidates, not filed as an exact
     /// per-placement charge in `Objective::soft`: like `day_mix_penalty`, it
@@ -988,6 +1007,15 @@ impl SearchState {
             }
         }
 
+        if who.enforce.minimize_weekday_imbalance {
+            let days = Self::days_of(problem, span);
+            if add {
+                self.aggregates.add_imbalance(who.subtree_groups, &days);
+            } else {
+                self.aggregates.remove_imbalance(who.subtree_groups, &days);
+            }
+        }
+
         // Share counters are keyed per rule and gated by the rule's own kind
         // scope, so they are applied unconditionally here.
         let week = problem.slots.flags(span[0]).week;
@@ -1120,6 +1148,15 @@ impl SearchState {
                 who.subtree_groups,
                 &days,
                 problem.exam_window_weight,
+            );
+        }
+
+        if who.enforce.minimize_weekday_imbalance {
+            let days = Self::days_of(problem, span);
+            score += self.aggregates.imbalance_ruin_cost(
+                who.subtree_groups,
+                &days,
+                problem.imbalance_weight,
             );
         }
 

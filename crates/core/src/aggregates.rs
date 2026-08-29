@@ -212,6 +212,23 @@ impl ExamSpacingWindowInstance {
     }
 }
 
+/// One configured `MinimizeWeekdayImbalance` rule. Group-only, like
+/// `MaxWeeklyTeachingLoad` and `ExamSpacingSameDay`/`Window` — no parameters:
+/// variance is read straight off `TimeGrid.active_days`.
+#[derive(Clone, Debug)]
+pub struct MinimizeWeekdayImbalanceInstance {
+    pub id: String,
+    pub kinds: Vec<String>,
+    pub weight: f64,
+}
+
+impl MinimizeWeekdayImbalanceInstance {
+    #[inline]
+    pub fn covers(&self, kind: &str) -> bool {
+        self.kinds.is_empty() || self.kinds.iter().any(|k| k == kind)
+    }
+}
+
 /// One configured `DistributedPatternAdherence` or `BlockPatternAdherence` —
 /// identical shape, kept as one type since both are just "id, kind scope,
 /// weight" with the actual per-pattern logic living in `Aggregates` instead.
@@ -404,6 +421,18 @@ pub struct Aggregates {
     /// `u32::MAX` when not configured.
     exam_window_threshold: u32,
     exam_window_rules: Vec<ExamSpacingWindowInstance>,
+
+    /// `[group * n_days + day_index]` — the `MinimizeWeekdayImbalance`
+    /// counterpart of `exam_same_day`: how many Sessions that Group
+    /// currently has on that day. Read fresh, like `exam_same_day` and
+    /// `day_mix` — see `imbalance_cost`.
+    imbalance_day: Vec<u32>,
+    /// `TimeGrid.active_days.len()` — `day_index` is already `week *
+    /// active_days_count + weekday_position` (see `SlotTable::span`'s own
+    /// doc), so one WEEK's cells are exactly `active_days_count` consecutive
+    /// `day_index` values; no separate week/weekday decomposition needed.
+    active_days_count: usize,
+    imbalance_rules: Vec<MinimizeWeekdayImbalanceInstance>,
 }
 
 impl Aggregates {
@@ -426,6 +455,8 @@ impl Aggregates {
         teaching_load_rules: Vec<MaxWeeklyTeachingLoadInstance>,
         exam_same_day_rules: Vec<ExamSpacingSameDayInstance>,
         exam_window_rules: Vec<ExamSpacingWindowInstance>,
+        imbalance_rules: Vec<MinimizeWeekdayImbalanceInstance>,
+        active_days_count: usize,
     ) -> Self {
         let groups = n_groups.max(1);
         let counters = rules
@@ -491,6 +522,8 @@ impl Aggregates {
             .map(|r| r.min_days_between)
             .min()
             .unwrap_or(u32::MAX);
+
+        let track_imbalance = !imbalance_rules.is_empty();
 
         Self {
             online_day: vec![0; groups * n_days.max(1)],
@@ -570,6 +603,13 @@ impl Aggregates {
             },
             exam_window_threshold,
             exam_window_rules,
+            imbalance_day: if track_imbalance {
+                vec![0; groups * n_days.max(1)]
+            } else {
+                Vec::new()
+            },
+            active_days_count: active_days_count.max(1),
+            imbalance_rules,
         }
     }
 
@@ -1805,6 +1845,155 @@ impl Aggregates {
         cost
     }
 
+    // -- minimize weekday imbalance ---------------------------------------------
+
+    pub fn imbalance_rules(&self) -> &[MinimizeWeekdayImbalanceInstance] {
+        &self.imbalance_rules
+    }
+
+    #[inline]
+    fn imbalance_week_range(&self, week: u32) -> (usize, usize) {
+        let start = week as usize * self.active_days_count;
+        (start, start + self.active_days_count)
+    }
+
+    /// Population variance of one Group's per-active-day Session counts for
+    /// one week — 0.0 for a perfectly even week (every active day holds the
+    /// same count), growing as the week clusters onto fewer days.
+    #[inline]
+    fn weekday_variance(week_cells: &[u32]) -> f64 {
+        let k = week_cells.len();
+        if k == 0 {
+            return 0.0;
+        }
+        let sum: u32 = week_cells.iter().sum();
+        let mean = f64::from(sum) / k as f64;
+        week_cells
+            .iter()
+            .map(|&c| {
+                let d = f64::from(c) - mean;
+                d * d
+            })
+            .sum::<f64>()
+            / k as f64
+    }
+
+    /// `weekday_variance`, but with one more occurrence at `position` —
+    /// WITHOUT mutating or allocating, mirroring `gap_u32_with`. `position`
+    /// is the weekday's index WITHIN the week (`day_index % active_days_count`).
+    #[inline]
+    fn weekday_variance_with(week_cells: &[u32], position: usize) -> f64 {
+        let k = week_cells.len();
+        if k == 0 {
+            return 0.0;
+        }
+        let sum: u32 = week_cells.iter().sum::<u32>() + 1;
+        let mean = f64::from(sum) / k as f64;
+        week_cells
+            .iter()
+            .enumerate()
+            .map(|(i, &c)| {
+                let v = if i == position { c + 1 } else { c };
+                let d = f64::from(v) - mean;
+                d * d
+            })
+            .sum::<f64>()
+            / k as f64
+    }
+
+    pub fn add_imbalance(&mut self, groups: &[GroupIdx], days: &[u32]) {
+        if self.imbalance_day.is_empty() {
+            return;
+        }
+        for &g in groups {
+            for &d in days {
+                self.imbalance_day[g.get() * self.n_days + d as usize] += 1;
+            }
+        }
+    }
+
+    pub fn remove_imbalance(&mut self, groups: &[GroupIdx], days: &[u32]) {
+        if self.imbalance_day.is_empty() {
+            return;
+        }
+        for &g in groups {
+            for &d in days {
+                let c = g.get() * self.n_days + d as usize;
+                self.imbalance_day[c] = self.imbalance_day[c].saturating_sub(1);
+            }
+        }
+    }
+
+    /// The imbalance-variance DELTA `MinimizeWeekdayImbalance` would
+    /// experience if `groups` gained one more Session on `days` — the
+    /// read-only preview, mirroring `group_run_delta`. A ranking signal
+    /// only: unlike the gap/run/span types, the objective reads
+    /// `imbalance_cost` fresh off the counters rather than a maintained
+    /// running total, since groups x weeks is smaller than the groups x days
+    /// scale `day_mix_violations` already rescans safely.
+    pub fn imbalance_delta(&self, groups: &[GroupIdx], days: &[u32]) -> f64 {
+        if self.imbalance_day.is_empty() {
+            return 0.0;
+        }
+        let mut delta = 0.0;
+        for &d in days {
+            let week = d / self.active_days_count as u32;
+            let position = d as usize % self.active_days_count;
+            let (start, end) = self.imbalance_week_range(week);
+            for &g in groups {
+                let row = g.get() * self.n_days;
+                let cells = &self.imbalance_day[row + start..row + end];
+                delta +=
+                    Self::weekday_variance_with(cells, position) - Self::weekday_variance(cells);
+            }
+        }
+        delta
+    }
+
+    /// What every Group's current weekday imbalance costs, at the configured
+    /// weight — a full rescan over `groups x weeks`, like
+    /// `day_mix_violations`'s rescan over `groups x days`; this is smaller.
+    pub fn imbalance_cost(&self, weight: f64) -> f64 {
+        if weight == 0.0 || self.imbalance_day.is_empty() {
+            return 0.0;
+        }
+        let groups = self.imbalance_day.len() / self.n_days;
+        let weeks = self.n_days / self.active_days_count;
+        let mut total = 0.0;
+        for g in 0..groups {
+            let row = g * self.n_days;
+            for w in 0..weeks {
+                let start = row + w * self.active_days_count;
+                total += Self::weekday_variance(
+                    &self.imbalance_day[start..start + self.active_days_count],
+                );
+            }
+        }
+        total * weight
+    }
+
+    /// Sum of `weight` over every currently-imbalanced week this occupant's
+    /// Groups sit in, for `ruin_worst`'s attribution — a flat charge per
+    /// occupant of a nonzero-variance week, the same attribution convention
+    /// `compactness_ruin_cost` uses.
+    pub fn imbalance_ruin_cost(&self, groups: &[GroupIdx], days: &[u32], weight: f64) -> f64 {
+        if weight == 0.0 || self.imbalance_day.is_empty() {
+            return 0.0;
+        }
+        let mut cost = 0.0;
+        for &d in days {
+            let week = d / self.active_days_count as u32;
+            let (start, end) = self.imbalance_week_range(week);
+            for &g in groups {
+                let row = g.get() * self.n_days;
+                if Self::weekday_variance(&self.imbalance_day[row + start..row + end]) > 0.0 {
+                    cost += weight;
+                }
+            }
+        }
+        cost
+    }
+
     // -- scheduling pattern ---------------------------------------------------
 
     pub fn distributed_rules(&self) -> &[PatternAdherenceInstance] {
@@ -2186,6 +2375,8 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
+            1,
         );
         let g = [GroupIdx(0)];
 
@@ -2223,6 +2414,8 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
+            1,
         );
         let g = [GroupIdx(0)];
 
@@ -2269,6 +2462,8 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
+            1,
         );
         load(&mut term);
         assert_eq!(term.share_violations(), 0);
@@ -2292,6 +2487,8 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
+            1,
         );
         load(&mut week);
         assert_eq!(week.share_violations(), 1);
@@ -2322,6 +2519,8 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
+            1,
         );
         a.apply_share("staff_meeting", &[GroupIdx(0)], 0, true, true);
         assert_eq!(a.share_violations(), 0, "out-of-scope kind must not count");
@@ -2360,6 +2559,8 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
+            1,
         );
         let g = [GroupIdx(0)];
         // 2 online of 2 total = 100% > 50%: violated.
@@ -2402,6 +2603,8 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
+            1,
         );
         let g = [GroupIdx(0)];
         a.apply_share("lecture", &g, 0, true, true);
@@ -2437,6 +2640,8 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
+            1,
         );
         let g = [GroupIdx(0)];
         a.add_day_mode(&g, &[0], true);
@@ -2478,6 +2683,8 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
+            1,
         );
         let g = [GroupIdx(0)];
 
@@ -2518,6 +2725,8 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
+            1,
         );
         let g = [GroupIdx(0)];
         a.add_group_compactness(&g, 0, &[SlotIdx(0)]);
@@ -2545,6 +2754,8 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
+            1,
         );
         let p = [PersonIdx(0)];
 
@@ -2578,6 +2789,8 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
+            1,
         );
         a.add_person_compactness(&[PersonIdx(0)], 0, &[SlotIdx(0), SlotIdx(3)]);
         assert_eq!(a.compactness_cost(0.0, 1.0), 0.0, "Person axis was never configured");
@@ -2607,6 +2820,8 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
+            1,
         );
         let g = [GroupIdx(0)];
         a.add_group_compactness(&g, 0, &[SlotIdx(0)]);
@@ -2643,6 +2858,8 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
+            1,
         );
         let g = [GroupIdx(0)];
         a.add_group_compactness(&g, 0, &[SlotIdx(0)]);
@@ -2686,6 +2903,8 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
+            1,
         );
         let o = OfferingIdx(0);
         a.add_distributed(o, 0);
@@ -2714,6 +2933,8 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
+            1,
         );
         let o = OfferingIdx(0);
         a.add_distributed(o, 0);
@@ -2745,6 +2966,8 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
+            1,
         );
         let o = OfferingIdx(0);
         a.add_distributed(o, 0);
@@ -2776,6 +2999,8 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
+            1,
         );
         a.add_distributed(OfferingIdx(0), 0);
         a.add_distributed(OfferingIdx(0), 1);
@@ -2805,6 +3030,8 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
+            1,
         );
         let o = OfferingIdx(0);
         a.add_block(o, 0);
@@ -2840,6 +3067,8 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
+            1,
         );
         let o = OfferingIdx(0);
         a.add_block(o, 0);
@@ -2873,6 +3102,8 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
+            1,
         );
         a.add_distributed(OfferingIdx(0), 0);
         a.add_distributed(OfferingIdx(0), 1);

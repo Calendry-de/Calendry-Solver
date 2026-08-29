@@ -133,6 +133,10 @@ fn score_one(problem: &Problem, solution: &Solution, state: &SearchState, mv: &M
         0.0
     };
 
+    // Same ranking-signal contract as `max_daily_span_delta` — over
+    // per-week weekday-count variance instead of a first-to-last span.
+    let imbalance_delta = state.imbalance_delta(problem, &candidate, &span);
+
     // Compactness is soft, like day-mix, and its delta CAN be negative — a
     // candidate that fills a gap between two existing Sessions is rewarded,
     // not merely charged nothing. `compactness_delta` is a ranking signal, not
@@ -190,6 +194,7 @@ fn score_one(problem: &Problem, solution: &Solution, state: &SearchState, mv: &M
             + max_consecutive_delta
             + max_daily_span_delta
             + max_weekly_teaching_load_delta
+            + imbalance_delta
             + scheduling_pattern_delta,
     )
 }

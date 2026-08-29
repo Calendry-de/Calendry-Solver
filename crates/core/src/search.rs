@@ -203,6 +203,7 @@ impl<'p> Trial<'p> {
             max_weekly_teaching_load_cost: self.state.max_weekly_teaching_load_cost(self.problem),
             exam_same_day_cost: self.state.exam_same_day_cost(self.problem),
             exam_window_cost: self.state.exam_window_cost(self.problem),
+            imbalance_cost: self.state.imbalance_cost(self.problem),
             scheduling_pattern_cost: self.state.scheduling_pattern_cost(self.problem),
         }
     }
@@ -905,6 +906,7 @@ pub fn recompute_objective(problem: &Problem, solution: &Solution) -> Objective 
         max_weekly_teaching_load_cost: state.max_weekly_teaching_load_cost(problem),
         exam_same_day_cost: state.exam_same_day_cost(problem),
         exam_window_cost: state.exam_window_cost(problem),
+        imbalance_cost: state.imbalance_cost(problem),
         scheduling_pattern_cost: state.scheduling_pattern_cost(problem),
     }
 }
@@ -1053,6 +1055,7 @@ pub fn objectives_agree(a: Objective, b: Objective) -> bool {
             <= 1e-9 * (1.0 + a.exam_same_day_cost.abs())
         && (a.exam_window_cost - b.exam_window_cost).abs()
             <= 1e-9 * (1.0 + a.exam_window_cost.abs())
+        && (a.imbalance_cost - b.imbalance_cost).abs() <= 1e-9 * (1.0 + a.imbalance_cost.abs())
         && (a.scheduling_pattern_cost - b.scheduling_pattern_cost).abs()
             <= 1e-9 * (1.0 + a.scheduling_pattern_cost.abs())
 }

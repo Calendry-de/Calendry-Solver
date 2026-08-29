@@ -8,7 +8,8 @@
 use crate::aggregates::{
     Aggregates, CompactnessInstance, DayMixInstance, ExamSpacingSameDayInstance,
     ExamSpacingWindowInstance, MaxConsecutiveInstance, MaxDailySpanInstance,
-    MaxWeeklyTeachingLoadInstance, PatternAdherenceInstance, ShareInstance,
+    MaxWeeklyTeachingLoadInstance, MinimizeWeekdayImbalanceInstance, PatternAdherenceInstance,
+    ShareInstance,
 };
 use crate::bitset::BitSet;
 use crate::groups::{GroupClosure, GroupCycle};
@@ -286,6 +287,10 @@ pub struct ConstraintSet {
     /// exam-kind Sessions of one Group. See
     /// [`crate::aggregates::ExamSpacingWindowInstance`].
     pub exam_spacing_window: Vec<ExamSpacingWindowInstance>,
+    /// SOFT, aggregate over a week. Spreads a Group's Sessions evenly across
+    /// its active days, rather than clustering on some and leaving others
+    /// empty. See [`crate::aggregates::MinimizeWeekdayImbalanceInstance`].
+    pub minimize_weekday_imbalance: Vec<MinimizeWeekdayImbalanceInstance>,
 }
 
 /// One `ProtectedBlock` instance. The FIRST hard type whose values
@@ -375,6 +380,7 @@ pub struct Enforce {
     pub max_weekly_teaching_load: bool,
     pub exam_spacing_same_day: bool,
     pub exam_spacing_window: bool,
+    pub minimize_weekday_imbalance: bool,
 }
 
 impl ConstraintSet {
@@ -416,6 +422,10 @@ impl ConstraintSet {
             max_weekly_teaching_load: self.max_weekly_teaching_load.iter().any(|c| c.covers(kind)),
             exam_spacing_same_day: self.exam_spacing_same_day.iter().any(|c| c.covers(kind)),
             exam_spacing_window: self.exam_spacing_window.iter().any(|c| c.covers(kind)),
+            minimize_weekday_imbalance: self
+                .minimize_weekday_imbalance
+                .iter()
+                .any(|c| c.covers(kind)),
         }
     }
 }
@@ -919,6 +929,9 @@ pub struct Problem {
     pub exam_same_day_weight: f64,
     /// Summed weight of every configured `ExamSpacingWindow` instance.
     pub exam_window_weight: f64,
+    /// Summed weight of every configured `MinimizeWeekdayImbalance`
+    /// instance.
+    pub imbalance_weight: f64,
     /// Summed weight of every configured `DistributedPatternAdherence`.
     pub distributed_pattern_weight: f64,
     /// Summed weight of every configured `BlockPatternAdherence`.
@@ -1115,6 +1128,8 @@ impl Problem {
             constraints.max_weekly_teaching_load.clone(),
             constraints.exam_spacing_same_day.clone(),
             constraints.exam_spacing_window.clone(),
+            constraints.minimize_weekday_imbalance.clone(),
+            slots.active_days().len(),
         );
 
         let day_mix_weight: f64 = constraints
@@ -1181,6 +1196,11 @@ impl Problem {
             .sum();
         let exam_window_weight: f64 = constraints
             .exam_spacing_window
+            .iter()
+            .map(|i| i.weight)
+            .sum();
+        let imbalance_weight: f64 = constraints
+            .minimize_weekday_imbalance
             .iter()
             .map(|i| i.weight)
             .sum();
@@ -1315,6 +1335,7 @@ impl Problem {
             max_weekly_teaching_load_weight,
             exam_same_day_weight,
             exam_window_weight,
+            imbalance_weight,
             distributed_pattern_weight,
             block_pattern_weight,
             in_scope,

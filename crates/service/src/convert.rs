@@ -28,7 +28,7 @@ use std::collections::{HashMap, HashSet};
 use calendry_solver_core::aggregates::{
     CompactnessInstance, DayMixInstance, ExamSpacingSameDayInstance, ExamSpacingWindowInstance,
     MaxConsecutiveInstance, MaxDailySpanInstance, MaxWeeklyTeachingLoadInstance,
-    PatternAdherenceInstance, ShareInstance, ShareWindow,
+    MinimizeWeekdayImbalanceInstance, PatternAdherenceInstance, ShareInstance, ShareWindow,
 };
 use calendry_solver_core::ids::{GroupIdx, OfferingIdx, PersonIdx, RoomIdx, SlotIdx};
 use calendry_solver_core::preferences::{Preference, PreferenceInstance};
@@ -1284,11 +1284,21 @@ fn build_constraints(input: &pb::SolverInput) -> Result<ConstraintSet, ConvertEr
                     max_span_blocks: p.max_span_blocks,
                 });
             }
+            // Built — see `crate::aggregates::MinimizeWeekdayImbalanceInstance`.
+            // Empty message: no params beyond id/kinds/weight.
             Some(Params::MinimizeWeekdayImbalance(_)) => {
-                return Err(ConvertError::ConstraintTypeUnimplemented {
-                    constraint: c.id.clone(),
-                    constraint_type: "MinimizeWeekdayImbalance",
-                });
+                if c.weight < 0.0 || c.weight.is_nan() {
+                    return Err(ConvertError::NegativeSoftWeight {
+                        constraint: c.id.clone(),
+                        weight: c.weight,
+                    });
+                }
+                set.minimize_weekday_imbalance
+                    .push(MinimizeWeekdayImbalanceInstance {
+                        id: c.id.clone(),
+                        kinds: c.applies_to_kinds.clone(),
+                        weight: c.weight,
+                    });
             }
             Some(Params::RoomTurnaroundBuffer(_)) => {
                 return Err(ConvertError::ConstraintTypeUnimplemented {

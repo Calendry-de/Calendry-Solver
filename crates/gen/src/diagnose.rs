@@ -133,6 +133,7 @@ fn single(axis: fn(&mut Enforce), base: Enforce) -> Enforce {
         max_weekly_teaching_load: false,
         exam_spacing_same_day: false,
         exam_spacing_window: false,
+        minimize_weekday_imbalance: false,
     };
     axis(&mut e);
     axis(&mut probe);
@@ -156,6 +157,7 @@ fn single(axis: fn(&mut Enforce), base: Enforce) -> Enforce {
         max_weekly_teaching_load: e.max_weekly_teaching_load && base.max_weekly_teaching_load,
         exam_spacing_same_day: e.exam_spacing_same_day && base.exam_spacing_same_day,
         exam_spacing_window: e.exam_spacing_window && base.exam_spacing_window,
+        minimize_weekday_imbalance: e.minimize_weekday_imbalance && base.minimize_weekday_imbalance,
     }
 }
 

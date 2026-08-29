@@ -420,10 +420,6 @@ fn every_staged_p2_type_is_unimplemented_not_invalid() {
         ("RoomConsistency", Params::RoomConsistency(pb::RoomConsistency {})),
         ("MinimizeRoomChurn", Params::MinimizeRoomChurn(pb::MinimizeRoomChurn::default())),
         (
-            "MinimizeWeekdayImbalance",
-            Params::MinimizeWeekdayImbalance(pb::MinimizeWeekdayImbalance::default()),
-        ),
-        (
             "RoomTurnaroundBuffer",
             Params::RoomTurnaroundBuffer(pb::RoomTurnaroundBuffer::default()),
         ),

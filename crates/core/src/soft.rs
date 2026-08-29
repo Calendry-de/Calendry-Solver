@@ -381,6 +381,12 @@ pub struct Objective {
     pub exam_same_day_cost: f64,
     /// The `ExamSpacingWindow` counterpart of `exam_same_day_cost`.
     pub exam_window_cost: f64,
+    /// Sum, over every Group and week, of the population variance of that
+    /// Group's per-active-day Session counts, already multiplied by the
+    /// configured weight — read fresh off the counters like `exam_same_day_
+    /// cost`, not maintained as a running total: unlike variance's natural
+    /// unboundedness per placement, groups x weeks is small enough to rescan.
+    pub imbalance_cost: f64,
     /// `DistributedPatternAdherence` and `BlockPatternAdherence` together,
     /// already multiplied by each type's configured weight. Read whole off
     /// `Aggregates`' running totals for the same reason `compactness_cost` is:
@@ -412,6 +418,7 @@ impl Objective {
             + self.max_weekly_teaching_load_cost
             + self.exam_same_day_cost
             + self.exam_window_cost
+            + self.imbalance_cost
             + self.scheduling_pattern_cost
     }
 }
@@ -626,6 +633,7 @@ mod tests {
             max_weekly_teaching_load_cost: 0.0,
             exam_same_day_cost: 0.0,
             exam_window_cost: 0.0,
+            imbalance_cost: 0.0,
             scheduling_pattern_cost: 0.0,
         };
         let one_unplaced = Objective {
@@ -639,6 +647,7 @@ mod tests {
             max_weekly_teaching_load_cost: 0.0,
             exam_same_day_cost: 0.0,
             exam_window_cost: 0.0,
+            imbalance_cost: 0.0,
             scheduling_pattern_cost: 0.0,
         };
         assert!(one_unplaced.total(hard_penalty) > all_soft_bad.total(hard_penalty));
@@ -669,6 +678,7 @@ mod tests {
             max_weekly_teaching_load_cost: 0.0,
             exam_same_day_cost: 0.0,
             exam_window_cost: 0.0,
+            imbalance_cost: 0.0,
             scheduling_pattern_cost: 0.0,
         };
         let one_unplaced = Objective {
@@ -682,6 +692,7 @@ mod tests {
             max_weekly_teaching_load_cost: 0.0,
             exam_same_day_cost: 0.0,
             exam_window_cost: 0.0,
+            imbalance_cost: 0.0,
             scheduling_pattern_cost: 0.0,
         };
 
