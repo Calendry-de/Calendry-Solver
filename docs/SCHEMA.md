@@ -4,16 +4,14 @@ Status, not decisions. The decision this records is
 [ADR-0003](adr/0003-proto-schema-as-a-pinned-submodule.md) — the schema lives in
 a separate repo, consumed as a pinned submodule.
 
-## Current pin: `03aed98`, one field past `v0.9.0` — **local, untagged, unpublished**
+## Current pin: `03aed98` = `v0.10.0`
 
 `SolveScope.minimize_movement_weight` (field 4) was added on top of `855c145`
 while building "v2 minimize-movement repair mode" — see the correction below,
-which this pin bump directly falsifies. Deliberately not tagged or pushed from
-here: per ADR-0003, cutting a schema version is its own deliberate act, done in
-the `calendry-proto` repo, not a side effect of a solver-side change. Until that
-happens, treat `03aed98` as a status of *this workspace's* submodule checkout,
-not of the published package — `@mindcollaps/calendry-proto@0.9.0` on GitHub
-Packages still does not carry this field.
+which this pin bump directly falsifies. Tagged and pushed to
+`github.com/MindCollaps/calendry-proto`; `publish.yml` ran for real on the tag
+push (run `33235914770`, not a dry run — verified from its own job log, same as
+`v0.9.0`), so `@mindcollaps/calendry-proto@0.10.0` is on GitHub Packages.
 
 * **`SolveScope.minimize_movement_weight`**, a plain `double`, not `optional` —
   `0.0` is `LOCK_POLICY_MINIMIZE_MOVEMENT`'s own "track it, do not steer"
