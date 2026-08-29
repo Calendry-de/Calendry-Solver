@@ -28,7 +28,7 @@
 //!   exactly how `ExactFrequency` already behaves for unplaced Sessions, rather
 //!   than a new exception.
 
-use crate::ids::GroupIdx;
+use crate::ids::{GroupIdx, PersonIdx, SlotIdx};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum ShareWindow {
@@ -90,6 +90,30 @@ impl ShareInstance {
     }
 }
 
+/// One configured `Compactness`.
+///
+/// Like `OnlineOnsiteSameDay`, a single shared weight rather than per-instance
+/// buckets: `group`/`person` independently gate which axis THIS instance's
+/// weight applies to (the wire's `repeated CompactnessScope`, empty = both), so
+/// a tenant wanting different weights per axis configures two instances rather
+/// than this type growing a second weight field.
+#[derive(Clone, Debug)]
+pub struct CompactnessInstance {
+    pub id: String,
+    /// Empty means all kinds.
+    pub kinds: Vec<String>,
+    pub weight: f64,
+    pub group: bool,
+    pub person: bool,
+}
+
+impl CompactnessInstance {
+    #[inline]
+    pub fn covers(&self, kind: &str) -> bool {
+        self.kinds.is_empty() || self.kinds.iter().any(|k| k == kind)
+    }
+}
+
 /// Per-instance counters for one `MaxOnlineShare` rule.
 #[derive(Clone, Debug)]
 struct ShareCounters {
@@ -130,10 +154,51 @@ pub struct Aggregates {
 
     rules: Vec<ShareInstance>,
     counters: Vec<ShareCounters>,
+
+    /// `[group * n_slots + slot]` — how many currently-placed Sessions occupy
+    /// that Group's block. A COUNT, not a bitset: unlike the structural
+    /// `group_double_booking` bitset (which `is_free` enforces so overlap is
+    /// impossible), Compactness is soft and never filters placement, so two
+    /// Sessions CAN legitimately share a block when the hard type is disabled
+    /// — removing one must not clear a block the other still occupies. Empty
+    /// when no configured `Compactness` covers the Group axis, so the
+    /// allocation and every read/write below is skipped entirely.
+    group_slot: Vec<u32>,
+    /// The Person counterpart of `group_slot`, one byte per cell rather than
+    /// four. Bounded at `u8::MAX` overlapping Sessions per block, which is not
+    /// a real ceiling — no real tenant clusters 256 concurrent bookings on one
+    /// person — only a saturation guard, because at large-university scale
+    /// `persons × slots` is the one array in this module large enough (tens of
+    /// MB) for the byte-vs-word choice to matter.
+    person_slot: Vec<u8>,
+    /// Running sum of `group_day_gap`/`person_day_gap` over every currently
+    /// occupied `(entity, day)` cell — maintained as a delta on every mark/
+    /// unmark, exactly like `ShareCounters::violated`, rather than rescanned.
+    /// A full rescan is what `day_mix_violations` does, and that is safe ONLY
+    /// because it is `O(groups × days)`; `persons × days` is roughly 10x
+    /// larger at large-university scale and `Trial::objective` reads this on
+    /// every accept/reject decision, not just at reporting time — a rescan
+    /// there would turn LNS itself slow rather than merely reporting slowly.
+    group_gap_total: u32,
+    person_gap_total: u32,
+    n_slots: usize,
+    blocks_per_day: usize,
+
+    compactness_rules: Vec<CompactnessInstance>,
 }
 
 impl Aggregates {
-    pub fn new(n_groups: usize, n_days: usize, n_weeks: usize, rules: Vec<ShareInstance>) -> Self {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        n_groups: usize,
+        n_days: usize,
+        n_weeks: usize,
+        rules: Vec<ShareInstance>,
+        n_persons: usize,
+        n_slots: usize,
+        blocks_per_day: usize,
+        compactness_rules: Vec<CompactnessInstance>,
+    ) -> Self {
         let groups = n_groups.max(1);
         let counters = rules
             .iter()
@@ -146,12 +211,23 @@ impl Aggregates {
             })
             .collect();
 
+        let track_group = compactness_rules.iter().any(|r| r.group);
+        let track_person = compactness_rules.iter().any(|r| r.person);
+        let slots = n_slots.max(1);
+
         Self {
             online_day: vec![0; groups * n_days.max(1)],
             onsite_day: vec![0; groups * n_days.max(1)],
             n_days: n_days.max(1),
             rules,
             counters,
+            group_slot: if track_group { vec![0; groups * slots] } else { Vec::new() },
+            person_slot: if track_person { vec![0; n_persons.max(1) * slots] } else { Vec::new() },
+            group_gap_total: 0,
+            person_gap_total: 0,
+            n_slots: slots,
+            blocks_per_day: blocks_per_day.max(1),
+            compactness_rules,
         }
     }
 
@@ -243,6 +319,274 @@ impl Aggregates {
         (0..self.online_day.len())
             .filter(move |&c| self.online_day[c] > 0 && self.onsite_day[c] > 0)
             .map(move |c| (GroupIdx((c / self.n_days) as u32), (c % self.n_days) as u32))
+    }
+
+    // -- compactness ---------------------------------------------------------
+
+    pub fn compactness_rules(&self) -> &[CompactnessInstance] {
+        &self.compactness_rules
+    }
+
+    #[inline]
+    fn day_range(&self, day: u32) -> (usize, usize) {
+        let start = day as usize * self.blocks_per_day;
+        (start, start + self.blocks_per_day)
+    }
+
+    /// Idle blocks strictly between the first and last occupied block of one
+    /// day, for a row already narrowed to that day's `blocks_per_day` cells.
+    /// `0` for an empty or single-block day: there is nothing "between" one
+    /// occupied block, or none.
+    #[inline]
+    fn gap_u32(day_cells: &[u32]) -> u32 {
+        let mut first = None;
+        let mut last = 0usize;
+        let mut occupied = 0u32;
+        for (i, &c) in day_cells.iter().enumerate() {
+            if c > 0 {
+                first.get_or_insert(i);
+                last = i;
+                occupied += 1;
+            }
+        }
+        match first {
+            Some(f) => (last - f + 1) as u32 - occupied,
+            None => 0,
+        }
+    }
+
+    /// See [`Self::gap_u32`]. Duplicated rather than made generic: `person_slot`
+    /// is `u8` specifically to halve-then-some its footprint at
+    /// large-university scale, and a generic `PartialOrd + Default` version
+    /// would cost the compiler nothing but would cost a reader the concrete
+    /// type at the point that actually matters here.
+    #[inline]
+    fn gap_u8(day_cells: &[u8]) -> u32 {
+        let mut first = None;
+        let mut last = 0usize;
+        let mut occupied = 0u32;
+        for (i, &c) in day_cells.iter().enumerate() {
+            if c > 0 {
+                first.get_or_insert(i);
+                last = i;
+                occupied += 1;
+            }
+        }
+        match first {
+            Some(f) => (last - f + 1) as u32 - occupied,
+            None => 0,
+        }
+    }
+
+    /// `gap_u32`, but with `span` treated as already occupied — WITHOUT
+    /// mutating `day_cells` or allocating, so `evaluator::score_one` can rank
+    /// a candidate against this before it is chosen. `span` is a handful of
+    /// slots (a Session's duration), so the linear `contains` scan per cell
+    /// costs nothing a hot loop would notice.
+    #[inline]
+    fn gap_u32_with(day_cells: &[u32], start: usize, span: &[SlotIdx]) -> u32 {
+        let mut first = None;
+        let mut last = 0usize;
+        let mut occupied = 0u32;
+        for (i, &c) in day_cells.iter().enumerate() {
+            let is_occupied = c > 0 || span.iter().any(|s| s.get() == start + i);
+            if is_occupied {
+                first.get_or_insert(i);
+                last = i;
+                occupied += 1;
+            }
+        }
+        match first {
+            Some(f) => (last - f + 1) as u32 - occupied,
+            None => 0,
+        }
+    }
+
+    /// See [`Self::gap_u32_with`]; the `u8` counterpart.
+    #[inline]
+    fn gap_u8_with(day_cells: &[u8], start: usize, span: &[SlotIdx]) -> u32 {
+        let mut first = None;
+        let mut last = 0usize;
+        let mut occupied = 0u32;
+        for (i, &c) in day_cells.iter().enumerate() {
+            let is_occupied = c > 0 || span.iter().any(|s| s.get() == start + i);
+            if is_occupied {
+                first.get_or_insert(i);
+                last = i;
+                occupied += 1;
+            }
+        }
+        match first {
+            Some(f) => (last - f + 1) as u32 - occupied,
+            None => 0,
+        }
+    }
+
+    /// The gap DELTA compactness would experience if `groups` gained
+    /// occupancy at `span`, without mutating anything — for ranking a
+    /// candidate during repair before it is committed. `add_group_compactness`
+    /// computes the same delta for real once a candidate is actually chosen;
+    /// this is its read-only preview.
+    pub fn group_compactness_delta(&self, groups: &[GroupIdx], day: u32, span: &[SlotIdx]) -> i64 {
+        if self.group_slot.is_empty() || span.is_empty() {
+            return 0;
+        }
+        let (start, end) = self.day_range(day);
+        let mut delta = 0i64;
+        for &g in groups {
+            let row = g.get() * self.n_slots;
+            let before = Self::gap_u32(&self.group_slot[row + start..row + end]);
+            let after = Self::gap_u32_with(&self.group_slot[row + start..row + end], start, span);
+            delta += i64::from(after) - i64::from(before);
+        }
+        delta
+    }
+
+    /// See [`Self::group_compactness_delta`]; the Person counterpart.
+    pub fn person_compactness_delta(
+        &self,
+        persons: &[PersonIdx],
+        day: u32,
+        span: &[SlotIdx],
+    ) -> i64 {
+        if self.person_slot.is_empty() || span.is_empty() {
+            return 0;
+        }
+        let (start, end) = self.day_range(day);
+        let mut delta = 0i64;
+        for &p in persons {
+            let row = p.get() * self.n_slots;
+            let before = Self::gap_u8(&self.person_slot[row + start..row + end]);
+            let after = Self::gap_u8_with(&self.person_slot[row + start..row + end], start, span);
+            delta += i64::from(after) - i64::from(before);
+        }
+        delta
+    }
+
+    /// Mark `span` busy for `groups`' compactness tracking, updating
+    /// `group_gap_total` by the exact delta for each touched Group's day. A
+    /// no-op when no configured `Compactness` covers the Group axis.
+    ///
+    /// `span` is a single Session's slots, always within one calendar day (see
+    /// `SlotTable::span`), so exactly one day is touched per Group here — no
+    /// loop over multiple days, unlike the day-mix counters above, which are
+    /// handed every day a multi-day-spanning CALLER context might cover.
+    pub fn add_group_compactness(&mut self, groups: &[GroupIdx], day: u32, span: &[SlotIdx]) {
+        if self.group_slot.is_empty() || span.is_empty() {
+            return;
+        }
+        let (start, end) = self.day_range(day);
+        for &g in groups {
+            let row = g.get() * self.n_slots;
+            let before = Self::gap_u32(&self.group_slot[row + start..row + end]);
+            for &s in span {
+                self.group_slot[row + s.get()] += 1;
+            }
+            let after = Self::gap_u32(&self.group_slot[row + start..row + end]);
+            self.group_gap_total =
+                (i64::from(self.group_gap_total) + i64::from(after) - i64::from(before)) as u32;
+        }
+    }
+
+    pub fn remove_group_compactness(&mut self, groups: &[GroupIdx], day: u32, span: &[SlotIdx]) {
+        if self.group_slot.is_empty() || span.is_empty() {
+            return;
+        }
+        let (start, end) = self.day_range(day);
+        for &g in groups {
+            let row = g.get() * self.n_slots;
+            let before = Self::gap_u32(&self.group_slot[row + start..row + end]);
+            for &s in span {
+                self.group_slot[row + s.get()] = self.group_slot[row + s.get()].saturating_sub(1);
+            }
+            let after = Self::gap_u32(&self.group_slot[row + start..row + end]);
+            self.group_gap_total =
+                (i64::from(self.group_gap_total) + i64::from(after) - i64::from(before)) as u32;
+        }
+    }
+
+    /// See [`Self::add_group_compactness`]; the Person counterpart, over
+    /// `who.attendees` rather than `who.subtree_groups`.
+    pub fn add_person_compactness(&mut self, persons: &[PersonIdx], day: u32, span: &[SlotIdx]) {
+        if self.person_slot.is_empty() || span.is_empty() {
+            return;
+        }
+        let (start, end) = self.day_range(day);
+        for &p in persons {
+            let row = p.get() * self.n_slots;
+            let before = Self::gap_u8(&self.person_slot[row + start..row + end]);
+            for &s in span {
+                let c = row + s.get();
+                self.person_slot[c] = self.person_slot[c].saturating_add(1);
+            }
+            let after = Self::gap_u8(&self.person_slot[row + start..row + end]);
+            self.person_gap_total =
+                (i64::from(self.person_gap_total) + i64::from(after) - i64::from(before)) as u32;
+        }
+    }
+
+    pub fn remove_person_compactness(&mut self, persons: &[PersonIdx], day: u32, span: &[SlotIdx]) {
+        if self.person_slot.is_empty() || span.is_empty() {
+            return;
+        }
+        let (start, end) = self.day_range(day);
+        for &p in persons {
+            let row = p.get() * self.n_slots;
+            let before = Self::gap_u8(&self.person_slot[row + start..row + end]);
+            for &s in span {
+                let c = row + s.get();
+                self.person_slot[c] = self.person_slot[c].saturating_sub(1);
+            }
+            let after = Self::gap_u8(&self.person_slot[row + start..row + end]);
+            self.person_gap_total =
+                (i64::from(self.person_gap_total) + i64::from(after) - i64::from(before)) as u32;
+        }
+    }
+
+    /// What the currently idle blocks cost, at the configured weight — O(1),
+    /// read straight off `group_gap_total`/`person_gap_total` rather than
+    /// rescanned, for the reason those fields' own doc gives.
+    pub fn compactness_cost(&self, group_weight: f64, person_weight: f64) -> f64 {
+        self.group_gap_total as f64 * group_weight + self.person_gap_total as f64 * person_weight
+    }
+
+    /// Sum of `weight` over every currently-gapped `(entity, day)` cell this
+    /// occupant participates in, for `ruin_worst`'s attribution.
+    ///
+    /// Like `day_mix_violation_cost`, every occupant of a gapped cell is
+    /// charged, not only the ones at the gap's edges: removing ANY Session on
+    /// a gapped day can only shrink the occupied range or leave it the same,
+    /// never make a NEW gap where none existed, so there is no occupant in a
+    /// gapped cell whose removal is provably useless the way an on-site
+    /// Session is in a share breach.
+    pub fn compactness_ruin_cost(
+        &self,
+        groups: &[GroupIdx],
+        persons: &[PersonIdx],
+        day: u32,
+        group_weight: f64,
+        person_weight: f64,
+    ) -> f64 {
+        let mut cost = 0.0;
+        if group_weight != 0.0 && !self.group_slot.is_empty() {
+            let (start, end) = self.day_range(day);
+            for &g in groups {
+                let row = g.get() * self.n_slots;
+                if Self::gap_u32(&self.group_slot[row + start..row + end]) > 0 {
+                    cost += group_weight;
+                }
+            }
+        }
+        if person_weight != 0.0 && !self.person_slot.is_empty() {
+            let (start, end) = self.day_range(day);
+            for &p in persons {
+                let row = p.get() * self.n_slots;
+                if Self::gap_u8(&self.person_slot[row + start..row + end]) > 0 {
+                    cost += person_weight;
+                }
+            }
+        }
+        cost
     }
 
     // -- share -------------------------------------------------------------
@@ -436,7 +780,7 @@ mod tests {
 
     #[test]
     fn day_mix_blocks_only_the_opposite_mode() {
-        let mut a = Aggregates::new(2, 3, 1, vec![]);
+        let mut a = Aggregates::new(2, 3, 1, vec![], 0, 0, 1, vec![]);
         let g = [GroupIdx(0)];
 
         assert!(a.day_mix_allows(&g, &[0], true), "empty day accepts anything");
@@ -455,7 +799,8 @@ mod tests {
 
     #[test]
     fn share_violation_tracks_a_moving_denominator() {
-        let mut a = Aggregates::new(1, 1, 1, vec![rule(0.5, ShareWindow::PerTerm)]);
+        let mut a =
+            Aggregates::new(1, 1, 1, vec![rule(0.5, ShareWindow::PerTerm)], 0, 0, 1, vec![]);
         let g = [GroupIdx(0)];
 
         // 1 online of 1 total = 100% > 50%.
@@ -483,12 +828,14 @@ mod tests {
         };
 
         // PER_TERM: 2 online of 4 = 50%, allowed.
-        let mut term = Aggregates::new(1, 1, 2, vec![rule(0.5, ShareWindow::PerTerm)]);
+        let mut term =
+            Aggregates::new(1, 1, 2, vec![rule(0.5, ShareWindow::PerTerm)], 0, 0, 1, vec![]);
         load(&mut term);
         assert_eq!(term.share_violations(), 0);
 
         // PER_WEEK: week 0 is 2 of 2 = 100%, violated.
-        let mut week = Aggregates::new(1, 1, 2, vec![rule(0.5, ShareWindow::PerWeek)]);
+        let mut week =
+            Aggregates::new(1, 1, 2, vec![rule(0.5, ShareWindow::PerWeek)], 0, 0, 1, vec![]);
         load(&mut week);
         assert_eq!(week.share_violations(), 1);
     }
@@ -505,6 +852,10 @@ mod tests {
                 max_ratio: 0.0,
                 window: ShareWindow::PerTerm,
             }],
+            0,
+            0,
+            1,
+            vec![],
         );
         a.apply_share("staff_meeting", &[GroupIdx(0)], 0, true, true);
         assert_eq!(a.share_violations(), 0, "out-of-scope kind must not count");
@@ -525,7 +876,7 @@ mod tests {
             max_ratio: 0.5,
             window: ShareWindow::PerTerm,
         };
-        let mut a = Aggregates::new(1, 1, 1, vec![scoped]);
+        let mut a = Aggregates::new(1, 1, 1, vec![scoped], 0, 0, 1, vec![]);
         let g = [GroupIdx(0)];
         // 2 online of 2 total = 100% > 50%: violated.
         a.apply_share("lecture", &g, 0, true, true);
@@ -549,7 +900,8 @@ mod tests {
 
     #[test]
     fn share_violation_cost_is_zero_once_the_cell_stops_violating() {
-        let mut a = Aggregates::new(1, 1, 1, vec![rule(0.5, ShareWindow::PerTerm)]);
+        let mut a =
+            Aggregates::new(1, 1, 1, vec![rule(0.5, ShareWindow::PerTerm)], 0, 0, 1, vec![]);
         let g = [GroupIdx(0)];
         a.apply_share("lecture", &g, 0, true, true);
         assert_eq!(a.share_violation_cost("lecture", &g, 0, 100.0), 100.0);
@@ -566,7 +918,7 @@ mod tests {
     /// cell are charged — the asymmetry above does not apply here.
     #[test]
     fn day_mix_violation_cost_charges_both_modes_in_a_mixed_cell() {
-        let mut a = Aggregates::new(1, 2, 1, vec![]);
+        let mut a = Aggregates::new(1, 2, 1, vec![], 0, 0, 1, vec![]);
         let g = [GroupIdx(0)];
         a.add_day_mode(&g, &[0], true);
         assert_eq!(a.day_mix_violation_cost(&g, &[0], 10.0), 0.0, "one mode alone is not mixed");
@@ -578,5 +930,105 @@ mod tests {
         assert_eq!(a.day_mix_violation_cost(&g, &[0], 0.0), 0.0);
         // An untouched day on the same group is unaffected.
         assert_eq!(a.day_mix_violation_cost(&g, &[1], 10.0), 0.0);
+    }
+
+    // -- compactness ---------------------------------------------------------
+
+    fn compactness_rule(group: bool, person: bool) -> CompactnessInstance {
+        CompactnessInstance { id: "c".into(), kinds: vec![], weight: 1.0, group, person }
+    }
+
+    #[test]
+    fn group_compactness_counts_idle_blocks_between_first_and_last() {
+        // 4 blocks/day, 1 day, 1 group.
+        let mut a = Aggregates::new(1, 1, 1, vec![], 0, 4, 4, vec![compactness_rule(true, false)]);
+        let g = [GroupIdx(0)];
+
+        a.add_group_compactness(&g, 0, &[SlotIdx(0)]);
+        assert_eq!(
+            a.compactness_cost(1.0, 0.0),
+            0.0,
+            "a single occupied block has nothing between"
+        );
+
+        a.add_group_compactness(&g, 0, &[SlotIdx(3)]);
+        assert_eq!(a.compactness_cost(1.0, 0.0), 2.0, "blocks 1 and 2 sit idle between 0 and 3");
+
+        a.add_group_compactness(&g, 0, &[SlotIdx(1)]);
+        assert_eq!(a.compactness_cost(1.0, 0.0), 1.0, "only block 2 is idle now");
+
+        a.remove_group_compactness(&g, 0, &[SlotIdx(3)]);
+        assert_eq!(a.compactness_cost(1.0, 0.0), 0.0, "0 and 1 are adjacent: no gap left");
+    }
+
+    #[test]
+    fn compactness_cost_is_zero_at_zero_weight_regardless_of_gaps() {
+        let mut a = Aggregates::new(1, 1, 1, vec![], 0, 4, 4, vec![compactness_rule(true, false)]);
+        let g = [GroupIdx(0)];
+        a.add_group_compactness(&g, 0, &[SlotIdx(0)]);
+        a.add_group_compactness(&g, 0, &[SlotIdx(3)]);
+        assert_eq!(a.compactness_cost(0.0, 0.0), 0.0, "a disabled weight must charge nothing");
+    }
+
+    #[test]
+    fn person_compactness_uses_the_same_gap_rule_as_group() {
+        let mut a = Aggregates::new(0, 1, 1, vec![], 1, 4, 4, vec![compactness_rule(false, true)]);
+        let p = [PersonIdx(0)];
+
+        a.add_person_compactness(&p, 0, &[SlotIdx(0)]);
+        a.add_person_compactness(&p, 0, &[SlotIdx(3)]);
+        assert_eq!(a.compactness_cost(0.0, 1.0), 2.0);
+
+        a.remove_person_compactness(&p, 0, &[SlotIdx(0)]);
+        assert_eq!(a.compactness_cost(0.0, 1.0), 0.0, "one remaining block has nothing between");
+    }
+
+    #[test]
+    fn an_axis_not_selected_by_any_rule_is_never_allocated_or_tracked() {
+        // Only the Group axis is configured — Person tracking must be a no-op,
+        // not silently inert data that still costs memory.
+        let mut a = Aggregates::new(1, 1, 1, vec![], 1, 4, 4, vec![compactness_rule(true, false)]);
+        a.add_person_compactness(&[PersonIdx(0)], 0, &[SlotIdx(0), SlotIdx(3)]);
+        assert_eq!(a.compactness_cost(0.0, 1.0), 0.0, "Person axis was never configured");
+    }
+
+    #[test]
+    fn a_second_session_sharing_a_block_does_not_corrupt_removal() {
+        // Two Sessions of the same Group legitimately occupying block 1 at
+        // once (group_double_booking disabled) — removing ONE must not clear
+        // the block the other still holds. A bitset would get this wrong; the
+        // count must not.
+        let mut a = Aggregates::new(1, 1, 1, vec![], 0, 4, 4, vec![compactness_rule(true, false)]);
+        let g = [GroupIdx(0)];
+        a.add_group_compactness(&g, 0, &[SlotIdx(0)]);
+        a.add_group_compactness(&g, 0, &[SlotIdx(1)]);
+        a.add_group_compactness(&g, 0, &[SlotIdx(1)]); // second Session, same block
+        a.add_group_compactness(&g, 0, &[SlotIdx(3)]);
+        assert_eq!(a.compactness_cost(1.0, 0.0), 1.0, "block 2 idle between 1 and 3");
+
+        a.remove_group_compactness(&g, 0, &[SlotIdx(1)]); // remove only one of the two
+        assert_eq!(
+            a.compactness_cost(1.0, 0.0),
+            1.0,
+            "block 1 is still occupied by the other Session — still no gap there"
+        );
+    }
+
+    #[test]
+    fn the_read_only_delta_preview_matches_what_add_actually_charges() {
+        let mut a = Aggregates::new(1, 1, 1, vec![], 0, 4, 4, vec![compactness_rule(true, false)]);
+        let g = [GroupIdx(0)];
+        a.add_group_compactness(&g, 0, &[SlotIdx(0)]);
+
+        let preview = a.group_compactness_delta(&g, 0, &[SlotIdx(3)]);
+        let before = a.compactness_cost(1.0, 0.0);
+        a.add_group_compactness(&g, 0, &[SlotIdx(3)]);
+        let after = a.compactness_cost(1.0, 0.0);
+
+        assert_eq!(
+            preview as f64,
+            after - before,
+            "the preview must match the real charge exactly"
+        );
     }
 }

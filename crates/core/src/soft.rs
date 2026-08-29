@@ -350,6 +350,14 @@ pub struct Objective {
     /// Stored pre-multiplied so `total()` keeps its signature and every caller
     /// does not have to carry the weight around.
     pub day_mix_cost: f64,
+    /// Idle blocks between an entity's first and last Session of a day,
+    /// summed over every currently-occupied `(Group-or-Person, day)` cell and
+    /// already multiplied by each axis's configured weight.
+    ///
+    /// SEPARATE FROM `soft` for the exact reason `day_mix_cost` is: a gap
+    /// belongs to a day, not to any one placement, so it is read whole off
+    /// `Aggregates`' running totals rather than accumulated as a delta.
+    pub compactness_cost: f64,
 }
 
 impl Objective {
@@ -366,7 +374,7 @@ impl Objective {
 
     #[inline]
     pub fn total(&self, hard_penalty: f64) -> f64 {
-        self.hard() as f64 * hard_penalty + self.soft + self.day_mix_cost
+        self.hard() as f64 * hard_penalty + self.soft + self.day_mix_cost + self.compactness_cost
     }
 }
 
@@ -569,9 +577,20 @@ mod tests {
     fn total_is_lexicographic_under_a_derived_penalty() {
         // Any single unplaced session must outrank every soft configuration.
         let hard_penalty = 7.0 * 4.0 + 1.0; // total_weight * placements + 1
-        let all_soft_bad =
-            Objective { unplaced: 0, aggregate: 0, soft: 7.0 * 4.0, day_mix_cost: 0.0 };
-        let one_unplaced = Objective { unplaced: 1, aggregate: 0, soft: 0.0, day_mix_cost: 0.0 };
+        let all_soft_bad = Objective {
+            unplaced: 0,
+            aggregate: 0,
+            soft: 7.0 * 4.0,
+            day_mix_cost: 0.0,
+            compactness_cost: 0.0,
+        };
+        let one_unplaced = Objective {
+            unplaced: 1,
+            aggregate: 0,
+            soft: 0.0,
+            day_mix_cost: 0.0,
+            compactness_cost: 0.0,
+        };
         assert!(one_unplaced.total(hard_penalty) > all_soft_bad.total(hard_penalty));
     }
 
@@ -594,8 +613,15 @@ mod tests {
             aggregate: 0,
             soft: 7.0 * 4.0,
             day_mix_cost: day_mix_weight * cells,
+            compactness_cost: 0.0,
         };
-        let one_unplaced = Objective { unplaced: 1, aggregate: 0, soft: 0.0, day_mix_cost: 0.0 };
+        let one_unplaced = Objective {
+            unplaced: 1,
+            aggregate: 0,
+            soft: 0.0,
+            day_mix_cost: 0.0,
+            compactness_cost: 0.0,
+        };
 
         assert!(one_unplaced.total(hard_penalty) > everything_mixed.total(hard_penalty));
     }

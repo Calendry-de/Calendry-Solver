@@ -809,6 +809,9 @@ fn build_constraints(params: &InstanceParams, slots: &SlotTable) -> ConstraintSe
             .into_iter()
             .collect(),
         soft,
+        // Not part of any calibrated preset — `docs/PERFORMANCE.md` has no
+        // Compactness measurement to keep stable, unlike the types above.
+        compactness: Vec::new(),
     }
 }
 

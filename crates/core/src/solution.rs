@@ -512,6 +512,37 @@ impl SearchState {
         self.aggregates.day_mix_violations() as f64 * problem.day_mix_weight
     }
 
+    /// The compactness cost DELTA of placing `who` at `span` — a ranking
+    /// signal for choosing between repair candidates, not filed as an exact
+    /// per-placement charge in `Objective::soft`: like `day_mix_penalty`, it
+    /// only has to point the right way, and the authoritative charge is what
+    /// `mark`/`unmark` maintain in `Objective::compactness_cost`.
+    pub fn compactness_delta(
+        &self,
+        problem: &Problem,
+        who: &Occupant<'_>,
+        span: &[SlotIdx],
+    ) -> f64 {
+        if span.is_empty() || (!who.enforce.compactness_group && !who.enforce.compactness_person) {
+            return 0.0;
+        }
+        let day = problem.slots.flags(span[0]).day_index;
+        let mut delta = 0.0;
+        if who.enforce.compactness_group {
+            delta += self
+                .aggregates
+                .group_compactness_delta(who.subtree_groups, day, span) as f64
+                * problem.compactness_group_weight;
+        }
+        if who.enforce.compactness_person {
+            delta += self
+                .aggregates
+                .person_compactness_delta(who.attendees, day, span) as f64
+                * problem.compactness_person_weight;
+        }
+        delta
+    }
+
     pub fn mark(&mut self, problem: &Problem, who: &Occupant<'_>, span: &[SlotIdx]) {
         self.occupancy.mark(problem, who, span);
         self.apply_aggregates(problem, who, span, true);
@@ -529,7 +560,37 @@ impl SearchState {
         span: &[SlotIdx],
         add: bool,
     ) {
-        if who.subtree_groups.is_empty() || span.is_empty() {
+        if span.is_empty() {
+            return;
+        }
+
+        // Compactness is gated per-axis rather than sharing the day-mix/share
+        // early return above: a Person-only Offering (participants with no
+        // Group attached) has empty `subtree_groups` but non-empty
+        // `attendees`, and gating the Person axis on `subtree_groups` being
+        // non-empty would silently drop exactly that Offering's compactness
+        // signal.
+        let day = problem.slots.flags(span[0]).day_index;
+        if who.enforce.compactness_group {
+            if add {
+                self.aggregates
+                    .add_group_compactness(who.subtree_groups, day, span);
+            } else {
+                self.aggregates
+                    .remove_group_compactness(who.subtree_groups, day, span);
+            }
+        }
+        if who.enforce.compactness_person {
+            if add {
+                self.aggregates
+                    .add_person_compactness(who.attendees, day, span);
+            } else {
+                self.aggregates
+                    .remove_person_compactness(who.attendees, day, span);
+            }
+        }
+
+        if who.subtree_groups.is_empty() {
             return;
         }
         let online = Self::is_online(problem, who.room);
@@ -572,11 +633,29 @@ impl SearchState {
         who: &Occupant<'_>,
         span: &[SlotIdx],
     ) -> f64 {
-        if who.subtree_groups.is_empty() || span.is_empty() {
+        if span.is_empty() {
             return 0.0;
         }
 
         let mut score = 0.0;
+
+        // Same axis-independence as `apply_aggregates`: a Person-only
+        // Offering must still be scored for the Person axis even with no
+        // Groups attached.
+        if who.enforce.compactness_group || who.enforce.compactness_person {
+            let day = problem.slots.flags(span[0]).day_index;
+            score += self.aggregates.compactness_ruin_cost(
+                who.subtree_groups,
+                who.attendees,
+                day,
+                problem.compactness_group_weight,
+                problem.compactness_person_weight,
+            );
+        }
+
+        if who.subtree_groups.is_empty() {
+            return score;
+        }
 
         if Self::is_online(problem, who.room) {
             let week = problem.slots.flags(span[0]).week;
@@ -598,6 +677,18 @@ impl SearchState {
         }
 
         score
+    }
+
+    /// What the currently idle blocks cost, at the configured weight(s). Read
+    /// off the running totals rather than accumulated per placement — a gap
+    /// belongs to a day, not to any one Session. Same treatment
+    /// `day_mix_cost`/`share_violations` already get.
+    pub fn compactness_cost(&self, problem: &Problem) -> f64 {
+        if problem.compactness_group_weight == 0.0 && problem.compactness_person_weight == 0.0 {
+            return 0.0;
+        }
+        self.aggregates
+            .compactness_cost(problem.compactness_group_weight, problem.compactness_person_weight)
     }
 
     /// Whether placing this Session here would push a share cell over its

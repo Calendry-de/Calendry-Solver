@@ -197,6 +197,7 @@ impl<'p> Trial<'p> {
             aggregate: self.state.share_violations(),
             soft: self.soft,
             day_mix_cost: self.state.day_mix_cost(self.problem),
+            compactness_cost: self.state.compactness_cost(self.problem),
         }
     }
 
@@ -852,6 +853,7 @@ pub fn recompute_objective(problem: &Problem, solution: &Solution) -> Objective 
         aggregate: state.share_violations(),
         soft,
         day_mix_cost: state.day_mix_cost(problem),
+        compactness_cost: state.compactness_cost(problem),
     }
 }
 
@@ -987,6 +989,8 @@ pub fn objectives_agree(a: Objective, b: Objective) -> bool {
         && a.aggregate == b.aggregate
         && (a.soft - b.soft).abs() <= 1e-9 * (1.0 + a.soft.abs())
         && (a.day_mix_cost - b.day_mix_cost).abs() <= 1e-9 * (1.0 + a.day_mix_cost.abs())
+        && (a.compactness_cost - b.compactness_cost).abs()
+            <= 1e-9 * (1.0 + a.compactness_cost.abs())
 }
 
 /// Set so a move worsening the objective by the average instance weight is

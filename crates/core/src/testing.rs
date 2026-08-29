@@ -168,6 +168,7 @@ pub fn all_constraints() -> ConstraintSet {
         max_online_share: Vec::new(),
         person_preference_fit: Vec::new(),
         soft: Vec::new(),
+        compactness: Vec::new(),
     }
 }
 

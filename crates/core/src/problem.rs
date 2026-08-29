@@ -5,7 +5,7 @@
 //! (group closures, attendee lists) is precomputed here rather than in the hot
 //! loop.
 
-use crate::aggregates::{Aggregates, DayMixInstance, ShareInstance};
+use crate::aggregates::{Aggregates, CompactnessInstance, DayMixInstance, ShareInstance};
 use crate::bitset::BitSet;
 use crate::groups::{GroupClosure, GroupCycle};
 use crate::ids::{GroupIdx, OfferingIdx, PersonIdx, PlacementIdx, RoomIdx, SlotIdx};
@@ -223,6 +223,14 @@ pub struct ConstraintSet {
     /// The six soft types. Separate from the hard lists because only soft
     /// instances carry a weight and typed parameters.
     pub soft: Vec<SoftInstance>,
+    /// SOFT, aggregate over a whole day. Idle blocks between a Group's or
+    /// Person's first and last Session of the day — closest in shape to
+    /// `online_onsite_same_day` (day granularity, depends on what else is
+    /// placed that day) but accumulates a continuous count rather than a
+    /// boolean, so it gets its own counters in [`crate::aggregates::Aggregates`]
+    /// rather than reusing the mixed-day ones. See
+    /// [`crate::aggregates::CompactnessInstance`].
+    pub compactness: Vec<CompactnessInstance>,
 }
 
 fn any_covers(list: &[ConstraintInstance], kind: &str) -> bool {
@@ -247,6 +255,8 @@ pub struct Enforce {
     pub lecturer_veto: bool,
     pub group_veto: bool,
     pub day_mix: bool,
+    pub compactness_group: bool,
+    pub compactness_person: bool,
 }
 
 impl ConstraintSet {
@@ -261,6 +271,8 @@ impl ConstraintSet {
             // Own predicate: `DayMixInstance` is not a `ConstraintInstance`
             // any more, since it carries a weight.
             day_mix: self.online_onsite_same_day.iter().any(|c| c.covers(kind)),
+            compactness_group: self.compactness.iter().any(|c| c.group && c.covers(kind)),
+            compactness_person: self.compactness.iter().any(|c| c.person && c.covers(kind)),
         }
     }
 }
@@ -624,6 +636,12 @@ pub struct Problem {
     /// Bias against disturbing a movable out-of-scope placement. See
     /// [`ProblemSpec::movement_weight`] and [`Problem::movement_cost`].
     pub movement_weight: f64,
+    /// Summed weight of every configured `Compactness` instance covering the
+    /// Group axis. Zero when not configured, or when no instance selects it —
+    /// see [`crate::aggregates::CompactnessInstance::group`].
+    pub compactness_group_weight: f64,
+    /// The Person-axis counterpart of `compactness_group_weight`.
+    pub compactness_person_weight: f64,
 
     /// Whether each Offering is being actively placed by this run, indexed by
     /// [`OfferingIdx`]. Read it through [`Problem::in_scope`].
@@ -770,11 +788,28 @@ impl Problem {
             slots.day_count(),
             slots.week_count() as usize,
             constraints.max_online_share.clone(),
+            persons.len(),
+            slots.len(),
+            slots.blocks_per_day() as usize,
+            constraints.compactness.clone(),
         );
 
         let day_mix_weight: f64 = constraints
             .online_onsite_same_day
             .iter()
+            .map(|i| i.weight)
+            .sum();
+
+        let compactness_group_weight: f64 = constraints
+            .compactness
+            .iter()
+            .filter(|i| i.group)
+            .map(|i| i.weight)
+            .sum();
+        let compactness_person_weight: f64 = constraints
+            .compactness
+            .iter()
+            .filter(|i| i.person)
             .map(|i| i.weight)
             .sum();
 
@@ -871,6 +906,8 @@ impl Problem {
             hard_penalty,
             day_mix_weight,
             movement_weight,
+            compactness_group_weight,
+            compactness_person_weight,
             in_scope,
             placement_counts,
             immovable_counts,

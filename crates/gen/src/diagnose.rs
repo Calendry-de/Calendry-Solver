@@ -109,6 +109,13 @@ fn single(axis: fn(&mut Enforce), base: Enforce) -> Enforce {
         lecturer_veto: true,
         group_veto: true,
         day_mix: true,
+        // Never probed: neither gates `is_free`, same as `day_mix` above
+        // being probed anyway is about attributing SOFT badness rather than
+        // rejection — Compactness has no `would_worsen`-style predicate this
+        // tool could probe against yet, so it stays false rather than
+        // guessing at one.
+        compactness_group: false,
+        compactness_person: false,
     };
     axis(&mut e);
     axis(&mut probe);
@@ -120,6 +127,8 @@ fn single(axis: fn(&mut Enforce), base: Enforce) -> Enforce {
         lecturer_veto: e.lecturer_veto && base.lecturer_veto,
         group_veto: e.group_veto && base.group_veto,
         day_mix: e.day_mix && base.day_mix,
+        compactness_group: e.compactness_group && base.compactness_group,
+        compactness_person: e.compactness_person && base.compactness_person,
     }
 }
 

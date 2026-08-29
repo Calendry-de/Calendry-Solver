@@ -117,6 +117,13 @@ fn score_one(problem: &Problem, solution: &Solution, state: &SearchState, mv: &M
         0.0
     };
 
+    // Compactness is soft, like day-mix, and its delta CAN be negative — a
+    // candidate that fills a gap between two existing Sessions is rewarded,
+    // not merely charged nothing. `compactness_delta` is a ranking signal, not
+    // the exact per-placement charge; `mark` maintains the real one in
+    // `Objective::compactness_cost` once this candidate is actually chosen.
+    let compactness_delta = state.compactness_delta(problem, &candidate, &span);
+
     Score(
         problem
             .soft
@@ -134,7 +141,8 @@ fn score_one(problem: &Problem, solution: &Solution, state: &SearchState, mv: &M
             )
             + problem.movement_cost(mv.placement, mv.to.start, mv.to.room)
             + share_penalty
-            + day_mix_penalty,
+            + day_mix_penalty
+            + compactness_delta,
     )
 }
 

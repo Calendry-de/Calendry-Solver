@@ -25,7 +25,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use calendry_solver_core::aggregates::{DayMixInstance, ShareInstance, ShareWindow};
+use calendry_solver_core::aggregates::{
+    CompactnessInstance, DayMixInstance, ShareInstance, ShareWindow,
+};
 use calendry_solver_core::ids::{GroupIdx, OfferingIdx, PersonIdx, RoomIdx, SlotIdx};
 use calendry_solver_core::preferences::{Preference, PreferenceInstance};
 use calendry_solver_core::problem::{
@@ -905,15 +907,44 @@ fn build_constraints(input: &pb::SolverInput) -> Result<ConstraintSet, ConvertEr
                     weight: c.weight,
                 });
             }
-            // Staged schema-first, same order ADR-0026 used for
-            // `PersonPreferenceFit`: the field exists so app-side plumbing is
-            // not itself blocked on the solver work, but a tenant enabling
-            // either today must be told there is nothing behind it yet,
-            // rather than have it silently do nothing.
-            Some(Params::Compactness(_)) => {
-                return Err(ConvertError::ConstraintTypeUnimplemented {
-                    constraint: c.id.clone(),
-                    constraint_type: "Compactness",
+            /*
+             * SOFT, day-granularity, its own list for the same reason
+             * `online_onsite_same_day` has one — see
+             * `crate::problem::ConstraintSet::compactness`'s own doc.
+             *
+             * `scope` empty means both axes, matching the field's own proto
+             * comment; `try_from` maps an unrecognized enum value to
+             * `Unspecified`, which counts toward NEITHER axis rather than
+             * erroring — the same "ignore, do not reject" reading
+             * `PersonPreferenceFit.roles` being empty already gets, since a
+             * caller sending a stale value here is not asking for a rule that
+             * cannot exist, only for one that does nothing extra.
+             */
+            Some(Params::Compactness(p)) => {
+                if c.weight < 0.0 || c.weight.is_nan() {
+                    return Err(ConvertError::NegativeSoftWeight {
+                        constraint: c.id.clone(),
+                        weight: c.weight,
+                    });
+                }
+                let (mut group, mut person) = (false, false);
+                for &s in &p.scope {
+                    match pb::CompactnessScope::try_from(s) {
+                        Ok(pb::CompactnessScope::Group) => group = true,
+                        Ok(pb::CompactnessScope::Person) => person = true,
+                        _ => {}
+                    }
+                }
+                if p.scope.is_empty() {
+                    group = true;
+                    person = true;
+                }
+                set.compactness.push(CompactnessInstance {
+                    id: c.id.clone(),
+                    kinds: c.applies_to_kinds.clone(),
+                    weight: c.weight,
+                    group,
+                    person,
                 });
             }
             Some(Params::LecturerConsistency(_)) => {

@@ -365,30 +365,23 @@ fn a_constraint_with_no_params_is_refused() {
 }
 
 #[test]
-fn compactness_is_unimplemented_not_invalid() {
-    // Staged schema-first: the type exists in the catalogue, but enabling it
-    // must be told there is nothing behind it yet rather than silently do
-    // nothing.
+fn a_negative_compactness_weight_is_refused() {
+    // Compactness is built now (see tests/compactness.rs for the substantive
+    // behavior) — the remaining refusal is the same validation fault every
+    // other soft weight gets.
     let mut input = base_input();
     input.constraints.push(enabled(
         "c-compact",
         pb::constraint_config::Params::Compactness(pb::Compactness { scope: vec![] }),
     ));
+    input.constraints.last_mut().unwrap().weight = -1.0;
 
     let e = reject(&input, &scope(&[]));
     assert!(
-        matches!(
-            &e,
-            ConvertError::ConstraintTypeUnimplemented { constraint, constraint_type }
-                if constraint == "c-compact" && *constraint_type == "Compactness"
-        ),
+        matches!(&e, ConvertError::NegativeSoftWeight { constraint, weight } if constraint == "c-compact" && *weight == -1.0),
         "{e}"
     );
-    assert_eq!(
-        code_of(&e),
-        Code::Unimplemented,
-        "the caller cannot fix this by changing their data"
-    );
+    assert_eq!(code_of(&e), Code::InvalidArgument);
 }
 
 #[test]
@@ -561,7 +554,7 @@ fn every_refusal_maps_to_invalid_argument_or_unimplemented_and_nothing_else() {
         },
         ConvertError::ConstraintTypeUnimplemented {
             constraint: "c".into(),
-            constraint_type: "Compactness",
+            constraint_type: "LecturerConsistency",
         },
     ];
 
