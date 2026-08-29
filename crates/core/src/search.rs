@@ -233,11 +233,7 @@ impl<'p> Trial<'p> {
             .all_rooms()
             .map(|r| self.problem.soft.cost(o.soft_profile, at.start, r))
             .sum::<f64>()
-            + self.problem.preferences.cost(
-                p,
-                at.start,
-                &self.problem.rooms[at.room.get()].features,
-            )
+            + self.problem.preference_cost_for_placement(o, p, at)
             + self.problem.movement_cost(p, at.start, at.room)
             + self.problem.capacity_waste_cost(o, capacity);
         self.unplaced -= 1;
@@ -261,11 +257,7 @@ impl<'p> Trial<'p> {
             .all_rooms()
             .map(|r| self.problem.soft.cost(o.soft_profile, at.start, r))
             .sum::<f64>()
-            + self.problem.preferences.cost(
-                p,
-                at.start,
-                &self.problem.rooms[at.room.get()].features,
-            )
+            + self.problem.preference_cost_for_placement(o, p, at)
             + self.problem.movement_cost(p, at.start, at.room)
             + self.problem.capacity_waste_cost(o, capacity);
         self.unplaced += 1;
@@ -538,7 +530,16 @@ pub fn construct(problem: &Problem) -> (Solution, SearchState) {
         // bypass, minimize-movement or not. An ineligible original falls
         // through to the general scan below, which prices the resulting
         // move — correctly, since it genuinely cannot stay.
-        if let Some((orig_start, Some(orig_room))) = problem.placement(p).original
+        //
+        // Also gated on NOT having a lecturer pool: this fast path tries
+        // exactly one candidate, which is only meaningful when there is
+        // exactly one lecturer choice to go with it. A pool Offering falls
+        // through to the general scan, which tries every lecturer
+        // combination at every slot — losing the "prefer the original slot"
+        // shortcut for the rare pool-plus-minimize-movement case rather than
+        // complicating this single-candidate path with a second loop.
+        if !offering.has_lecturer_pool()
+            && let Some((orig_start, Some(orig_room))) = problem.placement(p).original
             && offering.eligible_rooms.contains(&orig_room)
             && let Some(span) = problem.slots.span(orig_start, offering.duration_blocks)
         {
@@ -560,10 +561,17 @@ pub fn construct(problem: &Problem) -> (Solution, SearchState) {
                 }
                 for i in 0..offering.room_choice_count() {
                     let (room, additional_rooms) = offering.room_choice(i);
-                    let candidate = base.with_room(room).with_additional_rooms(additional_rooms);
-                    if state.is_free(problem, &candidate, &span) {
-                        chosen = Some(Placement::with_rooms(slot, room, additional_rooms));
-                        break 'search;
+                    for j in 0..offering.lecturer_choice_count() {
+                        let lecturers = offering.lecturer_choice(j);
+                        let candidate = base
+                            .with_room(room)
+                            .with_additional_rooms(additional_rooms)
+                            .with_pool_lecturers(lecturers);
+                        if state.is_free(problem, &candidate, &span) {
+                            chosen =
+                                Some(Placement { start: slot, room, additional_rooms, lecturers });
+                            break 'search;
+                        }
                     }
                 }
             }
@@ -731,6 +739,13 @@ fn ruin_related(
             }
             let pl = current.get(p).unwrap();
             let o = problem.offering_of(p);
+            // `o.lecturers` is empty for a pool Offering (its lecturers are
+            // chosen per-placement, not fixed on the Offering), so a pool
+            // Offering is never "lecturer-related" by this heuristic. A
+            // search-quality heuristic only — ruining a narrower
+            // neighbourhood for a pool Offering costs LNS effectiveness, not
+            // correctness, and the actual chosen lecturers are not
+            // aggregated anywhere this check could cheaply read.
             pl.room == anchor_pl.room
                 || o.lecturers.iter().any(|l| anchor_o.lecturers.contains(l))
                 || o.own_groups.iter().any(|g| anchor_o.own_groups.contains(g))
@@ -774,8 +789,13 @@ fn repair_one<E: MoveEvaluator>(
 ) -> Repaired {
     let offering = problem.offering_of(p);
     let n_rooms = offering.room_choice_count();
+    // `1` for every non-pool Offering — nothing to choose between, so this
+    // adds no width to the cross product below and `at()` degenerates back
+    // to exactly today's `(start, room)` indexing.
+    let n_lecturers = offering.lecturer_choice_count();
     let n_starts = problem.slots.start_count(offering.duration_blocks);
-    let total = n_starts * n_rooms;
+    let width = n_rooms * n_lecturers;
+    let total = n_starts * width;
     if total == 0 {
         return Repaired { best: None, evaluated: 0, enumerated: 0 };
     }
@@ -783,20 +803,24 @@ fn repair_one<E: MoveEvaluator>(
 
     // The candidate space is addressed BY INDEX, never materialized.
     //
-    // Index `i` is slot-major: `(nth_start(i / n_rooms), room_choice(i %
-    // n_rooms))`, which is the order a nested slot-then-room loop would produce.
+    // Index `i` is slot-major, then room, then lecturer innermost:
+    // `(nth_start(i / width), room_choice((i % width) / n_lecturers),
+    // lecturer_choice((i % width) % n_lecturers))` — the order a triple
+    // nested slot-then-room-then-lecturer loop would produce.
     let at = |i: usize| {
-        let (room, additional_rooms) = offering.room_choice(i % n_rooms);
+        let (room, additional_rooms) = offering.room_choice((i % width) / n_lecturers);
+        let lecturers = offering.lecturer_choice((i % width) % n_lecturers);
         Move {
             placement: p,
-            to: Placement::with_rooms(
-                problem
+            to: Placement {
+                start: problem
                     .slots
-                    .nth_start(offering.duration_blocks, i / n_rooms)
+                    .nth_start(offering.duration_blocks, i / width)
                     .expect("index below start_count"),
                 room,
                 additional_rooms,
-            ),
+                lecturers,
+            },
         }
     };
 
@@ -828,7 +852,7 @@ fn repair_one<E: MoveEvaluator>(
             moved.insert(j, displaced);
         }
         // Restore a canonical order so argmin ties break identically.
-        candidates.sort_by_key(|m| (m.to.start.0, m.to.room.0));
+        candidates.sort_by_key(|m| (m.to.start.0, m.to.room.0, m.to.lecturers));
     }
 
     let mut scores = vec![Score::default(); candidates.len()];

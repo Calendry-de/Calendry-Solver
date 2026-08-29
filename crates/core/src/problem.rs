@@ -18,7 +18,7 @@ use crate::ids::{GroupIdx, OfferingIdx, PersonIdx, PlacementIdx, RoomIdx, SlotId
 use crate::preferences::{Preference, PreferenceInstance, PreferenceModel};
 use crate::slots::SlotTable;
 use crate::soft::{SoftInstance, SoftModel};
-use crate::solution::MAX_ADDITIONAL_ROOMS;
+use crate::solution::{MAX_ADDITIONAL_ROOMS, MAX_LECTURERS, Placement};
 
 #[derive(Clone, Debug)]
 pub struct Room {
@@ -528,7 +528,23 @@ pub struct OfferingSpec {
     pub kind: String,
     pub required_session_count: u32,
     pub duration_blocks: u32,
+    /// The Offering's ASSIGNED lecturers when there is no genuine pool —
+    /// `candidate_lecturer_ids.len() <= required_lecturer_count` on the wire.
+    /// Empty when `eligible_lecturer_combinations` is non-empty instead: a
+    /// pool Offering has no single fixed assignment, so the two are never
+    /// both populated for the same Offering.
     pub lecturers: Vec<PersonIdx>,
+    /// Every valid combination of `required_lecturer_count` distinct
+    /// candidates from the wire's `candidate_lecturer_ids`, precomputed by
+    /// the caller (`convert::build_offerings`) — combinatorics is a
+    /// wire-shape concern, not a domain one, mirroring
+    /// `eligible_room_combinations`. Empty and unread unless the Offering
+    /// genuinely has a pool (`Offering::has_lecturer_pool`) — unlike Rooms,
+    /// core keeps no separate "required count" field for this fork, because
+    /// nothing filters a lecturer combination out the way capacity filters a
+    /// Room one: whenever conversion populates this list at all, it is
+    /// non-empty, so its emptiness alone is a reliable signal.
+    pub eligible_lecturer_combinations: Vec<[Option<PersonIdx>; MAX_LECTURERS]>,
     pub groups: Vec<GroupIdx>,
     pub participants: Vec<PersonIdx>,
     pub eligible_rooms: Vec<RoomIdx>,
@@ -589,7 +605,10 @@ pub struct Offering {
     pub kind: String,
     pub required_session_count: u32,
     pub duration_blocks: u32,
+    /// See [`OfferingSpec::lecturers`].
     pub lecturers: Vec<PersonIdx>,
+    /// See [`OfferingSpec::eligible_lecturer_combinations`].
+    pub eligible_lecturer_combinations: Vec<[Option<PersonIdx>; MAX_LECTURERS]>,
     /// The Offering's own Groups, unexpanded. Used to **query** occupancy.
     pub own_groups: Vec<GroupIdx>,
     /// `own_groups` expanded through ancestors and descendants. Used to **mark**
@@ -685,6 +704,55 @@ impl Offering {
                 .any(|&(r, a)| r == room && a == additional_rooms)
         } else {
             additional_rooms == [None; MAX_ADDITIONAL_ROOMS] && self.eligible_rooms.contains(&room)
+        }
+    }
+
+    /// Whether this Offering's Sessions choose their lecturers from a
+    /// genuine candidate pool, rather than a fixed pre-assigned set — the
+    /// single fork point construction and repair branch on for the
+    /// lecturer dimension, the same way `multi_room` forks the Room one.
+    #[inline]
+    pub fn has_lecturer_pool(&self) -> bool {
+        !self.eligible_lecturer_combinations.is_empty()
+    }
+
+    /// How many lecturer choices exist to iterate — `1` for a fixed
+    /// assignment (there is nothing to choose between), or
+    /// `eligible_lecturer_combinations.len()` for a genuine pool. Never `0`:
+    /// an Offering with a pool but no valid combination is a conversion-time
+    /// refusal (`ConvertError::TooManyLecturersRequired`), not a runtime
+    /// state this has to represent.
+    pub fn lecturer_choice_count(&self) -> usize {
+        if self.has_lecturer_pool() {
+            self.eligible_lecturer_combinations.len()
+        } else {
+            1
+        }
+    }
+
+    /// The `i`th lecturer choice. For a fixed assignment this is always
+    /// `[None; MAX_LECTURERS]` — a sentinel meaning "use `lecturers`, not a
+    /// chosen combination" — the same reading [`crate::solution::Placement::
+    /// lecturers`] gives it.
+    pub fn lecturer_choice(&self, i: usize) -> [Option<PersonIdx>; MAX_LECTURERS] {
+        if self.has_lecturer_pool() {
+            self.eligible_lecturer_combinations[i]
+        } else {
+            [None; MAX_LECTURERS]
+        }
+    }
+
+    /// Whether `lecturers` is one of this Offering's valid lecturer choices
+    /// — mirrors [`Self::is_room_choice_eligible`], the one place a
+    /// candidate move's lecturer choice is checked against eligibility.
+    pub fn is_lecturer_choice_eligible(
+        &self,
+        lecturers: [Option<PersonIdx>; MAX_LECTURERS],
+    ) -> bool {
+        if self.has_lecturer_pool() {
+            self.eligible_lecturer_combinations.contains(&lecturers)
+        } else {
+            lecturers == [None; MAX_LECTURERS]
         }
     }
 }
@@ -1226,6 +1294,7 @@ impl Problem {
                 required_session_count: o.required_session_count,
                 duration_blocks: o.duration_blocks,
                 lecturers: o.lecturers,
+                eligible_lecturer_combinations: o.eligible_lecturer_combinations,
                 eligible_rooms: o.eligible_rooms,
                 required_room_count: o.required_room_count,
                 eligible_room_combinations: o.eligible_room_combinations,
@@ -1639,6 +1708,30 @@ impl Problem {
         }
     }
 
+    /// The `PersonPreferenceFit` cost of placing `p`'s Offering at `at`,
+    /// branching on which of the two the Offering needs: the fast
+    /// precomputed table for a fixed assignment, or the live per-person
+    /// computation over `at.lecturers` for a genuine pool — see
+    /// [`crate::preferences::PreferenceModel::cost_for`]'s own doc for why a
+    /// pool cannot use the table. One place this branch is made, so
+    /// `search::Trial::place`/`unplace` and `evaluator::score_one` cannot
+    /// drift on which Offerings get which path.
+    #[inline]
+    pub fn preference_cost_for_placement(
+        &self,
+        o: &Offering,
+        p: PlacementIdx,
+        at: Placement,
+    ) -> f64 {
+        let room_features = &self.rooms[at.room.get()].features;
+        if o.has_lecturer_pool() {
+            self.preferences
+                .cost_for(p, &at.lecturers, at.start, room_features)
+        } else {
+            self.preferences.cost(p, at.start, room_features)
+        }
+    }
+
     /// SOFT. Rewards a good Room-size fit: charges every enabled
     /// `MinimizeCapacityWaste` instance covering `offering.kind`, scaled by
     /// how far `capacity / offering.min_capacity` exceeds the instance's
@@ -1751,6 +1844,7 @@ mod tests {
                 required_session_count: 1,
                 duration_blocks: 1,
                 lecturers: vec![],
+                eligible_lecturer_combinations: vec![],
                 groups: vec![GroupIdx(0)],
                 participants: vec![],
                 eligible_rooms: vec![],
@@ -1765,6 +1859,7 @@ mod tests {
                 required_session_count: 1,
                 duration_blocks: 1,
                 lecturers: vec![],
+                eligible_lecturer_combinations: vec![],
                 groups: vec![GroupIdx(2)],
                 participants: vec![],
                 eligible_rooms: vec![],
@@ -1802,6 +1897,7 @@ mod tests {
             required_session_count: required,
             duration_blocks: 1,
             lecturers: vec![],
+            eligible_lecturer_combinations: vec![],
             groups: vec![],
             participants: vec![],
             eligible_rooms: vec![],

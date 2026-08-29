@@ -287,6 +287,7 @@ fn overlapping_problem(offerings: u32, sessions: u32, shared: usize) -> Problem 
             required_session_count: sessions,
             duration_blocks: 1,
             lecturers: vec![],
+            eligible_lecturer_combinations: vec![],
             groups: vec![],
             participants,
             eligible_rooms: vec![room],

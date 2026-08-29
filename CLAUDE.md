@@ -59,7 +59,8 @@ Check any change against these. Each links to the decision behind it.
 - [ ] No soft term is ever negative; a preference charges what it did *not* meet — [ADR-0026](docs/adr/0026-personpreferencefit-charges-the-unmet-fraction.md)
 - [ ] Group blackouts resolve through `expand_ancestry`, never `expand_subtree`/`expand_conflict` — [ADR-0027](docs/adr/0027-group-blackouts-inherit-downward.md)
 - [ ] A rule relating two named Offerings uses the ONE relation mechanism — an ordered set plus a type — never a reference of its own — [ADR-0028](docs/adr/0028-a-relation-is-an-ordered-set-of-offerings.md)
-- [ ] If lecturer-pool selection is ever built, `preferences.rs`'s table key is wrong — [ADR-0026](docs/adr/0026-personpreferencefit-charges-the-unmet-fraction.md)
+- [ ] Lecturer-pool selection is built: a pool Offering's `PersonPreferenceFit` cost MUST go through `PreferenceModel::cost_for` (per-person, live), never the static `table` — `Problem::preference_cost_for_placement` is the one place that decides which, and `Offering::has_lecturer_pool` is the read — [ADR-0026](docs/adr/0026-personpreferencefit-charges-the-unmet-fraction.md)
+- [ ] `LecturerVeto` combined with a genuine lecturer pool is refused at conversion, never silently inert — [ADR-0026](docs/adr/0026-personpreferencefit-charges-the-unmet-fraction.md)
 - [ ] The solver tolerates infeasible input; the app's "warn and allow" UX produces it
 - [ ] Tests use move budgets, never wall-clock budgets — [ADR-0006](docs/adr/0006-two-budgets-and-the-limit-of-determinism.md)
 
@@ -207,10 +208,43 @@ hard-locked under either policy). Construction seeds a movable Session back at
 its original placement when nothing conflicts, so the search does not
 gratuitously pay the penalty for a move nobody asked for.
 
+**Lecturer-pool selection is built.** `candidate_lecturer_ids.len() >
+required_lecturer_count` is a genuine choice, not a refusal: construction and
+repair enumerate every valid combination the same way they already enumerate
+Room combinations (`Offering::lecturer_choice_count`/`lecturer_choice`,
+mirroring `room_choice_count`/`room_choice`), and `Placement::lecturers`
+remembers which one a Session got, since a pool Offering's `Offering.
+lecturers` is empty — there is no fixed assignment to fall back on. See
+ADR-0026's "Lecturer-pool selection landed" addendum for what this did to
+`PersonPreferenceFit`'s precomputed table (the trap the ADR had already
+named) and why `LecturerVeto` combined with a pool is refused instead of
+fixed alongside it.
+
+**`OfferingRelation` (ADR-0028) and its first relation type, `DifferentTime`,
+are built.** A relation is an ordered set of Offering references plus a type
+— `RelationSpec`/`RelationKind` on `ProblemSpec`, resolved by
+`Problem::build` into a per-Offering membership list
+(`Offering::different_time_relations`), independent of `ConstraintSet`
+because a relation names specific Offerings, never a kind.
+`DifferentTime` — no two members may ever share a slot — turned out to be
+the same shape as the four structural double-booking types: a bit shared by
+every member Offering in `Occupancy`'s relation matrix, checked in
+`mark`/`unmark`/`is_free`, plus an independent `constraints::check_pair`
+check for the same ADR-0014 reason every other structural type has one.
+
 Deliberately not built:
 
 * **A GPU move-evaluation backend.** The seam exists and has two adapters; the
   backend does not. [ADR-0013](docs/adr/0013-move-evaluation-behind-a-trait.md).
+* **Every `OfferingRelation` type besides `DifferentTime`.** `Precedence`,
+  `SameTime`/`SameDays`/`SameStart`, `MeetTogether`/`CanShareRoom`, and the
+  "N hours between" family are each a new relation-type evaluator on top of
+  the now-built mechanism, not mechanism work. `MeetTogether` additionally
+  needs a change to Room occupancy semantics the others do not.
+* **`LecturerConsistency`.** Its prerequisite (lecturer-pool selection) is no
+  longer missing, but the type itself — keeping a lecturer consistent across
+  an Offering's Sessions — is separate solver work; only the catalogue slot
+  and the `ConstraintTypeUnimplemented` refusal are staged.
 
 Outside this repo: the Nuxt integration session, including the one part of the
 schema pipeline never exercised end to end. See
@@ -242,8 +276,12 @@ schema pipeline never exercised end to end. See
    affordable: a preference is a recurring weekly shape, so `placement × (day,
    block)` holds the same information as `placement × slot` in 1.1 M entries
    instead of 25 M. It is only valid while a placement's lecturer set is fixed
-   before the search starts — true today because lecturer-*pool* selection
-   returns `UNIMPLEMENTED`, and a silent mis-pricing the day it lands. See
+   before the search starts — true for every non-pool Offering, which stays on
+   this table unchanged. Lecturer-pool selection **is built** (issue #61): a
+   pool Offering's lecturer set is a search-time choice, so it bypasses this
+   table entirely and prices live over a per-person table instead
+   (`PreferenceModel::cost_for`) — `Problem::preference_cost_for_placement` is
+   the one place that picks which path a placement gets. See
    [ADR-0026](docs/adr/0026-personpreferencefit-charges-the-unmet-fraction.md),
    which also records why the term charges the **unmet** fraction rather than
    rewarding the met one, and why `hard_penalty` must count

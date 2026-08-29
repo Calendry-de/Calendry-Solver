@@ -100,6 +100,33 @@ pub enum ConvertError {
         required: u32,
         max: u32,
     },
+    #[error(
+        "offering '{offering}' has required_lecturer_count {required}; the solver supports at \
+         most {max} lecturers per Session"
+    )]
+    TooManyLecturersRequired {
+        offering: String,
+        required: u32,
+        max: u32,
+    },
+    #[error(
+        "offering '{offering}' needs {required} lecturer(s) but names only {candidates} \
+         candidate(s); a pool cannot be smaller than what it must supply"
+    )]
+    InsufficientLecturerCandidates {
+        offering: String,
+        required: u32,
+        candidates: usize,
+    },
+    #[error(
+        "offering '{offering}' has a genuine lecturer pool, but constraint '{constraint}' \
+         (LecturerVeto) covers its kind; a pool Offering's veto mask cannot be precomputed \
+         before the search chooses who leads each Session"
+    )]
+    LecturerVetoUnsupportedWithPool {
+        offering: String,
+        constraint: String,
+    },
 
     // -- offering relations ---------------------------------------------------
     #[error(
@@ -151,15 +178,6 @@ pub enum ConvertError {
     // Distinguished from the validation faults above because the caller cannot
     // fix these by correcting their data — the feature does not exist.
     #[error(
-        "offering '{offering}' asks the solver to choose {required} of {candidates} candidate \
-         lecturers; v1 supports pre-assigned lecturers only"
-    )]
-    LecturerPoolUnsupported {
-        offering: String,
-        required: u32,
-        candidates: usize,
-    },
-    #[error(
         "constraint '{constraint}': person_preference_fit counts lecturers' preferences only; \
          scoping it to role_tags {roles:?} is not implemented"
     )]
@@ -180,16 +198,13 @@ pub enum ConvertError {
 impl ConvertError {
     /// Whether this is an unbuilt feature rather than bad input.
     ///
-    /// The distinction the scattered version had already lost: an unsupported
-    /// lecturer pool is data the caller *can* change, but there is nothing they
-    /// can send that v1 will solve, so `UNIMPLEMENTED` is still the honest code.
     /// Keeping the rule as one predicate is what makes it reviewable.
     pub fn is_unimplemented(&self) -> bool {
         matches!(
             self,
-            Self::LecturerPoolUnsupported { .. }
-                | Self::PreferenceRolesUnsupported { .. }
+            Self::PreferenceRolesUnsupported { .. }
                 | Self::ConstraintTypeUnimplemented { .. }
+                | Self::LecturerVetoUnsupportedWithPool { .. }
         )
     }
 }
@@ -282,16 +297,21 @@ mod tests {
     }
 
     #[test]
-    fn a_lecturer_pool_is_unimplemented_not_invalid_argument() {
-        // There is no input the caller can send that v1 will solve, so this is
-        // an absent feature rather than bad data.
-        let status: Status = ConvertError::LecturerPoolUnsupported {
+    fn a_lecturer_pool_fault_is_invalid_argument_not_unimplemented() {
+        // Lecturer-pool selection is built; too few candidates or too large a
+        // pool is bad data the caller can fix, not an absent feature.
+        let status: Status = ConvertError::InsufficientLecturerCandidates {
             offering: "o1".into(),
-            required: 1,
-            candidates: 3,
+            required: 2,
+            candidates: 1,
         }
         .into();
-        assert_eq!(status.code(), tonic::Code::Unimplemented);
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+
+        let status: Status =
+            ConvertError::TooManyLecturersRequired { offering: "o1".into(), required: 99, max: 4 }
+                .into();
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
     }
 
     #[test]

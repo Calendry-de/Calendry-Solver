@@ -13,6 +13,17 @@ use crate::problem::{Enforce, FixedOccupancy, Offering, Problem};
 /// through the search hot path millions of times per run.
 pub const MAX_ADDITIONAL_ROOMS: usize = 3;
 
+/// How many lecturers a single Session can be assigned from a genuine
+/// candidate pool — see `Offering::has_lecturer_pool`. A generous, named cap
+/// mirroring `MAX_ADDITIONAL_ROOMS`: nothing in any real institution needs
+/// more chosen lecturers than this on one Session, and a fixed array (rather
+/// than a `Vec`) keeps [`Placement`] `Copy` and allocation-free.
+///
+/// Unrelated to how many lecturers a NON-pool Offering may name —
+/// `Offering::lecturers` stays an unbounded `Vec` for that, unchanged,
+/// because that case predates this cap and nothing requires one.
+pub const MAX_LECTURERS: usize = 4;
+
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub struct Placement {
     pub start: SlotIdx,
@@ -25,6 +36,13 @@ pub struct Placement {
     /// required_room_count` does not ask for more than one Room for. See
     /// [`Self::all_rooms`].
     pub additional_rooms: [Option<RoomIdx>; MAX_ADDITIONAL_ROOMS],
+    /// The lecturers CHOSEN from `Offering::eligible_lecturer_combinations`
+    /// for this Session — `[None; MAX_LECTURERS]` for every ordinary Session,
+    /// which is every Session whose Offering does not have a genuine
+    /// candidate pool (`Offering::has_lecturer_pool`). Read alongside
+    /// `Offering::lecturers` through [`Occupant::all_lecturers`], never
+    /// alone: a non-pool Offering's lecturers live on the Offering, not here.
+    pub lecturers: [Option<PersonIdx>; MAX_LECTURERS],
 }
 
 impl Placement {
@@ -32,7 +50,12 @@ impl Placement {
     /// The overwhelming majority of construction sites want exactly this.
     #[inline]
     pub fn single(start: SlotIdx, room: RoomIdx) -> Self {
-        Self { start, room, additional_rooms: [None; MAX_ADDITIONAL_ROOMS] }
+        Self {
+            start,
+            room,
+            additional_rooms: [None; MAX_ADDITIONAL_ROOMS],
+            lecturers: [None; MAX_LECTURERS],
+        }
     }
 
     /// A placement occupying `room` plus every Room in `additional_rooms`
@@ -43,7 +66,7 @@ impl Placement {
         room: RoomIdx,
         additional_rooms: [Option<RoomIdx>; MAX_ADDITIONAL_ROOMS],
     ) -> Self {
-        Self { start, room, additional_rooms }
+        Self { start, room, additional_rooms, lecturers: [None; MAX_LECTURERS] }
     }
 
     /// Every Room this Session occupies, primary first. The one place "all
@@ -125,6 +148,14 @@ pub struct Occupant<'a> {
     /// `[None; MAX_ADDITIONAL_ROOMS]` unless set via
     /// [`Self::with_additional_rooms`].
     pub additional_rooms: [Option<RoomIdx>; MAX_ADDITIONAL_ROOMS],
+    /// Lecturers CHOSEN from a genuine candidate pool — see
+    /// [`Placement::lecturers`]. `[None; MAX_LECTURERS]` unless set via
+    /// [`Self::with_pool_lecturers`], which is every Session whose Offering
+    /// does not have one (`Offering::has_lecturer_pool`). Read together with
+    /// `lecturers` through [`Self::all_lecturers`], never in isolation — a
+    /// pool Offering's own `lecturers` is empty, and a non-pool Offering
+    /// never populates this field.
+    pub pool_lecturers: [Option<PersonIdx>; MAX_LECTURERS],
     pub enforce: Enforce,
     /// Dense row indices of the `DifferentTime` relations this Session's
     /// Offering is a member of — see `Offering::different_time_relations`.
@@ -151,6 +182,7 @@ impl<'a> Occupant<'a> {
             group_veto_slots: Some(&o.group_veto_slots),
             protected_block_slots: Some(&o.protected_block_slots),
             additional_rooms: [None; MAX_ADDITIONAL_ROOMS],
+            pool_lecturers: [None; MAX_LECTURERS],
             enforce: o.enforce,
             different_time_relations: &o.different_time_relations,
         }
@@ -173,6 +205,7 @@ impl<'a> Occupant<'a> {
             group_veto_slots: None,
             protected_block_slots: None,
             additional_rooms: f.additional_rooms,
+            pool_lecturers: [None; MAX_LECTURERS],
             enforce: f.enforce,
             different_time_relations: &f.different_time_relations,
         }
@@ -203,6 +236,32 @@ impl<'a> Occupant<'a> {
         self.room
             .into_iter()
             .chain(self.additional_rooms.iter().flatten().copied())
+    }
+
+    /// This Session with `pool_lecturers` replaced — see
+    /// [`Placement::lecturers`]. Only a pool Offering's candidates ever call
+    /// this; every other caller keeps the default `[None; MAX_LECTURERS]`.
+    pub fn with_pool_lecturers(
+        mut self,
+        pool_lecturers: [Option<PersonIdx>; MAX_LECTURERS],
+    ) -> Self {
+        self.pool_lecturers = pool_lecturers;
+        self
+    }
+
+    /// Every lecturer this Session has, whichever of the two sources supplies
+    /// them — `lecturers` (a non-pool Offering's fixed assignment) and
+    /// `pool_lecturers` (a pool Offering's chosen combination) are never both
+    /// non-empty for the same Session, so this is simply their union. The one
+    /// place "all of this Session's lecturers" is computed; every
+    /// lecturer-keyed check reads through here rather than either field
+    /// directly.
+    #[inline]
+    pub fn all_lecturers(&self) -> impl Iterator<Item = PersonIdx> + '_ {
+        self.lecturers
+            .iter()
+            .copied()
+            .chain(self.pool_lecturers.iter().flatten().copied())
     }
 
     /// This Session with `offering` set — see the field's own doc for why
@@ -240,7 +299,15 @@ impl<'a> Occupant<'a> {
     /// seventh axis would have left it reporting against the old one, silently
     /// and with plausible-looking numbers.
     pub fn room_independent_probe(o: &'a Offering) -> Option<Self> {
-        let enforce = Enforce { room: false, day_mix: false, ..o.enforce };
+        let mut enforce = Enforce { room: false, day_mix: false, ..o.enforce };
+        // A pool Offering's lecturers are chosen PER CANDIDATE, so lecturer
+        // double-booking is not independent of which choice is being tried
+        // the way it is for a fixed assignment — it must be tested inside the
+        // room/lecturer loop, on the actual candidate, not hoisted into this
+        // once-per-slot probe.
+        if o.has_lecturer_pool() {
+            enforce.lecturer = false;
+        }
         if enforce == Enforce::default() {
             return None;
         }
@@ -352,7 +419,7 @@ impl Occupancy {
                 }
             }
             if who.enforce.lecturer {
-                for l in who.lecturers {
+                for l in who.all_lecturers() {
                     self.lecturer.set(l.get(), c);
                 }
             }
@@ -386,7 +453,7 @@ impl Occupancy {
                 }
             }
             if who.enforce.lecturer {
-                for l in who.lecturers {
+                for l in who.all_lecturers() {
                     self.lecturer.clear(l.get(), c);
                 }
             }
@@ -430,7 +497,7 @@ impl Occupancy {
             {
                 return false;
             }
-            if who.enforce.lecturer && who.lecturers.iter().any(|l| self.lecturer.get(l.get(), c)) {
+            if who.enforce.lecturer && who.all_lecturers().any(|l| self.lecturer.get(l.get(), c)) {
                 return false;
             }
             if who.enforce.group && who.own_groups.iter().any(|g| self.group.get(g.get(), c)) {
@@ -548,6 +615,7 @@ impl SearchState {
             Occupant::of_offering(o)
                 .with_room(at.room)
                 .with_additional_rooms(at.additional_rooms)
+                .with_pool_lecturers(at.lecturers)
                 .with_offering(offering),
             span,
         ))
@@ -984,8 +1052,8 @@ impl SearchState {
 
     /// The `MaxWeeklyTeachingLoad` cost DELTA of placing `who` at `span` —
     /// the read-only preview, mirroring [`Self::max_daily_span_delta`].
-    /// Keyed by `who.lecturers` and the WEEK `span` falls in, not by day —
-    /// this type is a weekly cap, not a daily one.
+    /// Keyed by `who.all_lecturers()` and the WEEK `span` falls in, not by
+    /// day — this type is a weekly cap, not a daily one.
     pub fn max_weekly_teaching_load_delta(
         &self,
         problem: &Problem,
@@ -997,7 +1065,7 @@ impl SearchState {
         }
         let week = problem.slots.flags(span[0]).week;
         self.aggregates
-            .teaching_load_delta(who.lecturers, week, span.len() as u32) as f64
+            .teaching_load_delta(who.all_lecturers(), week, span.len() as u32) as f64
             * problem.max_weekly_teaching_load_weight
     }
 
@@ -1082,10 +1150,10 @@ impl SearchState {
             let week = problem.slots.flags(span[0]).week;
             if add {
                 self.aggregates
-                    .add_teaching_load(who.lecturers, week, span.len() as u32);
+                    .add_teaching_load(who.all_lecturers(), week, span.len() as u32);
             } else {
                 self.aggregates
-                    .remove_teaching_load(who.lecturers, week, span.len() as u32);
+                    .remove_teaching_load(who.all_lecturers(), week, span.len() as u32);
             }
         }
         if who.enforce.minimize_location_change_group || who.enforce.minimize_location_change_person
@@ -1288,7 +1356,7 @@ impl SearchState {
         if who.enforce.max_weekly_teaching_load {
             let week = problem.slots.flags(span[0]).week;
             score += self.aggregates.teaching_load_ruin_cost(
-                who.lecturers,
+                who.all_lecturers(),
                 week,
                 problem.max_weekly_teaching_load_weight,
             );

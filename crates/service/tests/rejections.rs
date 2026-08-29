@@ -326,9 +326,9 @@ fn a_zero_duration_offering_is_refused() {
 }
 
 #[test]
-fn a_genuine_lecturer_pool_is_unimplemented() {
-    // v1 takes lecturers as already assigned; choosing among candidates is a
-    // materially larger search space. Refused rather than silently mis-solved.
+fn a_genuine_lecturer_pool_is_accepted() {
+    // Lecturer-pool selection is built: MORE candidates than the Session
+    // needs is a real choice for the search, not a refusal.
     let mut input = base_input();
     input.persons = vec![common::person("p1"), common::person("p2")];
     input.offerings = vec![pb::Offering {
@@ -337,8 +337,70 @@ fn a_genuine_lecturer_pool_is_unimplemented() {
         ..offering("o1", 1)
     }];
 
+    convert(&input, &scope(&["o1"])).expect("a genuine pool is supported");
+}
+
+#[test]
+fn too_few_lecturer_candidates_is_refused() {
+    let mut input = base_input();
+    input.persons = vec![common::person("p1")];
+    input.offerings = vec![pb::Offering {
+        candidate_lecturer_ids: vec!["p1".into()],
+        required_lecturer_count: 2,
+        ..offering("o1", 1)
+    }];
+
     let e = reject(&input, &scope(&["o1"]));
-    assert!(matches!(e, ConvertError::LecturerPoolUnsupported { .. }), "{e}");
+    assert!(
+        matches!(
+            &e,
+            ConvertError::InsufficientLecturerCandidates { offering, required: 2, candidates: 1 }
+            if offering == "o1"
+        ),
+        "{e}"
+    );
+    assert_eq!(code_of(&e), Code::InvalidArgument);
+}
+
+#[test]
+fn too_many_lecturers_required_is_refused() {
+    let mut input = base_input();
+    input.offerings = vec![pb::Offering { required_lecturer_count: 99, ..offering("o1", 1) }];
+
+    let e = reject(&input, &scope(&["o1"]));
+    assert!(
+        matches!(&e, ConvertError::TooManyLecturersRequired { offering, .. } if offering == "o1"),
+        "{e}"
+    );
+    assert_eq!(code_of(&e), Code::InvalidArgument);
+}
+
+#[test]
+fn lecturer_veto_combined_with_a_genuine_pool_is_unimplemented() {
+    // `Offering::veto_slots` is precomputed from a FIXED lecturer list before
+    // the search starts; a pool Offering has none, so the mask would be
+    // silently empty and the veto would never fire. Refused rather than
+    // silently inert.
+    let mut input = base_input();
+    input.persons = vec![common::person("p1"), common::person("p2")];
+    input.offerings = vec![pb::Offering {
+        candidate_lecturer_ids: vec!["p1".into(), "p2".into()],
+        required_lecturer_count: 1,
+        ..offering("o1", 1)
+    }];
+    input
+        .constraints
+        .push(enabled("c-veto", pb::constraint_config::Params::LecturerVeto(pb::LecturerVeto {})));
+
+    let e = reject(&input, &scope(&["o1"]));
+    assert!(
+        matches!(
+            &e,
+            ConvertError::LecturerVetoUnsupportedWithPool { offering, constraint }
+            if offering == "o1" && constraint == "c-veto"
+        ),
+        "{e}"
+    );
     assert_eq!(code_of(&e), Code::Unimplemented);
 }
 
@@ -547,7 +609,15 @@ fn every_refusal_maps_to_invalid_argument_or_unimplemented_and_nothing_else() {
         ConvertError::NegativeSoftWeight { constraint: "c".into(), weight: -1.0 },
         ConvertError::NegativeMovementWeight { weight: -1.0 },
         ConvertError::LockPolicyUnset,
-        ConvertError::LecturerPoolUnsupported { offering: "o".into(), required: 1, candidates: 3 },
+        ConvertError::TooManyLecturersRequired { offering: "o".into(), required: 99, max: 4 },
+        ConvertError::InsufficientLecturerCandidates {
+            offering: "o".into(),
+            required: 2,
+            candidates: 1,
+        },
+        ConvertError::UnknownOffering { context: "c".into(), offering: "o".into() },
+        ConvertError::RelationTooFewMembers { relation: "r".into(), members: 1 },
+        ConvertError::RelationWithoutParams { relation: "r".into() },
         ConvertError::PreferenceRolesUnsupported {
             constraint: "c".into(),
             roles: vec!["Student".into()],

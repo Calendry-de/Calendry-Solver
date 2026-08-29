@@ -135,6 +135,7 @@ pub fn measure(
         required_session_count: target_offering.required_session_count,
         duration_blocks: target_offering.duration_blocks,
         lecturers: target_offering.lecturers.clone(),
+        eligible_lecturer_combinations: target_offering.eligible_lecturer_combinations.clone(),
         groups: target_offering.own_groups.clone(),
         participants: target_offering.participants.clone(),
         eligible_rooms: target_offering.eligible_rooms.clone(),

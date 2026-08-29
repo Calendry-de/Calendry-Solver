@@ -42,7 +42,7 @@ use calendry_solver_core::problem::{
 };
 use calendry_solver_core::slots::{SlotTable, WeekKind, WeekSpec};
 use calendry_solver_core::soft::{SoftInstance, SoftParams};
-use calendry_solver_core::solution::MAX_ADDITIONAL_ROOMS;
+use calendry_solver_core::solution::{MAX_ADDITIONAL_ROOMS, MAX_LECTURERS};
 use calendry_solver_proto::v1 as pb;
 
 use crate::dates;
@@ -86,6 +86,7 @@ pub fn convert(input: &pb::SolverInput, scope: &pb::SolveScope) -> Result<Proble
     fixed.extend(build_external_occupancy(input, &slots, &room_index, &rooms)?);
 
     let constraints = build_constraints(input)?;
+    check_lecturer_veto_pool_conflict(&offerings, &constraints)?;
 
     // Scope membership is carried into `Problem` rather than thrown away.
     //
@@ -120,6 +121,34 @@ pub fn convert(input: &pb::SolverInput, scope: &pb::SolveScope) -> Result<Proble
         movement_weight: lock_policy.movement_weight(),
         ..ProblemSpec::new(slots)
     })?)
+}
+
+/// `LecturerVeto`'s mask (`Offering::veto_slots`, ADR — precomputed once in
+/// `Problem::build` from an Offering's LECTURERS) is unsound for a pool
+/// Offering: those lecturers are chosen by the search, not known before it
+/// starts, so there is nobody's blackout to precompute against. Unlike a
+/// genuine pool itself (now supported), nothing makes this combination safe
+/// yet, so it is refused explicitly rather than silently producing an
+/// always-empty mask that never blocks anything.
+fn check_lecturer_veto_pool_conflict(
+    offerings: &[OfferingSpec],
+    constraints: &ConstraintSet,
+) -> Result<(), ConvertError> {
+    if constraints.lecturer_veto.is_empty() {
+        return Ok(());
+    }
+    for o in offerings {
+        if o.eligible_lecturer_combinations.is_empty() {
+            continue;
+        }
+        if let Some(instance) = constraints.lecturer_veto.iter().find(|i| i.covers(&o.kind)) {
+            return Err(ConvertError::LecturerVetoUnsupportedWithPool {
+                offering: o.id.clone(),
+                constraint: instance.id.clone(),
+            });
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -425,11 +454,15 @@ fn build_offerings(
     let mut out = Vec::with_capacity(input.offerings.len());
 
     for o in &input.offerings {
-        // v1 takes lecturers as already assigned. A genuine pool is a materially
-        // larger search space and is rejected rather than silently mis-solved;
-        // the schema does not need to change when it lands.
-        if o.candidate_lecturer_ids.len() as u32 != o.required_lecturer_count {
-            return Err(ConvertError::LecturerPoolUnsupported {
+        if o.required_lecturer_count > MAX_LECTURERS as u32 {
+            return Err(ConvertError::TooManyLecturersRequired {
+                offering: o.id.clone(),
+                required: o.required_lecturer_count,
+                max: MAX_LECTURERS as u32,
+            });
+        }
+        if (o.candidate_lecturer_ids.len() as u32) < o.required_lecturer_count {
+            return Err(ConvertError::InsufficientLecturerCandidates {
                 offering: o.id.clone(),
                 required: o.required_lecturer_count,
                 candidates: o.candidate_lecturer_ids.len(),
@@ -470,6 +503,31 @@ fn build_offerings(
             });
         }
 
+        // Resolved once regardless of pool-ness: a dropped id still passes the
+        // `required_lecturer_count`/candidate-count checks above — they were
+        // checked against the *wire* list — so the Offering would silently be
+        // solved with fewer candidates than the caller supplied, and
+        // lecturer double-booking would not police the missing one.
+        let candidates: Vec<PersonIdx> =
+            persons.require_all(&o.candidate_lecturer_ids, PersonIdx, |person| {
+                ConvertError::UnknownPerson {
+                    context: format!("offering '{}' lecturers", o.id),
+                    person,
+                }
+            })?;
+
+        // A genuine pool: strictly more candidates than the Session needs, so
+        // there is an actual choice for the search to make. Equal counts are
+        // the degenerate case — today's only behavior, unchanged — where
+        // `candidates` IS the fixed assignment, no combination needed.
+        let (lecturers, eligible_lecturer_combinations) = if o.required_lecturer_count >= 1
+            && candidates.len() as u32 > o.required_lecturer_count
+        {
+            (vec![], lecturer_combinations(&candidates, o.required_lecturer_count as usize))
+        } else {
+            (candidates, vec![])
+        };
+
         let (eligible_rooms, eligible_room_combinations) = if o.required_room_count > 1 {
             let pool: Vec<RoomIdx> = rooms
                 .iter()
@@ -496,17 +554,8 @@ fn build_offerings(
             kind: o.kind.clone(),
             required_session_count: o.required_session_count,
             duration_blocks: o.duration_blocks,
-            // All three REQUIRED. A dropped lecturer still passes the
-            // `required_lecturer_count` gate above — it was checked against the
-            // *wire* list — so the Offering would silently be solved with fewer
-            // lecturers than the caller assigned, and lecturer double-booking
-            // would not police the missing one.
-            lecturers: persons.require_all(&o.candidate_lecturer_ids, PersonIdx, |person| {
-                ConvertError::UnknownPerson {
-                    context: format!("offering '{}' lecturers", o.id),
-                    person,
-                }
-            })?,
+            lecturers,
+            eligible_lecturer_combinations,
             groups: groups.require_all(&o.group_ids, GroupIdx, |group| {
                 ConvertError::UnknownGroup { context: format!("offering '{}'", o.id), group }
             })?,
@@ -593,6 +642,56 @@ fn room_combinations_go(
         }
         current.push(pool[i]);
         room_combinations_go(pool, rooms, k, min_capacity, i + 1, current, out);
+        current.pop();
+    }
+}
+
+/// Safety cap on how many lecturer combinations one pooled Offering
+/// enumerates — the same truncate-not-refuse policy [`MAX_ROOM_COMBINATIONS`]
+/// uses, for the same reason.
+const MAX_LECTURER_COMBINATIONS: usize = 2000;
+
+/// Every combination of `k` distinct candidates from `pool`, in the shape
+/// [`calendry_solver_core::problem::Offering::lecturer_choice`] wants.
+///
+/// Unlike [`room_combinations`], there is no capacity-style filter here — a
+/// lecturer combination is valid on its own terms, never conditioned on
+/// anything else about the candidates. That is what lets
+/// `Offering::has_lecturer_pool` read this list's emptiness alone as "not
+/// pooled": `build_offerings` only ever calls this with `pool.len() > k`, and
+/// with nothing to filter a combination out, that guarantees at least one
+/// survives.
+fn lecturer_combinations(pool: &[PersonIdx], k: usize) -> Vec<[Option<PersonIdx>; MAX_LECTURERS]> {
+    let mut out = Vec::new();
+    let mut current: Vec<PersonIdx> = Vec::with_capacity(k);
+    lecturer_combinations_go(pool, k, 0, &mut current, &mut out);
+    out
+}
+
+fn lecturer_combinations_go(
+    pool: &[PersonIdx],
+    k: usize,
+    start: usize,
+    current: &mut Vec<PersonIdx>,
+    out: &mut Vec<[Option<PersonIdx>; MAX_LECTURERS]>,
+) {
+    if k == 0 || out.len() >= MAX_LECTURER_COMBINATIONS {
+        return;
+    }
+    if current.len() == k {
+        let mut combo = [None; MAX_LECTURERS];
+        for (slot, &l) in combo.iter_mut().zip(current.iter()) {
+            *slot = Some(l);
+        }
+        out.push(combo);
+        return;
+    }
+    for i in start..pool.len() {
+        if out.len() >= MAX_LECTURER_COMBINATIONS {
+            return;
+        }
+        current.push(pool[i]);
+        lecturer_combinations_go(pool, k, i + 1, current, out);
         current.pop();
     }
 }
@@ -1495,10 +1594,16 @@ pub fn build_output(
             start_slot: Some(pb::SlotRef { week: f.week, day: f.iso_weekday, block: f.block }),
             duration_blocks: offering.duration_blocks,
             room_id: problem.rooms[placement.room.get()].id.clone(),
+            // `offering.lecturers` (a fixed assignment) and `placement.
+            // lecturers` (a pool's chosen combination) are never both
+            // non-empty for the same Offering — see
+            // `Occupant::all_lecturers`, which this mirrors.
             lecturer_ids: offering
                 .lecturers
                 .iter()
-                .map(|&l| problem.persons[l.get()].id.clone())
+                .copied()
+                .chain(placement.lecturers.iter().flatten().copied())
+                .map(|l| problem.persons[l.get()].id.clone())
                 .collect(),
             group_ids: offering
                 .own_groups

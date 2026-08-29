@@ -74,6 +74,9 @@ fn score_one(problem: &Problem, solution: &Solution, state: &SearchState, mv: &M
     if !offering.is_room_choice_eligible(mv.to.room, mv.to.additional_rooms) {
         return Score(f64::INFINITY);
     }
+    if !offering.is_lecturer_choice_eligible(mv.to.lecturers) {
+        return Score(f64::INFINITY);
+    }
 
     // LNS scores only placements it has already removed, so the occupancy never
     // contains this placement's own marks and there is nothing to discount. An
@@ -87,6 +90,7 @@ fn score_one(problem: &Problem, solution: &Solution, state: &SearchState, mv: &M
     let candidate = Occupant::of_offering(offering)
         .with_room(mv.to.room)
         .with_additional_rooms(mv.to.additional_rooms)
+        .with_pool_lecturers(mv.to.lecturers)
         .with_offering(problem.placement(mv.placement).offering);
     if !state.is_free(problem, &candidate, &span) {
         return Score(f64::INFINITY);
@@ -195,11 +199,7 @@ fn score_one(problem: &Problem, solution: &Solution, state: &SearchState, mv: &M
             // already placed. The capacity-waste cost is exact too — it
             // depends only on this Offering's `min_capacity` and the
             // candidate's own Room set.
-            + problem.preferences.cost(
-                mv.placement,
-                mv.to.start,
-                &problem.rooms[mv.to.room.get()].features,
-            )
+            + problem.preference_cost_for_placement(offering, mv.placement, mv.to)
             + problem.movement_cost(mv.placement, mv.to.start, mv.to.room)
             + problem.capacity_waste_cost(offering, capacity)
             + share_penalty

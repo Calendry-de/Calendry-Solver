@@ -1838,7 +1838,7 @@ impl Aggregates {
     /// state.
     pub fn teaching_load_delta(
         &self,
-        lecturers: &[PersonIdx],
+        lecturers: impl IntoIterator<Item = PersonIdx>,
         week: u32,
         duration_blocks: u32,
     ) -> i64 {
@@ -1847,7 +1847,7 @@ impl Aggregates {
         }
         let amount = self.teaching_load_amount(duration_blocks);
         let mut delta = 0i64;
-        for &l in lecturers {
+        for l in lecturers {
             let c = self.teaching_load_cell(l, week);
             let before = Self::teaching_load_excess(
                 self.teaching_load_week[c],
@@ -1862,12 +1862,17 @@ impl Aggregates {
         delta
     }
 
-    pub fn add_teaching_load(&mut self, lecturers: &[PersonIdx], week: u32, duration_blocks: u32) {
+    pub fn add_teaching_load(
+        &mut self,
+        lecturers: impl IntoIterator<Item = PersonIdx>,
+        week: u32,
+        duration_blocks: u32,
+    ) {
         if self.teaching_load_week.is_empty() {
             return;
         }
         let amount = self.teaching_load_amount(duration_blocks);
-        for &l in lecturers {
+        for l in lecturers {
             let c = self.teaching_load_cell(l, week);
             let before = Self::teaching_load_excess(
                 self.teaching_load_week[c],
@@ -1886,7 +1891,7 @@ impl Aggregates {
 
     pub fn remove_teaching_load(
         &mut self,
-        lecturers: &[PersonIdx],
+        lecturers: impl IntoIterator<Item = PersonIdx>,
         week: u32,
         duration_blocks: u32,
     ) {
@@ -1894,7 +1899,7 @@ impl Aggregates {
             return;
         }
         let amount = self.teaching_load_amount(duration_blocks);
-        for &l in lecturers {
+        for l in lecturers {
             let c = self.teaching_load_cell(l, week);
             let before = Self::teaching_load_excess(
                 self.teaching_load_week[c],
@@ -1919,12 +1924,17 @@ impl Aggregates {
 
     /// Sum of `weight` over every currently over-cap `(lecturer, week)` cell
     /// this occupant's lecturers sit in, for `ruin_worst`'s attribution.
-    pub fn teaching_load_ruin_cost(&self, lecturers: &[PersonIdx], week: u32, weight: f64) -> f64 {
+    pub fn teaching_load_ruin_cost(
+        &self,
+        lecturers: impl IntoIterator<Item = PersonIdx>,
+        week: u32,
+        weight: f64,
+    ) -> f64 {
         if weight == 0.0 || self.teaching_load_week.is_empty() {
             return 0.0;
         }
         let mut cost = 0.0;
-        for &l in lecturers {
+        for l in lecturers {
             let c = self.teaching_load_cell(l, week);
             if self.teaching_load_week[c] > self.teaching_load_threshold {
                 cost += weight;

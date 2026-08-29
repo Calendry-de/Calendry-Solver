@@ -61,9 +61,10 @@
 //! to list first, still bounded, still plausible, quietly pricing the wrong
 //! people's preferences.
 
-use crate::ids::{PlacementIdx, SlotIdx};
+use crate::ids::{PersonIdx, PlacementIdx, SlotIdx};
 use crate::problem::{Offering, Person, PlacementVar};
 use crate::slots::SlotTable;
+use crate::solution::MAX_LECTURERS;
 
 /// Bounds on a Person's weight override. The app validates the range at its
 /// write boundary and a database CHECK backs it up; this service accepts
@@ -135,6 +136,7 @@ impl PreferenceInstance {
 
 /// One lecturer's preference, narrowed to this run's grid and reduced to what
 /// the table build needs.
+#[derive(Clone, Debug)]
 struct Narrowed {
     /// Indexed by position within `SlotTable::active_days`.
     days: Vec<bool>,
@@ -184,6 +186,25 @@ pub struct PreferenceModel {
     /// than indexing into a shared array. See [`PreferenceModel::cost`] for
     /// why room preference is scored live instead of precomputed per room.
     room_wanted: Vec<Vec<(Vec<String>, f64)>>,
+    /// Every Person's OWN narrowed day/block preference, persisted rather
+    /// than kept local to `build` — the module doc's own blueprint for what
+    /// a genuine lecturer pool needs: `table`/`room_wanted` are only valid
+    /// while a placement's lecturer set is fixed before the search starts,
+    /// so a pool Offering's placements bypass them entirely and read this
+    /// per-PERSON table live instead, at scoring time, over whichever
+    /// lecturers the search is actually trying. See
+    /// [`PreferenceModel::cost_for`].
+    narrowed: Vec<Option<Narrowed>>,
+    /// The per-person counterpart of `room_wanted`, for the same reason
+    /// `narrowed` is: a pool Offering's room preference cost is computed live
+    /// over the candidate's chosen lecturers, not read from a per-placement
+    /// row built before any choice existed.
+    person_room_wanted: Vec<Option<(Vec<String>, f64)>>,
+    /// Persisted so [`PreferenceModel::cost_for`] can turn a `slot` into
+    /// `(day_pos, block)` the same way `cell_of_slot` lets the static path
+    /// turn it into a table row — both read the identical `cell_of_slot`
+    /// mapping, just decoded back into its two components here.
+    blocks_per_day: usize,
 }
 
 /// Every additive term `unmet`/`cost` can carry per placement, for the shared
@@ -230,6 +251,27 @@ impl PreferenceModel {
             })
             .collect();
 
+        // Narrowed once per Person, not once per placement: a lecturer leading
+        // twenty Sessions is narrowed once. Computed before the early return
+        // below (unlike before this field was persisted) so an empty
+        // `instances` still leaves `narrowed`/`person_room_wanted` correctly
+        // populated on `Self` — dead weight while nothing is configured, but
+        // one fewer special case than deriving them lazily later.
+        let narrowed: Vec<Option<Narrowed>> = persons
+            .iter()
+            .map(|p| narrow(p.preferred.as_ref(), slots, blocks_per_day))
+            .collect();
+        let person_room_wanted: Vec<Option<(Vec<String>, f64)>> = persons
+            .iter()
+            .map(|p| {
+                let pref = p.preferred.as_ref()?;
+                if pref.room_features.is_empty() {
+                    return None;
+                }
+                Some((pref.room_features.clone(), clamp_multiplier(pref.weight_multiplier)))
+            })
+            .collect();
+
         if instances.is_empty() || cells == 0 {
             return Self {
                 instances,
@@ -239,15 +281,11 @@ impl PreferenceModel {
                 weight_of: Vec::new(),
                 total_weight,
                 room_wanted: Vec::new(),
+                narrowed,
+                person_room_wanted,
+                blocks_per_day,
             };
         }
-
-        // Narrowed once per Person, not once per placement: a lecturer leading
-        // twenty Sessions is narrowed once.
-        let narrowed: Vec<Option<Narrowed>> = persons
-            .iter()
-            .map(|p| narrow(p.preferred.as_ref(), slots, blocks_per_day))
-            .collect();
 
         let mut weight_of = vec![0.0f64; placements.len()];
         let mut table = vec![0.0f32; placements.len() * row_width];
@@ -289,21 +327,15 @@ impl PreferenceModel {
             // Independent of `counted` above and of whether it ends up empty:
             // a lecturer stating ONLY a room preference and no usable
             // day/block axis is invisible to `narrow()` (`axes == 0` there),
-            // so this reads `persons` directly rather than riding on
-            // `narrowed`. Reusing `counted`'s day/block gate here would
+            // so this reads `person_room_wanted` directly rather than riding
+            // on `narrowed`. Reusing `counted`'s day/block gate here would
             // silently drop that lecturer's room preference whenever they
             // said nothing about days or blocks — exactly the "stated
             // something and did not get it" case this type exists to charge.
             room_wanted[i] = offering
                 .lecturers
                 .iter()
-                .filter_map(|l| {
-                    let pref = persons[l.get()].preferred.as_ref()?;
-                    if pref.room_features.is_empty() {
-                        return None;
-                    }
-                    Some((pref.room_features.clone(), clamp_multiplier(pref.weight_multiplier)))
-                })
+                .filter_map(|l| person_room_wanted[l.get()].clone())
                 .collect();
 
             if counted.is_empty() {
@@ -363,7 +395,18 @@ impl PreferenceModel {
             }
         }
 
-        Self { instances, table, cell_of_slot, row_width, weight_of, total_weight, room_wanted }
+        Self {
+            instances,
+            table,
+            cell_of_slot,
+            row_width,
+            weight_of,
+            total_weight,
+            room_wanted,
+            narrowed,
+            person_room_wanted,
+            blocks_per_day,
+        }
     }
 
     /// The unmet fraction for `p` starting at `slot`, landing in a Room with
@@ -389,6 +432,42 @@ impl PreferenceModel {
         self.weight_of[p.get()] * self.unmet(p, slot, room_features)
     }
 
+    /// The [`Self::cost`] counterpart for a pool Offering — see the module
+    /// doc's own blueprint. `lecturers` is the CANDIDATE'S actual chosen
+    /// combination (`Placement::lecturers`/`Occupant::pool_lecturers`), read
+    /// live against the per-person `narrowed`/`person_room_wanted` tables
+    /// instead of `table`/`room_wanted`, which were built before any choice
+    /// existed and are never valid for a pool placement.
+    ///
+    /// `weight_of[p]` is still read from the static table: it depends only on
+    /// `offering.kind`, never on which lecturer leads the placement, so it is
+    /// exactly as precomputable for a pool Offering as for a fixed one.
+    #[inline]
+    pub fn cost_for(
+        &self,
+        p: PlacementIdx,
+        lecturers: &[Option<PersonIdx>; MAX_LECTURERS],
+        slot: SlotIdx,
+        room_features: &[String],
+    ) -> f64 {
+        if self.table.is_empty() {
+            return 0.0;
+        }
+        self.weight_of[p.get()] * self.unmet_for(lecturers, slot, room_features)
+    }
+
+    /// The [`Self::unmet`] counterpart for a pool Offering — see
+    /// [`Self::cost_for`].
+    #[inline]
+    pub fn unmet_for(
+        &self,
+        lecturers: &[Option<PersonIdx>; MAX_LECTURERS],
+        slot: SlotIdx,
+        room_features: &[String],
+    ) -> f64 {
+        self.day_block_unmet_for(lecturers, slot) + self.room_unmet_for(lecturers, room_features)
+    }
+
     #[inline]
     fn day_block_unmet(&self, p: PlacementIdx, slot: SlotIdx) -> f64 {
         if self.table.is_empty() {
@@ -396,6 +475,72 @@ impl PreferenceModel {
         }
         let cell = self.cell_of_slot[slot.get()] as usize;
         f64::from(self.table[p.get() * self.row_width + cell])
+    }
+
+    /// The same MEAN-over-counted-lecturers math [`Self::build`]'s table-fill
+    /// loop uses, computed for one `(day, block)` cell on demand instead of
+    /// precomputed for all of them — the O(|P|) scoring step the module doc
+    /// trades for a lecturer set that can change.
+    #[inline]
+    fn day_block_unmet_for(
+        &self,
+        lecturers: &[Option<PersonIdx>; MAX_LECTURERS],
+        slot: SlotIdx,
+    ) -> f64 {
+        if self.table.is_empty() {
+            return 0.0;
+        }
+        let cell = self.cell_of_slot[slot.get()] as usize;
+        // The sentinel cell (`row_width - 1`): unreachable in practice, same
+        // as the static path's — see `cell_of_slot`'s own doc.
+        if cell >= self.row_width - 1 {
+            return 0.0;
+        }
+        let day_pos = cell / self.blocks_per_day;
+        let block = cell % self.blocks_per_day;
+        let counted: Vec<&Narrowed> = lecturers
+            .iter()
+            .flatten()
+            .filter_map(|l| self.narrowed[l.get()].as_ref())
+            .collect();
+        if counted.is_empty() {
+            return 0.0;
+        }
+        let sum: f64 = counted
+            .iter()
+            .map(|n| n.multiplier * n.unmet(day_pos, block))
+            .sum();
+        sum / counted.len() as f64
+    }
+
+    /// The [`Self::room_unmet`] counterpart for a pool Offering, reading
+    /// `person_room_wanted` per candidate lecturer instead of the
+    /// per-placement `room_wanted` row.
+    #[inline]
+    fn room_unmet_for(
+        &self,
+        lecturers: &[Option<PersonIdx>; MAX_LECTURERS],
+        room_features: &[String],
+    ) -> f64 {
+        if self.person_room_wanted.is_empty() {
+            return 0.0;
+        }
+        let wanted: Vec<&(Vec<String>, f64)> = lecturers
+            .iter()
+            .flatten()
+            .filter_map(|l| self.person_room_wanted[l.get()].as_ref())
+            .collect();
+        if wanted.is_empty() {
+            return 0.0;
+        }
+        let sum: f64 = wanted
+            .iter()
+            .map(|(features, multiplier)| {
+                let met = features.iter().any(|f| room_features.contains(f));
+                multiplier * if met { 0.0 } else { 1.0 }
+            })
+            .sum();
+        sum / wanted.len() as f64
     }
 
     /// LIVE, not precomputed: unlike day/block, this does not vary with

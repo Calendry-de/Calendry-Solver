@@ -176,3 +176,28 @@ way the rule enters a generated instance. The generator gates the RNG draw on
 that ratio rather than drawing unconditionally — an unconditional draw shifted
 every subsequent one and turned the documented 27,136-Session
 `large-university` into a 27,134-Session instance reporting the same name.
+
+## Lecturer-pool selection landed (issue #61) — the table key was exactly as wrong as predicted
+
+Genuine lecturer-pool selection is now built. The precomputed
+`placement × (day, block)` table is UNCHANGED and stays the fast path for
+every non-pool Offering — the overwhelming majority — but it is never read
+for a pool Offering, whose lecturer set is a search-time choice
+(`Offering::has_lecturer_pool`), never known at the point this table is
+built.
+
+The fix is the one this ADR already named: a per-PERSON table
+(`PreferenceModel`'s `narrowed`/`person_room_wanted`, persisted rather than
+local to `build`) with the mean taken over the CANDIDATE'S chosen lecturers
+at scoring time (`PreferenceModel::cost_for`/`unmet_for`), accepting an
+O(|chosen lecturers|) — not O(|all lecturers|) — step in exchange for a set
+that can change. `Problem::preference_cost_for_placement` is the one place
+that decides which of the two paths a placement gets, so
+`search::Trial::place`/`unplace` and `evaluator::score_one` cannot drift on
+it.
+
+`LecturerVeto`'s mask (`Offering::veto_slots`) has the identical precomputed-
+before-the-search shape and was not fixed alongside it — a pool Offering
+combined with `LecturerVeto` is refused at conversion
+(`ConvertError::LecturerVetoUnsupportedWithPool`) rather than silently
+producing an always-empty mask that can never block anything.

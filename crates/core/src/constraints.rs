@@ -15,7 +15,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::ids::{GroupIdx, OfferingIdx, PersonIdx, RoomIdx, SlotIdx};
 use crate::problem::{ConstraintInstance, Problem};
-use crate::solution::{MAX_ADDITIONAL_ROOMS, SearchState, Solution};
+use crate::solution::{MAX_ADDITIONAL_ROOMS, MAX_LECTURERS, SearchState, Solution};
 
 /// Which catalogue type a report belongs to.
 ///
@@ -106,7 +106,15 @@ struct View<'a> {
     kind: &'a str,
     room: Option<RoomIdx>,
     additional_rooms: [Option<RoomIdx>; MAX_ADDITIONAL_ROOMS],
+    /// A fixed assignment's lecturers, or empty for a pool Offering's placed
+    /// Session — see [`Self::all_lecturers`], which is what every check
+    /// actually reads.
     lecturers: &'a [PersonIdx],
+    /// A pool Offering's placed Session's CHOSEN lecturers — see
+    /// [`crate::solution::Placement::lecturers`]. `[None; MAX_LECTURERS]`
+    /// for a fixed assignment or an immovable Session, both of which carry
+    /// their lecturers in `lecturers` above instead.
+    pool_lecturers: [Option<PersonIdx>; MAX_LECTURERS],
     own_groups: &'a [GroupIdx],
     attendees: &'a [PersonIdx],
     /// `None` for an ad-hoc Session realizing no Offering — never a member
@@ -124,6 +132,17 @@ impl View<'_> {
         self.room
             .into_iter()
             .chain(self.additional_rooms.iter().flatten().copied())
+    }
+
+    /// Every lecturer this Session has — mirrors
+    /// [`crate::solution::Occupant::all_lecturers`], the same union of the
+    /// two mutually-exclusive sources.
+    #[inline]
+    fn all_lecturers(&self) -> impl Iterator<Item = PersonIdx> + '_ {
+        self.lecturers
+            .iter()
+            .copied()
+            .chain(self.pool_lecturers.iter().flatten().copied())
     }
 }
 
@@ -632,7 +651,10 @@ fn check_pair<'p>(
     }
 
     // 2. Lecturer double-booking.
-    if let Some(p) = x.lecturers.iter().find(|l| y.lecturers.contains(l)) {
+    if let Some(p) = x
+        .all_lecturers()
+        .find(|p| y.all_lecturers().any(|yp| yp == *p))
+    {
         for i in c.lecturer_double_booking.iter().filter(|i| both(i)) {
             report(
                 i,
@@ -737,6 +759,7 @@ fn collect_views<'a>(problem: &'a Problem, solution: &Solution) -> Vec<View<'a>>
             room: f.room,
             additional_rooms: f.additional_rooms,
             lecturers: &f.lecturers,
+            pool_lecturers: [None; MAX_LECTURERS],
             own_groups: &f.own_groups,
             attendees: &f.attendees,
             different_time_relations: &f.different_time_relations,
@@ -756,6 +779,7 @@ fn collect_views<'a>(problem: &'a Problem, solution: &Solution) -> Vec<View<'a>>
             room: Some(pl.room),
             additional_rooms: pl.additional_rooms,
             lecturers: &o.lecturers,
+            pool_lecturers: pl.lecturers,
             own_groups: &o.own_groups,
             attendees: &o.attendees,
             different_time_relations: &o.different_time_relations,

@@ -106,6 +106,7 @@ pub fn offering(id: &str, count: u32, eligible: &[u32]) -> OfferingSpec {
         required_session_count: count,
         duration_blocks: 1,
         lecturers: vec![],
+        eligible_lecturer_combinations: vec![],
         groups: vec![],
         participants: vec![],
         eligible_rooms: eligible.iter().map(|&r| RoomIdx(r)).collect(),
@@ -150,8 +151,18 @@ pub fn with_room_combinations(
 
 /// Every combination of `k` distinct elements of `pool`, in ascending order.
 fn combinations(pool: &[u32], k: usize) -> Vec<Vec<u32>> {
-    if k == 0 || k > pool.len() {
+    if k > pool.len() {
         return vec![];
+    }
+    // The empty combination is a real answer, not "none" — the base case a
+    // `k == 0` early return alongside `k > pool.len()` used to collapse into,
+    // silently dropping it. That only matters once recursion reaches it (any
+    // top-level `k >= 1` eventually does), and it was previously reachable
+    // ONLY through the "with pool[0]" branch below, so it silently dropped
+    // every combination whose k-1 remaining elements bottomed out here —
+    // for `k == 1` specifically, every combination but the last.
+    if k == 0 {
+        return vec![vec![]];
     }
     if k == pool.len() {
         return vec![pool.to_vec()];
@@ -171,6 +182,31 @@ pub fn with_groups(mut o: OfferingSpec, groups: &[u32]) -> OfferingSpec {
 
 pub fn with_lecturers(mut o: OfferingSpec, lecturers: &[u32]) -> OfferingSpec {
     o.lecturers = lecturers.iter().map(|&p| PersonIdx(p)).collect();
+    o
+}
+
+/// `offering` turned into a genuine lecturer pool: every combination of
+/// `required_lecturer_count` distinct candidates out of `pool` eligible —
+/// the lecturer-axis counterpart of `with_room_combinations`, mirroring what
+/// `convert::build_offerings` computes for a pool with more candidates than
+/// the Session needs. Clears `lecturers`, which a pool Offering never
+/// populates — see [`crate::solution::Occupant::all_lecturers`].
+pub fn with_lecturer_pool(
+    mut o: OfferingSpec,
+    required_lecturer_count: u32,
+    pool: &[u32],
+) -> OfferingSpec {
+    o.lecturers = vec![];
+    o.eligible_lecturer_combinations = combinations(pool, required_lecturer_count as usize)
+        .into_iter()
+        .map(|combo| {
+            let mut chosen = [None; crate::solution::MAX_LECTURERS];
+            for (slot, &l) in chosen.iter_mut().zip(&combo) {
+                *slot = Some(PersonIdx(l));
+            }
+            chosen
+        })
+        .collect();
     o
 }
 
