@@ -27,7 +27,7 @@ use std::collections::{HashMap, HashSet};
 
 use calendry_solver_core::aggregates::{
     CompactnessInstance, DayMixInstance, MaxConsecutiveInstance, MaxDailySpanInstance,
-    PatternAdherenceInstance, ShareInstance, ShareWindow,
+    MaxWeeklyTeachingLoadInstance, PatternAdherenceInstance, ShareInstance, ShareWindow,
 };
 use calendry_solver_core::ids::{GroupIdx, OfferingIdx, PersonIdx, RoomIdx, SlotIdx};
 use calendry_solver_core::preferences::{Preference, PreferenceInstance};
@@ -1167,11 +1167,27 @@ fn build_constraints(input: &pb::SolverInput) -> Result<ConstraintSet, ConvertEr
                     max_consecutive: p.max_consecutive,
                 });
             }
-            Some(Params::MaxWeeklyTeachingLoad(_)) => {
-                return Err(ConvertError::ConstraintTypeUnimplemented {
-                    constraint: c.id.clone(),
-                    constraint_type: "MaxWeeklyTeachingLoad",
-                });
+            // Built — see `crate::aggregates::MaxWeeklyTeachingLoadInstance`.
+            // SOFT: priced once the cap is exceeded rather than refused
+            // (2026-08-29 design decision) — a hard cap on a count that only
+            // becomes known as placements accumulate risks the same
+            // dead-end-construction problem ADR-0025 records for
+            // `MaxOnlineShare`.
+            Some(Params::MaxWeeklyTeachingLoad(p)) => {
+                if c.weight < 0.0 || c.weight.is_nan() {
+                    return Err(ConvertError::NegativeSoftWeight {
+                        constraint: c.id.clone(),
+                        weight: c.weight,
+                    });
+                }
+                set.max_weekly_teaching_load
+                    .push(MaxWeeklyTeachingLoadInstance {
+                        id: c.id.clone(),
+                        kinds: c.applies_to_kinds.clone(),
+                        weight: c.weight,
+                        count_blocks: p.count_blocks,
+                        max_per_week: p.max_per_week,
+                    });
             }
             Some(Params::ExamSpacingSameDay(_)) => {
                 return Err(ConvertError::ConstraintTypeUnimplemented {

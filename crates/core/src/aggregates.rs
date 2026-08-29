@@ -156,6 +156,27 @@ impl MaxDailySpanInstance {
     }
 }
 
+/// One configured `MaxWeeklyTeachingLoad` rule. Lecturer-only — unlike
+/// `CompactnessInstance` and its siblings, there is no Group/Person axis
+/// split, since the whole point is capping the person actually TEACHING.
+#[derive(Clone, Debug)]
+pub struct MaxWeeklyTeachingLoadInstance {
+    pub id: String,
+    /// Empty means all kinds.
+    pub kinds: Vec<String>,
+    pub weight: f64,
+    /// Count SESSIONS if false, BLOCKS if true.
+    pub count_blocks: bool,
+    pub max_per_week: u32,
+}
+
+impl MaxWeeklyTeachingLoadInstance {
+    #[inline]
+    pub fn covers(&self, kind: &str) -> bool {
+        self.kinds.is_empty() || self.kinds.iter().any(|k| k == kind)
+    }
+}
+
 /// One configured `DistributedPatternAdherence` or `BlockPatternAdherence` —
 /// identical shape, kept as one type since both are just "id, kind scope,
 /// weight" with the actual per-pattern logic living in `Aggregates` instead.
@@ -313,6 +334,23 @@ pub struct Aggregates {
     span_person_excess_total: u32,
 
     max_daily_span_rules: Vec<MaxDailySpanInstance>,
+
+    /// `[person * n_weeks + week]` — how many Sessions (or blocks, per
+    /// `teaching_load_count_blocks`) that Person currently leads that week.
+    /// Empty when `MaxWeeklyTeachingLoad` is not configured.
+    teaching_load_week: Vec<u32>,
+    /// The tightest `max_per_week` among every enabled instance, same
+    /// "whichever binds hardest" convention as the other thresholds here.
+    teaching_load_threshold: u32,
+    /// Whether to count blocks rather than Sessions — taken from whichever
+    /// instance supplies `teaching_load_threshold`, since one shared counter
+    /// cannot serve two different counting rules at once; a tenant mixing
+    /// session-counting and block-counting instances gets the tightest
+    /// instance's own choice. Practically always one instance.
+    teaching_load_count_blocks: bool,
+    teaching_load_excess_total: u32,
+
+    teaching_load_rules: Vec<MaxWeeklyTeachingLoadInstance>,
 }
 
 impl Aggregates {
@@ -332,6 +370,7 @@ impl Aggregates {
         block_rules: Vec<PatternAdherenceInstance>,
         max_consecutive_rules: Vec<MaxConsecutiveInstance>,
         max_daily_span_rules: Vec<MaxDailySpanInstance>,
+        teaching_load_rules: Vec<MaxWeeklyTeachingLoadInstance>,
     ) -> Self {
         let groups = n_groups.max(1);
         let counters = rules
@@ -381,6 +420,14 @@ impl Aggregates {
             .map(|r| r.max_span_blocks)
             .min()
             .unwrap_or(u32::MAX);
+
+        let track_teaching_load = !teaching_load_rules.is_empty();
+        // The instance supplying the tightest cap, since that is the one
+        // "whichever binds hardest" reads off for both the threshold and its
+        // own counting rule.
+        let tightest_load_rule = teaching_load_rules.iter().min_by_key(|r| r.max_per_week);
+        let teaching_load_threshold = tightest_load_rule.map_or(u32::MAX, |r| r.max_per_week);
+        let teaching_load_count_blocks = tightest_load_rule.is_some_and(|r| r.count_blocks);
 
         Self {
             online_day: vec![0; groups * n_days.max(1)],
@@ -438,6 +485,15 @@ impl Aggregates {
             span_group_excess_total: 0,
             span_person_excess_total: 0,
             max_daily_span_rules,
+            teaching_load_week: if track_teaching_load {
+                vec![0; n_persons.max(1) * weeks]
+            } else {
+                Vec::new()
+            },
+            teaching_load_threshold,
+            teaching_load_count_blocks,
+            teaching_load_excess_total: 0,
+            teaching_load_rules,
         }
     }
 
@@ -1366,6 +1422,131 @@ impl Aggregates {
         cost
     }
 
+    // -- max weekly teaching load -----------------------------------------------
+
+    pub fn teaching_load_rules(&self) -> &[MaxWeeklyTeachingLoadInstance] {
+        &self.teaching_load_rules
+    }
+
+    #[inline]
+    fn teaching_load_cell(&self, lecturer: PersonIdx, week: u32) -> usize {
+        lecturer.get() * self.n_weeks + week as usize
+    }
+
+    #[inline]
+    fn teaching_load_excess(count: u32, threshold: u32) -> u32 {
+        count.saturating_sub(threshold)
+    }
+
+    /// How much of a Session's duration counts toward the cap — blocks if
+    /// the winning instance asked for it, one Session otherwise.
+    #[inline]
+    fn teaching_load_amount(&self, duration_blocks: u32) -> u32 {
+        if self.teaching_load_count_blocks { duration_blocks } else { 1 }
+    }
+
+    /// The teaching-load cost DELTA if `lecturers` gained a Session of
+    /// `duration_blocks` in `week` — the read-only preview, mirroring
+    /// [`Self::group_run_delta`]. Unlike the day-granularity types above,
+    /// there is nothing to iterate per block: the count itself is the whole
+    /// state.
+    pub fn teaching_load_delta(
+        &self,
+        lecturers: &[PersonIdx],
+        week: u32,
+        duration_blocks: u32,
+    ) -> i64 {
+        if self.teaching_load_week.is_empty() {
+            return 0;
+        }
+        let amount = self.teaching_load_amount(duration_blocks);
+        let mut delta = 0i64;
+        for &l in lecturers {
+            let c = self.teaching_load_cell(l, week);
+            let before = Self::teaching_load_excess(
+                self.teaching_load_week[c],
+                self.teaching_load_threshold,
+            );
+            let after = Self::teaching_load_excess(
+                self.teaching_load_week[c] + amount,
+                self.teaching_load_threshold,
+            );
+            delta += i64::from(after) - i64::from(before);
+        }
+        delta
+    }
+
+    pub fn add_teaching_load(&mut self, lecturers: &[PersonIdx], week: u32, duration_blocks: u32) {
+        if self.teaching_load_week.is_empty() {
+            return;
+        }
+        let amount = self.teaching_load_amount(duration_blocks);
+        for &l in lecturers {
+            let c = self.teaching_load_cell(l, week);
+            let before = Self::teaching_load_excess(
+                self.teaching_load_week[c],
+                self.teaching_load_threshold,
+            );
+            self.teaching_load_week[c] += amount;
+            let after = Self::teaching_load_excess(
+                self.teaching_load_week[c],
+                self.teaching_load_threshold,
+            );
+            self.teaching_load_excess_total = (i64::from(self.teaching_load_excess_total)
+                + i64::from(after)
+                - i64::from(before)) as u32;
+        }
+    }
+
+    pub fn remove_teaching_load(
+        &mut self,
+        lecturers: &[PersonIdx],
+        week: u32,
+        duration_blocks: u32,
+    ) {
+        if self.teaching_load_week.is_empty() {
+            return;
+        }
+        let amount = self.teaching_load_amount(duration_blocks);
+        for &l in lecturers {
+            let c = self.teaching_load_cell(l, week);
+            let before = Self::teaching_load_excess(
+                self.teaching_load_week[c],
+                self.teaching_load_threshold,
+            );
+            self.teaching_load_week[c] = self.teaching_load_week[c].saturating_sub(amount);
+            let after = Self::teaching_load_excess(
+                self.teaching_load_week[c],
+                self.teaching_load_threshold,
+            );
+            self.teaching_load_excess_total = (i64::from(self.teaching_load_excess_total)
+                + i64::from(after)
+                - i64::from(before)) as u32;
+        }
+    }
+
+    /// What the currently over-cap weekly loads cost, at the configured
+    /// weight — O(1), read straight off the running total.
+    pub fn teaching_load_cost(&self, weight: f64) -> f64 {
+        self.teaching_load_excess_total as f64 * weight
+    }
+
+    /// Sum of `weight` over every currently over-cap `(lecturer, week)` cell
+    /// this occupant's lecturers sit in, for `ruin_worst`'s attribution.
+    pub fn teaching_load_ruin_cost(&self, lecturers: &[PersonIdx], week: u32, weight: f64) -> f64 {
+        if weight == 0.0 || self.teaching_load_week.is_empty() {
+            return 0.0;
+        }
+        let mut cost = 0.0;
+        for &l in lecturers {
+            let c = self.teaching_load_cell(l, week);
+            if self.teaching_load_week[c] > self.teaching_load_threshold {
+                cost += weight;
+            }
+        }
+        cost
+    }
+
     // -- scheduling pattern ---------------------------------------------------
 
     pub fn distributed_rules(&self) -> &[PatternAdherenceInstance] {
@@ -1729,8 +1910,23 @@ mod tests {
 
     #[test]
     fn day_mix_blocks_only_the_opposite_mode() {
-        let mut a =
-            Aggregates::new(2, 3, 1, vec![], 0, 0, 1, vec![], 0, 0, vec![], vec![], vec![], vec![]);
+        let mut a = Aggregates::new(
+            2,
+            3,
+            1,
+            vec![],
+            0,
+            0,
+            1,
+            vec![],
+            0,
+            0,
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+        );
         let g = [GroupIdx(0)];
 
         assert!(a.day_mix_allows(&g, &[0], true), "empty day accepts anything");
@@ -1760,6 +1956,7 @@ mod tests {
             vec![],
             0,
             0,
+            vec![],
             vec![],
             vec![],
             vec![],
@@ -1807,6 +2004,7 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
         );
         load(&mut term);
         assert_eq!(term.share_violations(), 0);
@@ -1823,6 +2021,7 @@ mod tests {
             vec![],
             0,
             0,
+            vec![],
             vec![],
             vec![],
             vec![],
@@ -1850,6 +2049,7 @@ mod tests {
             vec![],
             0,
             0,
+            vec![],
             vec![],
             vec![],
             vec![],
@@ -1885,6 +2085,7 @@ mod tests {
             vec![],
             0,
             0,
+            vec![],
             vec![],
             vec![],
             vec![],
@@ -1928,6 +2129,7 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
         );
         let g = [GroupIdx(0)];
         a.apply_share("lecture", &g, 0, true, true);
@@ -1945,8 +2147,23 @@ mod tests {
     /// cell are charged — the asymmetry above does not apply here.
     #[test]
     fn day_mix_violation_cost_charges_both_modes_in_a_mixed_cell() {
-        let mut a =
-            Aggregates::new(1, 2, 1, vec![], 0, 0, 1, vec![], 0, 0, vec![], vec![], vec![], vec![]);
+        let mut a = Aggregates::new(
+            1,
+            2,
+            1,
+            vec![],
+            0,
+            0,
+            1,
+            vec![],
+            0,
+            0,
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+        );
         let g = [GroupIdx(0)];
         a.add_day_mode(&g, &[0], true);
         assert_eq!(a.day_mix_violation_cost(&g, &[0], 10.0), 0.0, "one mode alone is not mixed");
@@ -1980,6 +2197,7 @@ mod tests {
             vec![compactness_rule(true, false)],
             0,
             0,
+            vec![],
             vec![],
             vec![],
             vec![],
@@ -2021,6 +2239,7 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
         );
         let g = [GroupIdx(0)];
         a.add_group_compactness(&g, 0, &[SlotIdx(0)]);
@@ -2041,6 +2260,7 @@ mod tests {
             vec![compactness_rule(false, true)],
             0,
             0,
+            vec![],
             vec![],
             vec![],
             vec![],
@@ -2075,6 +2295,7 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
         );
         a.add_person_compactness(&[PersonIdx(0)], 0, &[SlotIdx(0), SlotIdx(3)]);
         assert_eq!(a.compactness_cost(0.0, 1.0), 0.0, "Person axis was never configured");
@@ -2097,6 +2318,7 @@ mod tests {
             vec![compactness_rule(true, false)],
             0,
             0,
+            vec![],
             vec![],
             vec![],
             vec![],
@@ -2130,6 +2352,7 @@ mod tests {
             vec![compactness_rule(true, false)],
             0,
             0,
+            vec![],
             vec![],
             vec![],
             vec![],
@@ -2174,6 +2397,7 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
         );
         let o = OfferingIdx(0);
         a.add_distributed(o, 0);
@@ -2196,6 +2420,7 @@ mod tests {
             1,
             2,
             vec![pattern_rule()],
+            vec![],
             vec![],
             vec![],
             vec![],
@@ -2227,6 +2452,7 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
         );
         let o = OfferingIdx(0);
         a.add_distributed(o, 0);
@@ -2255,6 +2481,7 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
         );
         a.add_distributed(OfferingIdx(0), 0);
         a.add_distributed(OfferingIdx(0), 1);
@@ -2279,6 +2506,7 @@ mod tests {
             1,
             vec![],
             vec![pattern_rule()],
+            vec![],
             vec![],
             vec![],
         );
@@ -2313,6 +2541,7 @@ mod tests {
             vec![pattern_rule()],
             vec![],
             vec![],
+            vec![],
         );
         let o = OfferingIdx(0);
         a.add_block(o, 0);
@@ -2341,6 +2570,7 @@ mod tests {
             2,
             vec![],
             vec![pattern_rule()],
+            vec![],
             vec![],
             vec![],
         );

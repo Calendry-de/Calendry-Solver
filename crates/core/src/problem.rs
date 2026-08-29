@@ -7,7 +7,7 @@
 
 use crate::aggregates::{
     Aggregates, CompactnessInstance, DayMixInstance, MaxConsecutiveInstance, MaxDailySpanInstance,
-    PatternAdherenceInstance, ShareInstance,
+    MaxWeeklyTeachingLoadInstance, PatternAdherenceInstance, ShareInstance,
 };
 use crate::bitset::BitSet;
 use crate::groups::{GroupClosure, GroupCycle};
@@ -272,6 +272,10 @@ pub struct ConstraintSet {
     /// long if the bracketing Sessions are simply far apart. See
     /// [`crate::aggregates::MaxDailySpanInstance`].
     pub max_daily_span: Vec<MaxDailySpanInstance>,
+    /// SOFT, aggregate over a week. Caps how many Sessions (or blocks) a
+    /// lecturer teaches in one week. See
+    /// [`crate::aggregates::MaxWeeklyTeachingLoadInstance`].
+    pub max_weekly_teaching_load: Vec<MaxWeeklyTeachingLoadInstance>,
 }
 
 /// One `ProtectedBlock` instance. The FIRST hard type whose values
@@ -358,6 +362,7 @@ pub struct Enforce {
     pub max_consecutive_person: bool,
     pub max_daily_span_group: bool,
     pub max_daily_span_person: bool,
+    pub max_weekly_teaching_load: bool,
 }
 
 impl ConstraintSet {
@@ -396,6 +401,7 @@ impl ConstraintSet {
                 .max_daily_span
                 .iter()
                 .any(|c| c.person && c.covers(kind)),
+            max_weekly_teaching_load: self.max_weekly_teaching_load.iter().any(|c| c.covers(kind)),
         }
     }
 }
@@ -892,6 +898,9 @@ pub struct Problem {
     pub max_daily_span_group_weight: f64,
     /// The Person-axis counterpart of `max_daily_span_group_weight`.
     pub max_daily_span_person_weight: f64,
+    /// Summed weight of every configured `MaxWeeklyTeachingLoad` instance.
+    /// Zero when not configured. Lecturer-only, no axis split.
+    pub max_weekly_teaching_load_weight: f64,
     /// Summed weight of every configured `DistributedPatternAdherence`.
     pub distributed_pattern_weight: f64,
     /// Summed weight of every configured `BlockPatternAdherence`.
@@ -1085,6 +1094,7 @@ impl Problem {
             constraints.block_pattern_adherence.clone(),
             constraints.max_consecutive_blocks.clone(),
             constraints.max_daily_span.clone(),
+            constraints.max_weekly_teaching_load.clone(),
         );
 
         let day_mix_weight: f64 = constraints
@@ -1137,6 +1147,11 @@ impl Problem {
             .max_daily_span
             .iter()
             .filter(|i| i.person)
+            .map(|i| i.weight)
+            .sum();
+        let max_weekly_teaching_load_weight: f64 = constraints
+            .max_weekly_teaching_load
+            .iter()
             .map(|i| i.weight)
             .sum();
         let distributed_pattern_weight: f64 = constraints
@@ -1262,6 +1277,7 @@ impl Problem {
             max_consecutive_person_weight,
             max_daily_span_group_weight,
             max_daily_span_person_weight,
+            max_weekly_teaching_load_weight,
             distributed_pattern_weight,
             block_pattern_weight,
             in_scope,

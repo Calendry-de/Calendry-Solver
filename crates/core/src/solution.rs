@@ -764,6 +764,25 @@ impl SearchState {
         delta
     }
 
+    /// The `MaxWeeklyTeachingLoad` cost DELTA of placing `who` at `span` —
+    /// the read-only preview, mirroring [`Self::max_daily_span_delta`].
+    /// Keyed by `who.lecturers` and the WEEK `span` falls in, not by day —
+    /// this type is a weekly cap, not a daily one.
+    pub fn max_weekly_teaching_load_delta(
+        &self,
+        problem: &Problem,
+        who: &Occupant<'_>,
+        span: &[SlotIdx],
+    ) -> f64 {
+        if span.is_empty() || !who.enforce.max_weekly_teaching_load {
+            return 0.0;
+        }
+        let week = problem.slots.flags(span[0]).week;
+        self.aggregates
+            .teaching_load_delta(who.lecturers, week, span.len() as u32) as f64
+            * problem.max_weekly_teaching_load_weight
+    }
+
     pub fn mark(&mut self, problem: &Problem, who: &Occupant<'_>, span: &[SlotIdx]) {
         self.occupancy.mark(problem, who, span);
         self.apply_aggregates(problem, who, span, true);
@@ -839,6 +858,16 @@ impl SearchState {
                 self.aggregates.add_person_span(who.attendees, day, span);
             } else {
                 self.aggregates.remove_person_span(who.attendees, day, span);
+            }
+        }
+        if who.enforce.max_weekly_teaching_load {
+            let week = problem.slots.flags(span[0]).week;
+            if add {
+                self.aggregates
+                    .add_teaching_load(who.lecturers, week, span.len() as u32);
+            } else {
+                self.aggregates
+                    .remove_teaching_load(who.lecturers, week, span.len() as u32);
             }
         }
 
@@ -955,6 +984,15 @@ impl SearchState {
             );
         }
 
+        if who.enforce.max_weekly_teaching_load {
+            let week = problem.slots.flags(span[0]).week;
+            score += self.aggregates.teaching_load_ruin_cost(
+                who.lecturers,
+                week,
+                problem.max_weekly_teaching_load_weight,
+            );
+        }
+
         if let Some(offering) = who.offering {
             use crate::problem::SchedulingPattern;
             if who.enforce.distributed_pattern
@@ -1034,6 +1072,16 @@ impl SearchState {
             problem.max_daily_span_group_weight,
             problem.max_daily_span_person_weight,
         )
+    }
+
+    /// What the currently over-cap weekly teaching loads cost, at the
+    /// configured weight.
+    pub fn max_weekly_teaching_load_cost(&self, problem: &Problem) -> f64 {
+        if problem.max_weekly_teaching_load_weight == 0.0 {
+            return 0.0;
+        }
+        self.aggregates
+            .teaching_load_cost(problem.max_weekly_teaching_load_weight)
     }
 
     /// What every Offering's scheduling-pattern adherence currently costs, at

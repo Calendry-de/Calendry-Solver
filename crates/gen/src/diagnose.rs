@@ -130,6 +130,7 @@ fn single(axis: fn(&mut Enforce), base: Enforce) -> Enforce {
         max_consecutive_person: false,
         max_daily_span_group: false,
         max_daily_span_person: false,
+        max_weekly_teaching_load: false,
     };
     axis(&mut e);
     axis(&mut probe);
@@ -150,6 +151,7 @@ fn single(axis: fn(&mut Enforce), base: Enforce) -> Enforce {
         max_consecutive_person: e.max_consecutive_person && base.max_consecutive_person,
         max_daily_span_group: e.max_daily_span_group && base.max_daily_span_group,
         max_daily_span_person: e.max_daily_span_person && base.max_daily_span_person,
+        max_weekly_teaching_load: e.max_weekly_teaching_load && base.max_weekly_teaching_load,
     }
 }
 

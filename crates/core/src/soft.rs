@@ -369,6 +369,11 @@ pub struct Objective {
     /// cell and already multiplied by each axis's configured weight — same
     /// "belongs to a day, not a placement" reason for living outside `soft`.
     pub max_daily_span_cost: f64,
+    /// Sessions/blocks charged over a weekly cap per lecturer, summed over
+    /// every currently-loaded `(lecturer, week)` cell and already multiplied
+    /// by the configured weight. Same "belongs to a week, not a placement"
+    /// reason for living outside `soft` the other aggregate costs have.
+    pub max_weekly_teaching_load_cost: f64,
     /// `DistributedPatternAdherence` and `BlockPatternAdherence` together,
     /// already multiplied by each type's configured weight. Read whole off
     /// `Aggregates`' running totals for the same reason `compactness_cost` is:
@@ -397,6 +402,7 @@ impl Objective {
             + self.compactness_cost
             + self.max_consecutive_cost
             + self.max_daily_span_cost
+            + self.max_weekly_teaching_load_cost
             + self.scheduling_pattern_cost
     }
 }
@@ -608,6 +614,7 @@ mod tests {
             compactness_cost: 0.0,
             max_consecutive_cost: 0.0,
             max_daily_span_cost: 0.0,
+            max_weekly_teaching_load_cost: 0.0,
             scheduling_pattern_cost: 0.0,
         };
         let one_unplaced = Objective {
@@ -618,6 +625,7 @@ mod tests {
             compactness_cost: 0.0,
             max_consecutive_cost: 0.0,
             max_daily_span_cost: 0.0,
+            max_weekly_teaching_load_cost: 0.0,
             scheduling_pattern_cost: 0.0,
         };
         assert!(one_unplaced.total(hard_penalty) > all_soft_bad.total(hard_penalty));
@@ -645,6 +653,7 @@ mod tests {
             compactness_cost: 0.0,
             max_consecutive_cost: 0.0,
             max_daily_span_cost: 0.0,
+            max_weekly_teaching_load_cost: 0.0,
             scheduling_pattern_cost: 0.0,
         };
         let one_unplaced = Objective {
@@ -655,6 +664,7 @@ mod tests {
             compactness_cost: 0.0,
             max_consecutive_cost: 0.0,
             max_daily_span_cost: 0.0,
+            max_weekly_teaching_load_cost: 0.0,
             scheduling_pattern_cost: 0.0,
         };
 
