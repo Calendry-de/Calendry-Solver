@@ -120,6 +120,10 @@ fn single(axis: fn(&mut Enforce), base: Enforce) -> Enforce {
         // `would_worsen`-style predicate to probe.
         distributed_pattern: false,
         block_pattern: false,
+        // Never probed either: filterable, but not yet added to the `axes`
+        // list below — nothing has needed a `ProtectedBlock`-attributed
+        // rejection count yet.
+        protected_block: false,
     };
     axis(&mut e);
     axis(&mut probe);
@@ -135,6 +139,7 @@ fn single(axis: fn(&mut Enforce), base: Enforce) -> Enforce {
         compactness_person: e.compactness_person && base.compactness_person,
         distributed_pattern: e.distributed_pattern && base.distributed_pattern,
         block_pattern: e.block_pattern && base.block_pattern,
+        protected_block: e.protected_block && base.protected_block,
     }
 }
 

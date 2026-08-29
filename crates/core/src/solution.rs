@@ -118,6 +118,9 @@ pub struct Occupant<'a> {
     /// The same, for the blackouts of this Session's Groups and their
     /// ancestors. `None` for the same reason.
     pub group_veto_slots: Option<&'a crate::bitset::BitSet>,
+    /// The same, for this Offering's `ProtectedBlock` mask. `None` for the
+    /// same reason — immovable occupancy is never re-placed.
+    pub protected_block_slots: Option<&'a crate::bitset::BitSet>,
     /// Additional Rooms beyond `room` — see [`Placement::additional_rooms`].
     /// `[None; MAX_ADDITIONAL_ROOMS]` unless set via
     /// [`Self::with_additional_rooms`].
@@ -139,6 +142,7 @@ impl<'a> Occupant<'a> {
             scheduling_pattern: o.scheduling_pattern,
             veto_slots: Some(&o.veto_slots),
             group_veto_slots: Some(&o.group_veto_slots),
+            protected_block_slots: Some(&o.protected_block_slots),
             additional_rooms: [None; MAX_ADDITIONAL_ROOMS],
             enforce: o.enforce,
         }
@@ -159,6 +163,7 @@ impl<'a> Occupant<'a> {
             // is irrelevant; it still contributes to every other counter.
             veto_slots: None,
             group_veto_slots: None,
+            protected_block_slots: None,
             additional_rooms: f.additional_rooms,
             enforce: f.enforce,
         }
@@ -212,11 +217,11 @@ impl<'a> Occupant<'a> {
     /// This Session as a probe over only the axes independent of which Room is
     /// tried, or `None` if no such axis is enforced for its kind.
     ///
-    /// Four of the six axes — lecturer, group, person, veto — read the slot
-    /// alone. Only room occupancy and day-mix (which reads the Room's virtual
-    /// flag) depend on the Room. Testing the four **once per slot**, before the
-    /// room loop, is a pure short-circuit: if they reject, no Room could have
-    /// rescued the slot.
+    /// Lecturer, group, person, veto (both kinds) and `ProtectedBlock` all
+    /// read the slot alone. Only room occupancy and day-mix (which reads the
+    /// Room's virtual flag) depend on the Room. Testing the room-independent
+    /// axes **once per slot**, before the room loop, is a pure short-circuit:
+    /// if they reject, no Room could have rescued the slot.
     ///
     /// One definition, because two callers must agree on it: the constructive
     /// heuristic, and the benchmark harness's construction attribution — whose
@@ -615,6 +620,16 @@ impl SearchState {
         if who.enforce.group_veto
             && let Some(veto) = who.group_veto_slots
             && span.iter().any(|s| veto.contains(s.get()))
+        {
+            return false;
+        }
+
+        // `ProtectedBlock`: monotone-safe like the calendar closure check
+        // above — a reserved slot is never freed by placing something
+        // elsewhere — so it is enforced here rather than priced.
+        if who.enforce.protected_block
+            && let Some(mask) = who.protected_block_slots
+            && span.iter().any(|s| mask.contains(s.get()))
         {
             return false;
         }

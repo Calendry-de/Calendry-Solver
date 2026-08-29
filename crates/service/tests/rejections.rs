@@ -427,7 +427,6 @@ fn every_staged_p2_type_is_unimplemented_not_invalid() {
         ),
         ("ExamSpacingSameDay", Params::ExamSpacingSameDay(pb::ExamSpacingSameDay {})),
         ("ExamSpacingWindow", Params::ExamSpacingWindow(pb::ExamSpacingWindow::default())),
-        ("ProtectedBlock", Params::ProtectedBlock(pb::ProtectedBlock::default())),
         ("RoomConsistency", Params::RoomConsistency(pb::RoomConsistency {})),
         ("MinimizeRoomChurn", Params::MinimizeRoomChurn(pb::MinimizeRoomChurn::default())),
         ("MaxDailySpan", Params::MaxDailySpan(pb::MaxDailySpan::default())),

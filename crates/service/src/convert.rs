@@ -32,8 +32,8 @@ use calendry_solver_core::ids::{GroupIdx, OfferingIdx, PersonIdx, RoomIdx, SlotI
 use calendry_solver_core::preferences::{Preference, PreferenceInstance};
 use calendry_solver_core::problem::{
     CapacityWasteInstance, ConstraintInstance, ConstraintSet, FixedSpec, Immovable,
-    MaxConcurrentOnlineInstance, OfferingSpec, PlacementVar, Problem, ProblemSpec, Room,
-    SchedulingPattern, ScopeSpec, Unavailability, classify_immovable,
+    MaxConcurrentOnlineInstance, OfferingSpec, PlacementVar, Problem, ProblemSpec,
+    ProtectedBlockInstance, Room, SchedulingPattern, ScopeSpec, Unavailability, classify_immovable,
 };
 use calendry_solver_core::slots::{SlotTable, WeekKind, WeekSpec};
 use calendry_solver_core::soft::{SoftInstance, SoftParams};
@@ -1158,10 +1158,24 @@ fn build_constraints(input: &pb::SolverInput) -> Result<ConstraintSet, ConvertEr
                     constraint_type: "ExamSpacingWindow",
                 });
             }
-            Some(Params::ProtectedBlock(_)) => {
-                return Err(ConvertError::ConstraintTypeUnimplemented {
-                    constraint: c.id.clone(),
-                    constraint_type: "ProtectedBlock",
+            // Built — see `crate::problem::Offering::protected_block_slots`.
+            // `pb::BlockedWindow` maps onto core's own `Unavailability`:
+            // constraints.proto could not import model.proto's type without
+            // a circular dependency, but the two share the exact same
+            // day/block/week vocabulary once past the wire.
+            Some(Params::ProtectedBlock(p)) => {
+                set.protected_block.push(ProtectedBlockInstance {
+                    id: c.id.clone(),
+                    kinds: c.applies_to_kinds.clone(),
+                    windows: p
+                        .windows
+                        .iter()
+                        .map(|w| Unavailability {
+                            days: w.days.clone(),
+                            blocks: w.blocks.clone(),
+                            weeks: w.weeks.clone(),
+                        })
+                        .collect(),
                 });
             }
             Some(Params::RoomConsistency(_)) => {

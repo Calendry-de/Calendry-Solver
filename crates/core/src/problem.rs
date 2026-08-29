@@ -256,6 +256,30 @@ pub struct ConstraintSet {
     /// SOFT, per-`(offering, room)`. Rewards a good Room-size fit — see
     /// [`Problem::capacity_waste_cost`].
     pub minimize_capacity_waste: Vec<CapacityWasteInstance>,
+    /// HARD, filterable. A tenant-wide reserved window — see
+    /// [`Offering::protected_block_slots`], the precomputed mask.
+    pub protected_block: Vec<ProtectedBlockInstance>,
+}
+
+/// One `ProtectedBlock` instance. The FIRST hard type whose values
+/// (`windows`) are pure tenant policy carried directly on the constraint
+/// config, rather than living on a Person/Group and merely switched on here.
+#[derive(Clone, Debug)]
+pub struct ProtectedBlockInstance {
+    pub id: String,
+    pub kinds: Vec<String>,
+    /// Reuses [`Unavailability`]'s day/block/week vocabulary and "empty axis
+    /// = every value on that axis" convention — a recurring-weekly block is
+    /// `weeks: []`, a one-off is a specific `weeks` list, exactly like a
+    /// Group's own blackouts.
+    pub windows: Vec<Unavailability>,
+}
+
+impl ProtectedBlockInstance {
+    #[inline]
+    pub fn covers(&self, kind: &str) -> bool {
+        self.kinds.is_empty() || self.kinds.iter().any(|k| k == kind)
+    }
 }
 
 /// One `MinimizeCapacityWaste` instance. Not a `SoftParams` variant: unlike
@@ -316,6 +340,7 @@ pub struct Enforce {
     pub compactness_person: bool,
     pub distributed_pattern: bool,
     pub block_pattern: bool,
+    pub protected_block: bool,
 }
 
 impl ConstraintSet {
@@ -337,6 +362,7 @@ impl ConstraintSet {
                 .iter()
                 .any(|c| c.covers(kind)),
             block_pattern: self.block_pattern_adherence.iter().any(|c| c.covers(kind)),
+            protected_block: self.protected_block.iter().any(|c| c.covers(kind)),
         }
     }
 }
@@ -459,6 +485,11 @@ pub struct Offering {
     /// because the two are separately enableable (`Enforce`) and a violation
     /// has to name which entity was unavailable.
     pub group_veto_slots: BitSet,
+    /// Slots blocked by a tenant-wide `ProtectedBlock` window covering this
+    /// Offering's `kind` — the first hard mask whose values are pure
+    /// constraint-config policy rather than per-entity data. Union of every
+    /// enabled instance's windows; empty when none covers this `kind`.
+    pub protected_block_slots: BitSet,
     /// `own_groups` expanded DOWNWARD only. Used by the two Group-scoped
     /// aggregate types, matching attendance semantics: a cohort Session is
     /// attended by its classes, but a class Session does not implicate the
@@ -921,12 +952,34 @@ impl Problem {
             mask
         };
 
+        // Tenant-wide, keyed by KIND rather than by any per-entity data — the
+        // first hard mask that is pure constraint-config policy. Recomputed
+        // per Offering like `veto_mask`/`group_veto_mask` above rather than
+        // cached per kind; the same cost those already accept.
+        let protected_block_mask = |kind: &str| -> BitSet {
+            let mut mask = BitSet::new(slots.len());
+            for instance in &constraints.protected_block {
+                if !instance.covers(kind) {
+                    continue;
+                }
+                for window in &instance.windows {
+                    for slot in slots.all() {
+                        if window.matches(slots.flags(slot)) {
+                            mask.insert(slot.get());
+                        }
+                    }
+                }
+            }
+            mask
+        };
+
         let derived_offerings: Vec<Offering> = offerings
             .into_iter()
             .map(|o| Offering {
                 soft_profile: soft.profile_for_kind(&o.kind),
                 veto_slots: veto_mask(&o.lecturers),
                 group_veto_slots: group_veto_mask(&o.groups),
+                protected_block_slots: protected_block_mask(&o.kind),
                 subtree_groups: closure.expand_subtree(&o.groups),
                 enforce: constraints.enforce_for_kind(&o.kind),
                 conflict_groups: closure.expand_conflict(&o.groups),
