@@ -215,7 +215,10 @@ impl<'p> Trial<'p> {
         }
         self.solution.set(p, Some(at));
         let o = self.problem.offering_of(p);
-        self.soft += self.problem.soft.cost(o.soft_profile, at.start, at.room)
+        self.soft += at
+            .all_rooms()
+            .map(|r| self.problem.soft.cost(o.soft_profile, at.start, r))
+            .sum::<f64>()
             + self.problem.preferences.cost(
                 p,
                 at.start,
@@ -235,7 +238,10 @@ impl<'p> Trial<'p> {
         debug_assert!(released, "a placed Session's span must still resolve");
         self.solution.set(p, None);
         let o = self.problem.offering_of(p);
-        self.soft -= self.problem.soft.cost(o.soft_profile, at.start, at.room)
+        self.soft -= at
+            .all_rooms()
+            .map(|r| self.problem.soft.cost(o.soft_profile, at.start, r))
+            .sum::<f64>()
             + self.problem.preferences.cost(
                 p,
                 at.start,
@@ -518,7 +524,7 @@ pub fn construct(problem: &Problem) -> (Solution, SearchState) {
         {
             let candidate = base.with_room(orig_room);
             if state.is_free(problem, &candidate, &span) {
-                chosen = Some(Placement { start: orig_start, room: orig_room });
+                chosen = Some(Placement::single(orig_start, orig_room));
             }
         }
 
@@ -532,10 +538,11 @@ pub fn construct(problem: &Problem) -> (Solution, SearchState) {
                 {
                     continue;
                 }
-                for &room in &offering.eligible_rooms {
-                    let candidate = base.with_room(room);
+                for i in 0..offering.room_choice_count() {
+                    let (room, additional_rooms) = offering.room_choice(i);
+                    let candidate = base.with_room(room).with_additional_rooms(additional_rooms);
                     if state.is_free(problem, &candidate, &span) {
-                        chosen = Some(Placement { start: slot, room });
+                        chosen = Some(Placement::with_rooms(slot, room, additional_rooms));
                         break 'search;
                     }
                 }
@@ -653,7 +660,10 @@ fn ruin_worst(
             // by what they cost, and a Session sitting on a slot its lecturer
             // asked to avoid — or away from where a minimize-movement policy
             // wants it — is exactly what it should pick up.
-            let mut cost = problem.soft.cost(o.soft_profile, pl.start, pl.room)
+            let mut cost = pl
+                .all_rooms()
+                .map(|r| problem.soft.cost(o.soft_profile, pl.start, r))
+                .sum::<f64>()
                 + problem
                     .preferences
                     .cost(p, pl.start, &problem.rooms[pl.room.get()].features)
@@ -661,6 +671,7 @@ fn ruin_worst(
             if let Some(span) = problem.slots.span(pl.start, o.duration_blocks) {
                 let occupant = Occupant::of_offering(o)
                     .with_room(pl.room)
+                    .with_additional_rooms(pl.additional_rooms)
                     .with_offering(problem.placement(p).offering);
                 cost += state.aggregate_ruin_score(problem, &occupant, &span);
             }
@@ -737,7 +748,7 @@ fn repair_one<E: MoveEvaluator>(
     rng: &mut Rng,
 ) -> Repaired {
     let offering = problem.offering_of(p);
-    let n_rooms = offering.eligible_rooms.len();
+    let n_rooms = offering.room_choice_count();
     let n_starts = problem.slots.start_count(offering.duration_blocks);
     let total = n_starts * n_rooms;
     if total == 0 {
@@ -747,17 +758,21 @@ fn repair_one<E: MoveEvaluator>(
 
     // The candidate space is addressed BY INDEX, never materialized.
     //
-    // Index `i` is slot-major: `(nth_start(i / n_rooms), eligible_rooms[i %
-    // n_rooms])`, which is the order a nested slot-then-room loop would produce.
-    let at = |i: usize| Move {
-        placement: p,
-        to: Placement {
-            start: problem
-                .slots
-                .nth_start(offering.duration_blocks, i / n_rooms)
-                .expect("index below start_count"),
-            room: offering.eligible_rooms[i % n_rooms],
-        },
+    // Index `i` is slot-major: `(nth_start(i / n_rooms), room_choice(i %
+    // n_rooms))`, which is the order a nested slot-then-room loop would produce.
+    let at = |i: usize| {
+        let (room, additional_rooms) = offering.room_choice(i % n_rooms);
+        Move {
+            placement: p,
+            to: Placement::with_rooms(
+                problem
+                    .slots
+                    .nth_start(offering.duration_blocks, i / n_rooms)
+                    .expect("index below start_count"),
+                room,
+                additional_rooms,
+            ),
+        }
     };
 
     let keep = total.min(tuning::MAX_CANDIDATES);
@@ -837,7 +852,10 @@ pub fn recompute_objective(problem: &Problem, solution: &Solution) -> Objective 
         match solution.get(p) {
             Some(pl) => {
                 let o = problem.offering_of(p);
-                soft += problem.soft.cost(o.soft_profile, pl.start, pl.room)
+                soft += pl
+                    .all_rooms()
+                    .map(|r| problem.soft.cost(o.soft_profile, pl.start, r))
+                    .sum::<f64>()
                     + problem
                         .preferences
                         .cost(p, pl.start, &problem.rooms[pl.room.get()].features)
@@ -1053,10 +1071,10 @@ mod tests {
         // Placement 0 on-site (room 1), placements 1..3 online (room 0) —
         // on-site sits at the lowest index on purpose (see doc comment).
         let placements = [
-            Placement { start: SlotIdx(0), room: RoomIdx(1) },
-            Placement { start: SlotIdx(1), room: RoomIdx(0) },
-            Placement { start: SlotIdx(2), room: RoomIdx(0) },
-            Placement { start: SlotIdx(3), room: RoomIdx(0) },
+            Placement::single(SlotIdx(0), RoomIdx(1)),
+            Placement::single(SlotIdx(1), RoomIdx(0)),
+            Placement::single(SlotIdx(2), RoomIdx(0)),
+            Placement::single(SlotIdx(3), RoomIdx(0)),
         ];
         let placed: Vec<PlacementIdx> = (0..4).map(PlacementIdx).collect();
         for (&p, &pl) in placed.iter().zip(&placements) {
@@ -1092,8 +1110,8 @@ mod tests {
         let mut solution = Solution::empty(&problem);
         let mut state = SearchState::from_fixed(&problem);
         let placements = [
-            Placement { start: SlotIdx(0), room: RoomIdx(0) },
-            Placement { start: SlotIdx(1), room: RoomIdx(1) },
+            Placement::single(SlotIdx(0), RoomIdx(0)),
+            Placement::single(SlotIdx(1), RoomIdx(1)),
         ];
         let placed: Vec<PlacementIdx> = (0..2).map(PlacementIdx).collect();
         for (&p, &pl) in placed.iter().zip(&placements) {
@@ -1141,7 +1159,7 @@ mod tests {
         let (solution, _) = construct(&problem);
         assert_eq!(
             solution.get(PlacementIdx(0)),
-            Some(Placement { start: SlotIdx(2), room: RoomIdx(0) }),
+            Some(Placement::single(SlotIdx(2), RoomIdx(0))),
             "nothing else competes for this slot, so construction must not \
              gratuitously charge the movement penalty for no reason"
         );
@@ -1158,7 +1176,7 @@ mod tests {
         let (solution, _) = construct(&problem);
         assert_eq!(
             solution.get(PlacementIdx(0)),
-            Some(Placement { start: SlotIdx(0), room: RoomIdx(1) }),
+            Some(Placement::single(SlotIdx(0), RoomIdx(1))),
             "must fall through to the ordinary greedy scan — earliest feasible \
              slot, only eligible room — not the ineligible original room"
         );
@@ -1200,8 +1218,8 @@ mod tests {
         let mut solution = Solution::empty(&problem);
         let mut state = SearchState::from_fixed(&problem);
         let placements = [
-            Placement { start: SlotIdx(0), room: RoomIdx(0) },
-            Placement { start: SlotIdx(1), room: RoomIdx(0) },
+            Placement::single(SlotIdx(0), RoomIdx(0)),
+            Placement::single(SlotIdx(1), RoomIdx(0)),
         ];
         let placed: Vec<PlacementIdx> = (0..2).map(PlacementIdx).collect();
         for (&p, &pl) in placed.iter().zip(&placements) {
@@ -1233,12 +1251,12 @@ mod tests {
         let at = trial
             .unplace(PlacementIdx(0))
             .expect("construction must have placed it");
-        assert_eq!(at, Placement { start: SlotIdx(2), room: RoomIdx(0) }, "back at its original");
+        assert_eq!(at, Placement::single(SlotIdx(2), RoomIdx(0)), "back at its original");
         trial.assert_consistent();
 
         // Force it away from `original`, so the movement term is actually
         // nonzero for the rest of this check.
-        let moved = Placement { start: SlotIdx(0), room: RoomIdx(0) };
+        let moved = Placement::single(SlotIdx(0), RoomIdx(0));
         assert!(trial.place(PlacementIdx(0), moved));
         trial.assert_consistent();
     }

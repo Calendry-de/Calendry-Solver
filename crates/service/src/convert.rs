@@ -32,10 +32,11 @@ use calendry_solver_core::ids::{GroupIdx, OfferingIdx, PersonIdx, RoomIdx, SlotI
 use calendry_solver_core::preferences::{Preference, PreferenceInstance};
 use calendry_solver_core::problem::{
     ConstraintInstance, ConstraintSet, FixedSpec, Immovable, OfferingSpec, PlacementVar, Problem,
-    ProblemSpec, SchedulingPattern, ScopeSpec, Unavailability, classify_immovable,
+    ProblemSpec, Room, SchedulingPattern, ScopeSpec, Unavailability, classify_immovable,
 };
 use calendry_solver_core::slots::{SlotTable, WeekKind, WeekSpec};
 use calendry_solver_core::soft::{SoftInstance, SoftParams};
+use calendry_solver_core::solution::MAX_ADDITIONAL_ROOMS;
 use calendry_solver_proto::v1 as pb;
 
 use crate::dates;
@@ -231,11 +232,11 @@ fn index_by<T, F: Fn(&T) -> String>(items: &[T], key: F) -> HashMap<String, u32>
         .collect()
 }
 
-fn build_rooms(input: &pb::SolverInput) -> Vec<calendry_solver_core::problem::Room> {
+fn build_rooms(input: &pb::SolverInput) -> Vec<Room> {
     input
         .rooms
         .iter()
-        .map(|r| calendry_solver_core::problem::Room {
+        .map(|r| Room {
             id: r.id.clone(),
             name: r.name.clone(),
             capacity: r.capacity,
@@ -364,7 +365,7 @@ fn build_persons(
 
 fn build_offerings(
     input: &pb::SolverInput,
-    rooms: &[calendry_solver_core::problem::Room],
+    rooms: &[Room],
     group_index: &HashMap<String, u32>,
     person_index: &HashMap<String, u32>,
 ) -> Result<Vec<OfferingSpec>, ConvertError> {
@@ -391,30 +392,53 @@ fn build_offerings(
         let allowed: HashSet<&String> = o.allowed_room_ids.iter().collect();
         let required: HashSet<&String> = o.required_room_features.iter().collect();
 
-        let eligible_rooms: Vec<RoomIdx> = rooms
-            .iter()
-            .enumerate()
-            .filter(|(i, r)| {
-                if !allowed.is_empty() && !allowed.contains(&r.id) {
-                    return false;
-                }
-                if r.is_virtual && !o.allow_online {
-                    return false;
-                }
-                if r.capacity < o.min_capacity {
-                    return false;
-                }
-                if !required.iter().all(|f| r.features.contains(f)) {
-                    return false;
-                }
-                // Quantity-aware, additive alongside the presence-only check
-                // above rather than replacing it: `required_room_features` and
-                // `room_feature_requirements` are different wire lists a caller
-                // is not required to keep in sync, so both are honored.
-                room_feature_requirements_met(&input.rooms[*i], r, &o.room_feature_requirements)
-            })
-            .map(|(i, _)| RoomIdx(i as u32))
-            .collect();
+        // Every filter EXCEPT capacity, which for a multi-Room Offering is
+        // evaluated per-COMBINATION below rather than per-Room.
+        let individually_eligible = |i: usize, r: &Room| {
+            if !allowed.is_empty() && !allowed.contains(&r.id) {
+                return false;
+            }
+            if r.is_virtual && !o.allow_online {
+                return false;
+            }
+            if !required.iter().all(|f| r.features.contains(f)) {
+                return false;
+            }
+            // Quantity-aware, additive alongside the presence-only check
+            // above rather than replacing it: `required_room_features` and
+            // `room_feature_requirements` are different wire lists a caller
+            // is not required to keep in sync, so both are honored.
+            room_feature_requirements_met(&input.rooms[i], r, &o.room_feature_requirements)
+        };
+
+        if o.required_room_count > MAX_ROOMS_PER_SESSION {
+            return Err(ConvertError::TooManyRoomsRequired {
+                offering: o.id.clone(),
+                required: o.required_room_count,
+                max: MAX_ROOMS_PER_SESSION,
+            });
+        }
+
+        let (eligible_rooms, eligible_room_combinations) = if o.required_room_count > 1 {
+            let pool: Vec<RoomIdx> = rooms
+                .iter()
+                .enumerate()
+                .filter(|(i, r)| individually_eligible(*i, r))
+                .map(|(i, _)| RoomIdx(i as u32))
+                .collect();
+            (
+                vec![],
+                room_combinations(&pool, rooms, o.required_room_count as usize, o.min_capacity),
+            )
+        } else {
+            let eligible: Vec<RoomIdx> = rooms
+                .iter()
+                .enumerate()
+                .filter(|(i, r)| individually_eligible(*i, r) && r.capacity >= o.min_capacity)
+                .map(|(i, _)| RoomIdx(i as u32))
+                .collect();
+            (eligible, vec![])
+        };
 
         out.push(OfferingSpec {
             id: o.id.clone(),
@@ -442,6 +466,8 @@ fn build_offerings(
                 }
             })?,
             eligible_rooms,
+            required_room_count: o.required_room_count,
+            eligible_room_combinations,
             // An unrecognized or absent value maps to `Unspecified` — the same
             // "solve exactly as today" inert reading the wire field's own doc
             // comment promises, not an error: a stale value here is not a
@@ -457,6 +483,68 @@ fn build_offerings(
     Ok(out)
 }
 
+/// How many Rooms one Session can occupy at once: 1 primary +
+/// `MAX_ADDITIONAL_ROOMS`. A real structural limit, refused rather than
+/// truncated — unlike [`MAX_ROOM_COMBINATIONS`], which truncates, this is a
+/// caller error the caller can actually fix (ask for fewer Rooms).
+const MAX_ROOMS_PER_SESSION: u32 = 1 + MAX_ADDITIONAL_ROOMS as u32;
+
+/// Safety cap on how many Room combinations one multi-Room Offering
+/// enumerates. Truncated, not refused — consistent with "warn and allow": an
+/// Offering whose true combination count exceeds this solves with a
+/// (deterministic, prefix) subset of its valid combinations rather than
+/// paying an unbounded conversion cost for a pathological Room pool.
+const MAX_ROOM_COMBINATIONS: usize = 2000;
+
+/// Every combination of `k` distinct Rooms from `pool` whose SUMMED capacity
+/// meets `min_capacity`, in the shape [`calendry_solver_core::problem::Offering::room_choice`]
+/// wants: `(primary, additional)`. Capped at [`MAX_ROOM_COMBINATIONS`].
+fn room_combinations(
+    pool: &[RoomIdx],
+    rooms: &[Room],
+    k: usize,
+    min_capacity: u32,
+) -> Vec<(RoomIdx, [Option<RoomIdx>; MAX_ADDITIONAL_ROOMS])> {
+    let mut out = Vec::new();
+    let mut current: Vec<RoomIdx> = Vec::with_capacity(k);
+    room_combinations_go(pool, rooms, k, min_capacity, 0, &mut current, &mut out);
+    out
+}
+
+#[allow(clippy::too_many_arguments)]
+fn room_combinations_go(
+    pool: &[RoomIdx],
+    rooms: &[Room],
+    k: usize,
+    min_capacity: u32,
+    start: usize,
+    current: &mut Vec<RoomIdx>,
+    out: &mut Vec<(RoomIdx, [Option<RoomIdx>; MAX_ADDITIONAL_ROOMS])>,
+) {
+    if k == 0 || out.len() >= MAX_ROOM_COMBINATIONS {
+        return;
+    }
+    if current.len() == k {
+        let total_capacity: u32 = current.iter().map(|r| rooms[r.get()].capacity).sum();
+        if total_capacity >= min_capacity {
+            let mut additional = [None; MAX_ADDITIONAL_ROOMS];
+            for (slot, &r) in additional.iter_mut().zip(&current[1..]) {
+                *slot = Some(r);
+            }
+            out.push((current[0], additional));
+        }
+        return;
+    }
+    for i in start..pool.len() {
+        if out.len() >= MAX_ROOM_COMBINATIONS {
+            return;
+        }
+        current.push(pool[i]);
+        room_combinations_go(pool, rooms, k, min_capacity, i + 1, current, out);
+        current.pop();
+    }
+}
+
 /// Whether every quantity-aware requirement on an Offering is satisfied by
 /// `wire_room`.
 ///
@@ -470,7 +558,7 @@ fn build_offerings(
 /// satisfies — not special-cased, since it falls out of the comparison.
 fn room_feature_requirements_met(
     wire_room: &pb::Room,
-    room: &calendry_solver_core::problem::Room,
+    room: &Room,
     requirements: &[pb::RoomFeatureRequirement],
 ) -> bool {
     requirements.iter().all(|req| {
@@ -609,6 +697,25 @@ fn partition_sessions(
                         ConvertError::UnknownRoom { context: format!("session '{}'", s.id), room }
                     })?)
                 },
+                // `room_ids` is the AUTHORITATIVE full set, `room_id` included,
+                // for a Session occupying more than one Room — empty means
+                // unchanged single-Room behavior, `room` alone is already the
+                // complete answer. Extra entries beyond `MAX_ADDITIONAL_ROOMS`
+                // are truncated, not refused, same "warn and allow" reasoning
+                // as everywhere else in this module.
+                additional_rooms: {
+                    let mut additional = [None; MAX_ADDITIONAL_ROOMS];
+                    let extras = s.room_ids.iter().filter(|id| id.as_str() != s.room_id);
+                    for (slot, id) in additional.iter_mut().zip(extras) {
+                        *slot = Some(ix.rooms.require(id, RoomIdx, |room| {
+                            ConvertError::UnknownRoom {
+                                context: format!("session '{}'", s.id),
+                                room,
+                            }
+                        })?);
+                    }
+                    additional
+                },
                 start,
                 duration_blocks: s.duration_blocks.max(1),
                 // REQUIRED. A dropped lecturer, group or attendee silently
@@ -689,7 +796,7 @@ fn build_external_occupancy(
     input: &pb::SolverInput,
     slots: &SlotTable,
     room_index: &HashMap<String, u32>,
-    rooms: &[calendry_solver_core::problem::Room],
+    rooms: &[Room],
 ) -> Result<Vec<FixedSpec>, ConvertError> {
     let mut out = Vec::new();
 
@@ -727,6 +834,7 @@ fn build_external_occupancy(
             },
             kind: String::new(),
             room: Some(RoomIdx(room)),
+            additional_rooms: [None; MAX_ADDITIONAL_ROOMS],
             start,
             duration_blocks: e.duration_blocks.max(1),
             lecturers: Vec::new(),
@@ -1081,9 +1189,19 @@ pub fn build_output(
                 .iter()
                 .map(|&x| problem.persons[x.get()].id.clone())
                 .collect(),
-            // PROTO ONLY: the solver assigns exactly one Room per placement.
-            // See `Offering.required_room_count`'s comment.
-            room_ids: Vec::new(),
+            // `room_id` above stays the primary Room, meaningful on its own
+            // for an ordinary single-Room Session. This is populated with the
+            // FULL set, `room_id` included, only when this Session actually
+            // occupies more than one Room — an ordinary Session gets an empty
+            // list here rather than a redundant one-element echo of `room_id`.
+            room_ids: if placement.additional_rooms.iter().any(Option::is_some) {
+                placement
+                    .all_rooms()
+                    .map(|r| problem.rooms[r.get()].id.clone())
+                    .collect()
+            } else {
+                Vec::new()
+            },
         });
     }
 

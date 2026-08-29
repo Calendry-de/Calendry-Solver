@@ -124,11 +124,7 @@ fn fixed_occupancy_already_on_a_closed_slot_is_left_alone() {
     // Building state from fixed occupancy must not panic on a closed slot.
     let state = SearchState::from_fixed(&problem);
     assert!(
-        !state.can_place(
-            &problem,
-            PlacementIdx(0),
-            Placement { start: SlotIdx(0), room: RoomIdx(0) }
-        ),
+        !state.can_place(&problem, PlacementIdx(0), Placement::single(SlotIdx(0), RoomIdx(0))),
         "slot 0 is both closed and already occupied by the fixed Session"
     );
 

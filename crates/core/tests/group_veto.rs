@@ -176,7 +176,7 @@ fn the_violation_names_the_group_that_declared_the_window() {
      * timetabler reads when a violation arrives in the INPUT rather than being
      * produced by a run.
      */
-    solution.set(PlacementIdx(0), Some(Placement { start: MONDAY, room: RoomIdx(0) }));
+    solution.set(PlacementIdx(0), Some(Placement::single(MONDAY, RoomIdx(0))));
 
     let violations = evaluate_hard(&problem, &solution);
     let veto: Vec<_> = violations

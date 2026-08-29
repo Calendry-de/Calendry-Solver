@@ -555,10 +555,7 @@ fn placed_at(problem: &Problem, slot: SlotIdx) -> Solution {
     let mut solution = Solution::empty(problem);
     solution.set(
         ONLY,
-        Some(calendry_solver_core::Placement {
-            start: slot,
-            room: calendry_solver_core::ids::RoomIdx(0),
-        }),
+        Some(calendry_solver_core::Placement::single(slot, calendry_solver_core::ids::RoomIdx(0))),
     );
     solution
 }

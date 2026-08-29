@@ -15,7 +15,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::ids::{GroupIdx, OfferingIdx, PersonIdx, RoomIdx, SlotIdx};
 use crate::problem::{ConstraintInstance, Problem};
-use crate::solution::{SearchState, Solution};
+use crate::solution::{MAX_ADDITIONAL_ROOMS, SearchState, Solution};
 
 /// Which catalogue type a report belongs to.
 ///
@@ -99,10 +99,22 @@ struct View<'a> {
     label: String,
     kind: &'a str,
     room: Option<RoomIdx>,
+    additional_rooms: [Option<RoomIdx>; MAX_ADDITIONAL_ROOMS],
     lecturers: &'a [PersonIdx],
     own_groups: &'a [GroupIdx],
     attendees: &'a [PersonIdx],
     span: Vec<SlotIdx>,
+}
+
+impl View<'_> {
+    /// Every Room this Session occupies, primary first — mirrors
+    /// [`crate::solution::Placement::all_rooms`].
+    #[inline]
+    fn all_rooms(&self) -> impl Iterator<Item = RoomIdx> + '_ {
+        self.room
+            .into_iter()
+            .chain(self.additional_rooms.iter().flatten().copied())
+    }
 }
 
 /// Evaluate every enabled hard constraint over a complete solution.
@@ -487,9 +499,8 @@ fn check_pair<'p>(
     // predicate `Occupancy::exclusive_room` uses to decide whether to claim the
     // slot bit at all — so the search cannot refuse a placement this then
     // declines to report, or the reverse.
-    if let (Some(rx), Some(ry)) = (x.room, y.room)
-        && rx == ry
-        && problem.rooms[rx.get()].is_exclusive()
+    if let Some(r) = x.all_rooms().find(|&rx| y.all_rooms().any(|ry| ry == rx))
+        && problem.rooms[r.get()].is_exclusive()
     {
         for i in c.room_double_booking.iter().filter(|i| both(i)) {
             report(
@@ -497,7 +508,7 @@ fn check_pair<'p>(
                 ConstraintType::RoomDoubleBooking,
                 format!(
                     "room '{}' hosts '{}' and '{}' at {at}",
-                    problem.rooms[rx.get()].id,
+                    problem.rooms[r.get()].id,
                     x.label,
                     y.label
                 ),
@@ -584,6 +595,7 @@ fn collect_views<'a>(problem: &'a Problem, solution: &Solution) -> Vec<View<'a>>
             label: f.session_id.clone(),
             kind: &f.kind,
             room: f.room,
+            additional_rooms: f.additional_rooms,
             lecturers: &f.lecturers,
             own_groups: &f.own_groups,
             attendees: &f.attendees,
@@ -601,6 +613,7 @@ fn collect_views<'a>(problem: &'a Problem, solution: &Solution) -> Vec<View<'a>>
             label: problem.placement_label(p),
             kind: &o.kind,
             room: Some(pl.room),
+            additional_rooms: pl.additional_rooms,
             lecturers: &o.lecturers,
             own_groups: &o.own_groups,
             attendees: &o.attendees,

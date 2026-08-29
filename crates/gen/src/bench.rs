@@ -576,8 +576,8 @@ fn probe_repair(
         let mut candidates: Vec<Move> = Vec::with_capacity(keep);
         let at = |i: usize| Move {
             placement: p,
-            to: Placement {
-                start: problem
+            to: Placement::single(
+                problem
                     .slots
                     .nth_start(offering.duration_blocks, i / n_rooms.max(1))
                     .unwrap_or(
@@ -586,8 +586,8 @@ fn probe_repair(
                             .nth_start(offering.duration_blocks, 0)
                             .unwrap(),
                     ),
-                room: offering.eligible_rooms[i % n_rooms.max(1)],
-            },
+                offering.eligible_rooms[i % n_rooms.max(1)],
+            ),
         };
         if total <= tuning::MAX_CANDIDATES {
             candidates.extend((0..total).map(at));

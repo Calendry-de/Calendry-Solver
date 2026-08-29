@@ -32,6 +32,7 @@ use crate::problem::{
     PlacementVar, Problem, ProblemSpec, Room, SchedulingPattern,
 };
 use crate::slots::{SlotTable, WeekKind, WeekSpec};
+use crate::solution::MAX_ADDITIONAL_ROOMS;
 
 // ---------------------------------------------------------------------------
 // Builders
@@ -94,6 +95,8 @@ pub fn offering(id: &str, count: u32, eligible: &[u32]) -> OfferingSpec {
         groups: vec![],
         participants: vec![],
         eligible_rooms: eligible.iter().map(|&r| RoomIdx(r)).collect(),
+        required_room_count: 0,
+        eligible_room_combinations: vec![],
         scheduling_pattern: SchedulingPattern::Unspecified,
     }
 }
@@ -104,6 +107,46 @@ pub fn offering(id: &str, count: u32, eligible: &[u32]) -> OfferingSpec {
 pub fn with_pattern(mut o: OfferingSpec, pattern: SchedulingPattern) -> OfferingSpec {
     o.scheduling_pattern = pattern;
     o
+}
+
+/// `offering` turned multi-Room: `required_room_count` Rooms per Session,
+/// with every combination of that many distinct Rooms out of `pool`
+/// eligible — the simplest possible combination set for a fixture, mirroring
+/// what `convert::build_offerings` would compute for a Room pool with no
+/// capacity or feature filtering in play.
+pub fn with_room_combinations(
+    mut o: OfferingSpec,
+    required_room_count: u32,
+    pool: &[u32],
+) -> OfferingSpec {
+    o.required_room_count = required_room_count;
+    o.eligible_room_combinations = combinations(pool, required_room_count as usize)
+        .into_iter()
+        .map(|combo| {
+            let mut additional = [None; MAX_ADDITIONAL_ROOMS];
+            for (slot, &r) in additional.iter_mut().zip(&combo[1..]) {
+                *slot = Some(RoomIdx(r));
+            }
+            (RoomIdx(combo[0]), additional)
+        })
+        .collect();
+    o
+}
+
+/// Every combination of `k` distinct elements of `pool`, in ascending order.
+fn combinations(pool: &[u32], k: usize) -> Vec<Vec<u32>> {
+    if k == 0 || k > pool.len() {
+        return vec![];
+    }
+    if k == pool.len() {
+        return vec![pool.to_vec()];
+    }
+    let mut out = combinations(&pool[1..], k - 1);
+    for combo in &mut out {
+        combo.insert(0, pool[0]);
+    }
+    out.extend(combinations(&pool[1..], k));
+    out
 }
 
 pub fn with_groups(mut o: OfferingSpec, groups: &[u32]) -> OfferingSpec {
@@ -236,6 +279,7 @@ pub fn fixed_session(id: &str, room: Option<u32>, slot: u32) -> FixedSpec {
         offering: None,
         kind: "lecture".to_string(),
         room: room.map(RoomIdx),
+        additional_rooms: [None; MAX_ADDITIONAL_ROOMS],
         start: SlotIdx(slot),
         duration_blocks: 1,
         lecturers: vec![],
@@ -1041,7 +1085,7 @@ pub fn solution_mixing_one_day(problem: &Problem) -> crate::solution::Solution {
         let room = if offering.id == "either" { RoomIdx(0) } else { RoomIdx(1) };
         let start = if offering.id == "either" { SlotIdx(0) } else { SlotIdx(1) };
 
-        solution.set(p, Some(Placement { start, room }));
+        solution.set(p, Some(Placement::single(start, room)));
     }
 
     solution

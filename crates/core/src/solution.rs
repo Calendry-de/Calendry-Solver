@@ -5,10 +5,55 @@ use crate::bitset::BitMatrix;
 use crate::ids::{GroupIdx, PersonIdx, PlacementIdx, RoomIdx, SlotIdx};
 use crate::problem::{Enforce, FixedOccupancy, Offering, Problem};
 
+/// How many Rooms beyond the primary one a single Session can occupy at
+/// once — 4 Rooms total. A generous, named cap: nothing in any real
+/// institution needs more, and a fixed array (rather than a `Vec`) is what
+/// keeps [`Placement`] `Copy` and allocation-free, preserving the exact perf
+/// profile the single-Room path already has — `Placement` is passed by value
+/// through the search hot path millions of times per run.
+pub const MAX_ADDITIONAL_ROOMS: usize = 3;
+
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub struct Placement {
     pub start: SlotIdx,
+    /// The primary Room. Unchanged in meaning from before multi-Room
+    /// Sessions existed — every Session has exactly one.
     pub room: RoomIdx,
+    /// Additional Rooms this Session ALSO occupies simultaneously, beyond
+    /// `room` — `[None; MAX_ADDITIONAL_ROOMS]` for every ordinary,
+    /// single-Room Session, which is every Session `Offering.
+    /// required_room_count` does not ask for more than one Room for. See
+    /// [`Self::all_rooms`].
+    pub additional_rooms: [Option<RoomIdx>; MAX_ADDITIONAL_ROOMS],
+}
+
+impl Placement {
+    /// An ordinary, single-Room placement — `additional_rooms` all `None`.
+    /// The overwhelming majority of construction sites want exactly this.
+    #[inline]
+    pub fn single(start: SlotIdx, room: RoomIdx) -> Self {
+        Self { start, room, additional_rooms: [None; MAX_ADDITIONAL_ROOMS] }
+    }
+
+    /// A placement occupying `room` plus every Room in `additional_rooms`
+    /// simultaneously.
+    #[inline]
+    pub fn with_rooms(
+        start: SlotIdx,
+        room: RoomIdx,
+        additional_rooms: [Option<RoomIdx>; MAX_ADDITIONAL_ROOMS],
+    ) -> Self {
+        Self { start, room, additional_rooms }
+    }
+
+    /// Every Room this Session occupies, primary first. The one place "all
+    /// of this Session's Rooms" is computed; `Occupancy`'s mark/unmark/
+    /// `is_free` and the soft-cost sum both read through this rather than
+    /// re-deriving it.
+    #[inline]
+    pub fn all_rooms(&self) -> impl Iterator<Item = RoomIdx> + '_ {
+        std::iter::once(self.room).chain(self.additional_rooms.iter().flatten().copied())
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -73,6 +118,10 @@ pub struct Occupant<'a> {
     /// The same, for the blackouts of this Session's Groups and their
     /// ancestors. `None` for the same reason.
     pub group_veto_slots: Option<&'a crate::bitset::BitSet>,
+    /// Additional Rooms beyond `room` — see [`Placement::additional_rooms`].
+    /// `[None; MAX_ADDITIONAL_ROOMS]` unless set via
+    /// [`Self::with_additional_rooms`].
+    pub additional_rooms: [Option<RoomIdx>; MAX_ADDITIONAL_ROOMS],
     pub enforce: Enforce,
 }
 
@@ -90,6 +139,7 @@ impl<'a> Occupant<'a> {
             scheduling_pattern: o.scheduling_pattern,
             veto_slots: Some(&o.veto_slots),
             group_veto_slots: Some(&o.group_veto_slots),
+            additional_rooms: [None; MAX_ADDITIONAL_ROOMS],
             enforce: o.enforce,
         }
     }
@@ -109,6 +159,7 @@ impl<'a> Occupant<'a> {
             // is irrelevant; it still contributes to every other counter.
             veto_slots: None,
             group_veto_slots: None,
+            additional_rooms: f.additional_rooms,
             enforce: f.enforce,
         }
     }
@@ -116,6 +167,28 @@ impl<'a> Occupant<'a> {
     pub fn with_room(mut self, room: RoomIdx) -> Self {
         self.room = Some(room);
         self
+    }
+
+    /// This Session with `additional_rooms` replaced — see
+    /// [`Placement::additional_rooms`]. Only a multi-Room Offering's
+    /// candidates ever call this; every other caller keeps the default
+    /// `[None; MAX_ADDITIONAL_ROOMS]`.
+    pub fn with_additional_rooms(
+        mut self,
+        additional_rooms: [Option<RoomIdx>; MAX_ADDITIONAL_ROOMS],
+    ) -> Self {
+        self.additional_rooms = additional_rooms;
+        self
+    }
+
+    /// Every Room this Session occupies, primary first — mirrors
+    /// [`Placement::all_rooms`], for the one difference that `room` here is
+    /// optional (unplaced construction probes have none yet).
+    #[inline]
+    pub fn all_rooms(&self) -> impl Iterator<Item = RoomIdx> + '_ {
+        self.room
+            .into_iter()
+            .chain(self.additional_rooms.iter().flatten().copied())
     }
 
     /// This Session with `offering` set — see the field's own doc for why
@@ -191,14 +264,29 @@ impl Occupancy {
     /// permanently clear, which is what lets any number of Sessions run online
     /// in the same slot.
     ///
+    /// Every Room this Session claims a slot bit in — every exclusive Room in
+    /// [`Occupant::all_rooms`], primary and additional alike. A virtual
+    /// Room's slot never appears, which is what lets any number of Sessions
+    /// run online in the same slot; a non-exclusive physical Room (ADR-0022)
+    /// is exempt the same way.
+    ///
     /// `mark`, `unmark` and `is_free` all go through here rather than reading
-    /// `who.room` directly. That is deliberate: if one of them claimed a bit the
-    /// others did not test, the search would refuse placements it then declined
-    /// to report, or free a bit it never set. There is one expression, so there
-    /// is one answer.
+    /// `who.room`/`who.additional_rooms` directly. That is deliberate: if one
+    /// of them claimed a bit the others did not test, the search would refuse
+    /// placements it then declined to report, or free a bit it never set.
+    /// There is one expression, so there is one answer.
     #[inline]
-    fn exclusive_room(problem: &Problem, who: &Occupant<'_>) -> Option<RoomIdx> {
-        who.room.filter(|&r| problem.rooms[r.get()].is_exclusive())
+    fn exclusive_rooms(
+        problem: &Problem,
+        who: &Occupant<'_>,
+    ) -> [Option<RoomIdx>; MAX_ADDITIONAL_ROOMS + 1] {
+        let mut out = [None; MAX_ADDITIONAL_ROOMS + 1];
+        for (slot, r) in out.iter_mut().zip(who.all_rooms()) {
+            if problem.rooms[r.get()].is_exclusive() {
+                *slot = Some(r);
+            }
+        }
+        out
     }
 
     fn new(problem: &Problem) -> Self {
@@ -217,13 +305,13 @@ impl Occupancy {
     /// Session blocks every descendant class, and a seminar Session blocks its
     /// ancestors. Only one side expands; see [`crate::groups`].
     fn mark(&mut self, problem: &Problem, who: &Occupant<'_>, span: &[SlotIdx]) {
-        let room = Self::exclusive_room(problem, who);
+        let rooms = Self::exclusive_rooms(problem, who);
         for &s in span {
             let c = s.get();
-            if who.enforce.room
-                && let Some(r) = room
-            {
-                self.room.set(r.get(), c);
+            if who.enforce.room {
+                for r in rooms.into_iter().flatten() {
+                    self.room.set(r.get(), c);
+                }
             }
             if who.enforce.lecturer {
                 for l in who.lecturers {
@@ -244,13 +332,13 @@ impl Occupancy {
     }
 
     fn unmark(&mut self, problem: &Problem, who: &Occupant<'_>, span: &[SlotIdx]) {
-        let room = Self::exclusive_room(problem, who);
+        let rooms = Self::exclusive_rooms(problem, who);
         for &s in span {
             let c = s.get();
-            if who.enforce.room
-                && let Some(r) = room
-            {
-                self.room.clear(r.get(), c);
+            if who.enforce.room {
+                for r in rooms.into_iter().flatten() {
+                    self.room.clear(r.get(), c);
+                }
             }
             if who.enforce.lecturer {
                 for l in who.lecturers {
@@ -276,12 +364,14 @@ impl Occupancy {
     /// siblings from colliding: two classes under one cohort share an ancestor,
     /// but neither is in the other's closure.
     fn is_free(&self, problem: &Problem, who: &Occupant<'_>, span: &[SlotIdx]) -> bool {
-        let room = Self::exclusive_room(problem, who);
+        let rooms = Self::exclusive_rooms(problem, who);
         for &s in span {
             let c = s.get();
             if who.enforce.room
-                && let Some(r) = room
-                && self.room.get(r.get(), c)
+                && rooms
+                    .into_iter()
+                    .flatten()
+                    .any(|r| self.room.get(r.get(), c))
             {
                 return false;
             }
@@ -390,6 +480,7 @@ impl SearchState {
         Some((
             Occupant::of_offering(o)
                 .with_room(at.room)
+                .with_additional_rooms(at.additional_rooms)
                 .with_offering(offering),
             span,
         ))

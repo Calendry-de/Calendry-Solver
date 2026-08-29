@@ -47,7 +47,7 @@ fn forced_unique_packing_produces_the_one_feasible_assignment() {
         );
         assert_eq!(
             outcome.solution.get(p),
-            Some(Placement { start: *slot, room: *room }),
+            Some(Placement::single(*slot, *room)),
             "offering {offering_id} landed in the wrong cell"
         );
     }
@@ -102,7 +102,7 @@ fn past_sessions_are_untouched_and_still_count_as_occupancy() {
     // new Session must land at slot 1.
     assert_eq!(
         outcome.solution.get(PlacementIdx(0)),
-        Some(Placement { start: SlotIdx(1), room: RoomIdx(0) }),
+        Some(Placement::single(SlotIdx(1), RoomIdx(0))),
         "past session's slot must be treated as occupied"
     );
 
@@ -140,7 +140,7 @@ fn locked_sessions_are_untouched_and_still_count_as_occupancy() {
     assert!(outcome.hard_violations.is_empty());
     assert_eq!(
         outcome.solution.get(PlacementIdx(0)),
-        Some(Placement { start: SlotIdx(1), room: RoomIdx(0) }),
+        Some(Placement::single(SlotIdx(1), RoomIdx(0))),
         "locked session's slot must be treated as occupied"
     );
     assert_eq!(problem.fixed[0].reason, Immovable::Locked);

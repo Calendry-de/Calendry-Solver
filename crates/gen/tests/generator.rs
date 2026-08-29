@@ -289,6 +289,8 @@ fn overlapping_problem(offerings: u32, sessions: u32, shared: usize) -> Problem 
             groups: vec![],
             participants,
             eligible_rooms: vec![room],
+            required_room_count: 0,
+            eligible_room_combinations: vec![],
             scheduling_pattern: SchedulingPattern::Unspecified,
         });
     }

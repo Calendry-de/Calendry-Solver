@@ -124,7 +124,7 @@ fn a_violation_naming_an_invented_session_resolves_to_a_concrete_placement_ref()
         .resolve(0, 1, 0)
         .expect("one_slot_grid's single slot must resolve");
     let mut solution = Solution::empty(&problem);
-    solution.set(PlacementIdx(0), Some(Placement { start: only_slot, room: RoomIdx(0) }));
+    solution.set(PlacementIdx(0), Some(Placement::single(only_slot, RoomIdx(0))));
 
     let hard_violations = evaluate_hard(&problem, &solution);
     let violation = hard_violations

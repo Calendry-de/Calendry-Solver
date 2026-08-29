@@ -89,6 +89,15 @@ pub enum ConvertError {
     // -- offerings -----------------------------------------------------------
     #[error("offering '{offering}' has duration_blocks = 0")]
     ZeroDurationOffering { offering: String },
+    #[error(
+        "offering '{offering}' has required_room_count {required}; the solver supports at most \
+         {max} Rooms per Session"
+    )]
+    TooManyRoomsRequired {
+        offering: String,
+        required: u32,
+        max: u32,
+    },
 
     // -- constraints ---------------------------------------------------------
     #[error("constraint '{constraint}' has no params set")]

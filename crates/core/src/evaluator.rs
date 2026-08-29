@@ -71,7 +71,7 @@ fn score_one(problem: &Problem, solution: &Solution, state: &SearchState, mv: &M
         // Would spill past the end of its day: not representable.
         return Score(f64::INFINITY);
     };
-    if !offering.eligible_rooms.contains(&mv.to.room) {
+    if !offering.is_room_choice_eligible(mv.to.room, mv.to.additional_rooms) {
         return Score(f64::INFINITY);
     }
 
@@ -86,6 +86,7 @@ fn score_one(problem: &Problem, solution: &Solution, state: &SearchState, mv: &M
 
     let candidate = Occupant::of_offering(offering)
         .with_room(mv.to.room)
+        .with_additional_rooms(mv.to.additional_rooms)
         .with_offering(problem.placement(mv.placement).offering);
     if !state.is_free(problem, &candidate, &span) {
         return Score(f64::INFINITY);
@@ -131,9 +132,10 @@ fn score_one(problem: &Problem, solution: &Solution, state: &SearchState, mv: &M
     let scheduling_pattern_delta = state.scheduling_pattern_delta(problem, &candidate, &span);
 
     Score(
-        problem
-            .soft
-            .cost(offering.soft_profile, mv.to.start, mv.to.room)
+        mv.to
+            .all_rooms()
+            .map(|r| problem.soft.cost(offering.soft_profile, mv.to.start, r))
+            .sum::<f64>()
             // EXACT, not a ranking approximation like the two penalties above:
             // a preference cost depends only on this placement and this slot,
             // so the delta the objective will record is the number read here.
@@ -171,8 +173,8 @@ mod tests {
         occ.mark(&problem, &blocker, &[slot]);
 
         let moves = vec![
-            Move { placement: PlacementIdx(0), to: Placement { start: slot, room: RoomIdx(0) } },
-            Move { placement: PlacementIdx(0), to: Placement { start: slot, room: RoomIdx(1) } },
+            Move { placement: PlacementIdx(0), to: Placement::single(slot, RoomIdx(0)) },
+            Move { placement: PlacementIdx(0), to: Placement::single(slot, RoomIdx(1)) },
         ];
         let mut out = vec![Score::default(); moves.len()];
 

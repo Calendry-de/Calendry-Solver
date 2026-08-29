@@ -18,6 +18,7 @@ use calendry_solver_core::problem::{
 use calendry_solver_core::rng::Rng;
 use calendry_solver_core::slots::{SlotTable, WeekKind, WeekSpec};
 use calendry_solver_core::soft::{SoftInstance, SoftParams};
+use calendry_solver_core::solution::MAX_ADDITIONAL_ROOMS;
 
 use crate::params::InstanceParams;
 
@@ -548,6 +549,8 @@ fn build_offerings(
             groups: vec![GroupIdx(group)],
             participants: vec![],
             eligible_rooms,
+            required_room_count: 0,
+            eligible_room_combinations: vec![],
             scheduling_pattern: SchedulingPattern::Unspecified,
         });
 
@@ -598,6 +601,8 @@ fn build_offerings(
                 groups: vec![GroupIdx(group)],
                 participants: vec![],
                 eligible_rooms,
+                required_room_count: 0,
+                eligible_room_combinations: vec![],
                 scheduling_pattern: SchedulingPattern::Unspecified,
             });
 
@@ -691,6 +696,7 @@ fn split_occurrences(
                 offering: Some(OfferingIdx(occ.offering)),
                 kind: spec.kind.clone(),
                 room: Some(room),
+                additional_rooms: [None; MAX_ADDITIONAL_ROOMS],
                 start,
                 duration_blocks: spec.duration_blocks,
                 lecturers: spec.lecturers.clone(),

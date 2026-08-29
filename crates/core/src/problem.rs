@@ -14,6 +14,7 @@ use crate::ids::{GroupIdx, OfferingIdx, PersonIdx, PlacementIdx, RoomIdx, SlotId
 use crate::preferences::{Preference, PreferenceInstance, PreferenceModel};
 use crate::slots::SlotTable;
 use crate::soft::{SoftInstance, SoftModel};
+use crate::solution::MAX_ADDITIONAL_ROOMS;
 
 #[derive(Clone, Debug)]
 pub struct Room {
@@ -327,6 +328,17 @@ pub struct OfferingSpec {
     pub groups: Vec<GroupIdx>,
     pub participants: Vec<PersonIdx>,
     pub eligible_rooms: Vec<RoomIdx>,
+    /// How many Rooms one Session of this Offering must occupy
+    /// simultaneously. `0` and `1` both mean today's single-Room behavior —
+    /// `eligible_rooms` alone decides eligibility, `eligible_room_combinations`
+    /// is never consulted.
+    pub required_room_count: u32,
+    /// Every valid combination of `required_room_count` distinct Rooms whose
+    /// SUMMED capacity meets `min_capacity`, precomputed by the caller
+    /// (`convert::build_offerings`) — combinatorics is a wire-shape concern,
+    /// not a domain one, so core only ever reads this list. Empty and unread
+    /// unless `required_room_count > 1`.
+    pub eligible_room_combinations: Vec<(RoomIdx, [Option<RoomIdx>; MAX_ADDITIONAL_ROOMS])>,
     pub scheduling_pattern: SchedulingPattern,
 }
 
@@ -347,6 +359,10 @@ pub struct FixedSpec {
     pub offering: Option<OfferingIdx>,
     pub kind: String,
     pub room: Option<RoomIdx>,
+    /// Additional Rooms this (already-placed) Session occupies beyond `room`
+    /// — see [`crate::solution::Placement::additional_rooms`]. `[None; MAX_ADDITIONAL_ROOMS]`
+    /// unless the Session realizes a `required_room_count > 1` Offering.
+    pub additional_rooms: [Option<RoomIdx>; MAX_ADDITIONAL_ROOMS],
     pub start: SlotIdx,
     pub duration_blocks: u32,
     pub lecturers: Vec<PersonIdx>,
@@ -375,6 +391,10 @@ pub struct Offering {
     /// their descendants. Attendance propagates downward only.
     pub attendees: Vec<PersonIdx>,
     pub eligible_rooms: Vec<RoomIdx>,
+    /// See [`OfferingSpec::required_room_count`].
+    pub required_room_count: u32,
+    /// See [`OfferingSpec::eligible_room_combinations`].
+    pub eligible_room_combinations: Vec<(RoomIdx, [Option<RoomIdx>; MAX_ADDITIONAL_ROOMS])>,
     pub enforce: Enforce,
     /// Index into the soft cost tables for this Offering's `kind`.
     pub soft_profile: usize,
@@ -394,6 +414,56 @@ pub struct Offering {
     pub scheduling_pattern: SchedulingPattern,
 }
 
+impl Offering {
+    /// Whether this Offering's Sessions must occupy more than one Room at
+    /// once — the single fork point construction and repair branch on, and
+    /// the room-choice methods below key off the same way.
+    #[inline]
+    pub fn multi_room(&self) -> bool {
+        self.required_room_count > 1
+    }
+
+    /// How many room choices exist to iterate — `eligible_room_combinations`
+    /// for a multi-Room Offering, `eligible_rooms` otherwise. The "room
+    /// dimension" width of the `starts x rooms` candidate cross product.
+    pub fn room_choice_count(&self) -> usize {
+        if self.multi_room() {
+            self.eligible_room_combinations.len()
+        } else {
+            self.eligible_rooms.len()
+        }
+    }
+
+    /// The `i`th room choice, as `(primary, additional)` — always the shape
+    /// [`crate::solution::Placement::with_rooms`] wants, so callers never
+    /// branch on `multi_room` themselves.
+    pub fn room_choice(&self, i: usize) -> (RoomIdx, [Option<RoomIdx>; MAX_ADDITIONAL_ROOMS]) {
+        if self.multi_room() {
+            self.eligible_room_combinations[i]
+        } else {
+            (self.eligible_rooms[i], [None; MAX_ADDITIONAL_ROOMS])
+        }
+    }
+
+    /// Whether `(room, additional_rooms)` is one of this Offering's valid
+    /// room choices — the one place a candidate move's Room set is checked
+    /// against eligibility, so construction's greedy scan and repair's batch
+    /// scoring can never silently disagree on what counts as eligible.
+    pub fn is_room_choice_eligible(
+        &self,
+        room: RoomIdx,
+        additional_rooms: [Option<RoomIdx>; MAX_ADDITIONAL_ROOMS],
+    ) -> bool {
+        if self.multi_room() {
+            self.eligible_room_combinations
+                .iter()
+                .any(|&(r, a)| r == room && a == additional_rooms)
+        } else {
+            additional_rooms == [None; MAX_ADDITIONAL_ROOMS] && self.eligible_rooms.contains(&room)
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct FixedOccupancy {
     pub session_id: String,
@@ -401,6 +471,8 @@ pub struct FixedOccupancy {
     pub offering: Option<OfferingIdx>,
     pub kind: String,
     pub room: Option<RoomIdx>,
+    /// See [`FixedSpec::additional_rooms`].
+    pub additional_rooms: [Option<RoomIdx>; MAX_ADDITIONAL_ROOMS],
     pub start: SlotIdx,
     pub duration_blocks: u32,
     pub lecturers: Vec<PersonIdx>,
@@ -807,6 +879,8 @@ impl Problem {
                 duration_blocks: o.duration_blocks,
                 lecturers: o.lecturers,
                 eligible_rooms: o.eligible_rooms,
+                required_room_count: o.required_room_count,
+                eligible_room_combinations: o.eligible_room_combinations,
                 scheduling_pattern: o.scheduling_pattern,
             })
             .collect();
@@ -827,6 +901,7 @@ impl Problem {
                 offering: f.offering,
                 kind: f.kind,
                 room: f.room,
+                additional_rooms: f.additional_rooms,
                 start: f.start,
                 duration_blocks: f.duration_blocks,
                 lecturers: f.lecturers,
@@ -1157,6 +1232,8 @@ mod tests {
                 groups: vec![GroupIdx(0)],
                 participants: vec![],
                 eligible_rooms: vec![],
+                required_room_count: 0,
+                eligible_room_combinations: vec![],
                 scheduling_pattern: SchedulingPattern::Unspecified,
             },
             OfferingSpec {
@@ -1168,6 +1245,8 @@ mod tests {
                 groups: vec![GroupIdx(2)],
                 participants: vec![],
                 eligible_rooms: vec![],
+                required_room_count: 0,
+                eligible_room_combinations: vec![],
                 scheduling_pattern: SchedulingPattern::Unspecified,
             },
         ];
@@ -1202,6 +1281,8 @@ mod tests {
             groups: vec![],
             participants: vec![],
             eligible_rooms: vec![],
+            required_room_count: 0,
+            eligible_room_combinations: vec![],
             scheduling_pattern: SchedulingPattern::Unspecified,
         }
     }
@@ -1242,6 +1323,7 @@ mod tests {
                     offering: Some(OfferingIdx(0)),
                     kind: "lecture".into(),
                     room: None,
+                    additional_rooms: [None; MAX_ADDITIONAL_ROOMS],
                     start: SlotIdx(0),
                     duration_blocks: 1,
                     lecturers: vec![],
