@@ -24,6 +24,7 @@ SolverOutput {
             ],
             person_ids: [],
             placement_ref: "o1#0",
+            room_ids: [],
         },
         PlacedSession {
             session_id: "",
@@ -45,6 +46,7 @@ SolverOutput {
             ],
             person_ids: [],
             placement_ref: "o1#1",
+            room_ids: [],
         },
     ],
     hard_violations: [],
@@ -75,4 +77,5 @@ SolverOutput {
             termination_reason: "converged",
         },
     ),
+    candidates: [],
 }

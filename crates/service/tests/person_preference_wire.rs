@@ -38,7 +38,7 @@ fn rule(weight: f64) -> pb::ConstraintConfig {
 }
 
 fn preference(days: Vec<u32>, blocks: Vec<u32>, multiplier: Option<f64>) -> pb::Preference {
-    pb::Preference { days, blocks, weight_multiplier: multiplier }
+    pb::Preference { days, blocks, weight_multiplier: multiplier, preferred_room_features: vec![] }
 }
 
 /// One Offering needing one Session, its single lecturer `p1` stating `pref`.

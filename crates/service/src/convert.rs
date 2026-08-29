@@ -777,6 +777,23 @@ fn build_constraints(input: &pb::SolverInput) -> Result<ConstraintSet, ConvertEr
                     weight: c.weight,
                 });
             }
+            // Staged schema-first, same order ADR-0026 used for
+            // `PersonPreferenceFit`: the field exists so app-side plumbing is
+            // not itself blocked on the solver work, but a tenant enabling
+            // either today must be told there is nothing behind it yet,
+            // rather than have it silently do nothing.
+            Some(Params::Compactness(_)) => {
+                return Err(ConvertError::ConstraintTypeUnimplemented {
+                    constraint: c.id.clone(),
+                    constraint_type: "Compactness",
+                });
+            }
+            Some(Params::LecturerConsistency(_)) => {
+                return Err(ConvertError::ConstraintTypeUnimplemented {
+                    constraint: c.id.clone(),
+                    constraint_type: "LecturerConsistency",
+                });
+            }
             None => {
                 return Err(ConvertError::ConstraintWithoutParams { constraint: c.id.clone() });
             }
@@ -862,6 +879,9 @@ pub fn build_output(
                 .iter()
                 .map(|&x| problem.persons[x.get()].id.clone())
                 .collect(),
+            // PROTO ONLY: the solver assigns exactly one Room per placement.
+            // See `Offering.required_room_count`'s comment.
+            room_ids: Vec::new(),
         });
     }
 
@@ -901,5 +921,8 @@ pub fn build_output(
             elapsed_millis,
             termination_reason: outcome.termination_reason.to_string(),
         }),
+        // DRAFT field, not wired: see its comment in model.proto. The search
+        // produces one result; there is nothing to put here yet.
+        candidates: Vec::new(),
     }
 }

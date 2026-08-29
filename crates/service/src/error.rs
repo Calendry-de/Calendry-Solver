@@ -143,6 +143,14 @@ pub enum ConvertError {
         constraint: String,
         roles: Vec<String>,
     },
+    #[error(
+        "constraint '{constraint}' uses type {constraint_type}, which is in the schema but has \
+         no solver evaluator yet"
+    )]
+    ConstraintTypeUnimplemented {
+        constraint: String,
+        constraint_type: &'static str,
+    },
 }
 
 impl ConvertError {
@@ -158,6 +166,7 @@ impl ConvertError {
             Self::MinimizeMovementUnsupported
                 | Self::LecturerPoolUnsupported { .. }
                 | Self::PreferenceRolesUnsupported { .. }
+                | Self::ConstraintTypeUnimplemented { .. }
         )
     }
 }

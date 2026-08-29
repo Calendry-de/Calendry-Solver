@@ -4,28 +4,103 @@ Status, not decisions. The decision this records is
 [ADR-0003](adr/0003-proto-schema-as-a-pinned-submodule.md) — the schema lives in
 a separate repo, consumed as a pinned submodule.
 
-## Current pin: `992563f` = `v0.8.0`
+## Current pin: `855c145` = `v0.9.0`
 
-**Correction, 2026-08-29:** this section previously said `992563f` was "not yet
-tagged" and asked for `v0.8.0` to be cut. That was already stale when read —
-the tag exists (`git show v0.8.0` resolves to `992563f`, tagged minutes after
-the commit) and always had; the entry just never got updated once the tag
-landed. Caught while adding `PlacedSession.placement_ref` below, which needs a
-pin of its own — checked directly against the submodule rather than assumed
-from this file, since this is exactly the drift `CLAUDE.md` warns about for a
-tracked-gap entry.
+Published 2026-08-29: `@mindcollaps/calendry-proto@0.9.0` is on GitHub
+Packages (`publish.yml` ran for real on the tag push, not a dry run — verified
+from its own job log, not assumed from a green check). Batched deliberately —
+every field below except `placement_ref` is **PROTO ONLY**, staged
+schema-first ahead of its evaluator the way ADR-0026 staged
+`PersonPreferenceFit`, so one tag covers the whole set rather than one per
+backlog card.
 
-A `v0.9.0` is pending for `PlacedSession.placement_ref` (field 9): additive,
-staged in `vendor/calendry-proto` but not yet committed/tagged/re-pinned. A
-`ConstraintViolation.session_ids` entry names a Session by
-`Problem::placement_label` — the real `session_id` when one exists, otherwise
-`offering_id#occurrence` for a Session this run invented. Nothing on the wire
-carried that same label for an invented Session, because `PlacedSession.
-session_id` is deliberately empty for one ("empty = newly created"), so a
-violation naming one pointed at nothing else in the response. `placement_ref`
-carries the label unconditionally, on every Session, so a violation is always
-resolvable to a concrete entry in `sessions` — this repo's part of "Solver
-violations naming Sessions the solver invented".
+**Correction carried forward from `v0.8.0`:** that section previously said
+`992563f` was "not yet tagged" and asked for the tag to be cut. It was already
+stale when read — the tag existed and had all along, tagged minutes after the
+commit; the entry just never got updated once it landed. Caught while adding
+`placement_ref` below, checked directly against the submodule rather than
+assumed from this file, since this is exactly the drift `CLAUDE.md` warns
+about for a tracked-gap entry.
+
+* **`PlacedSession.placement_ref`** (field 9). A `ConstraintViolation.
+  session_ids` entry names a Session by `Problem::placement_label` — the real
+  `session_id` when one exists, otherwise `offering_id#occurrence` for a
+  Session this run invented. Nothing on the wire carried that same label for
+  an invented Session, because `PlacedSession.session_id` is deliberately
+  empty for one ("empty = newly created"), so a violation naming one pointed
+  at nothing else in the response. `placement_ref` carries the label
+  unconditionally, on every Session, so a violation is always resolvable to a
+  concrete entry in `sessions`. Solver-side: **done**, wired into
+  `build_output`. "Solver violations naming Sessions the solver invented".
+
+* **`Room.feature_quantities`** and **`Offering.room_feature_requirements`**
+  (with `RoomFeatureQuantity` / `RoomFeatureRequirement`). Today's
+  `feature_tags` / `required_room_features` are presence-only, so "needs 24
+  workstations" degrades to "needs a workstation". The new fields carry a
+  count on both the supply (Room) and the demand (Offering) side;
+  `min_quantity` is `optional` for the same zero-vs-absent reason
+  `Preference.weight_multiplier` is. Solver-side: not started — eligibility
+  still checks `feature_tags` membership alone. "Equipment quantity cannot
+  cross the wire".
+
+* **`Session.room_ids`** and **`PlacedSession.room_ids`**, plus
+  `Offering.required_room_count`. `room_id` (singular) remains the primary
+  Room and is unchanged for a single-room Session; the plural field carries
+  the full set, `room_id` included, only when more than one Room is occupied
+  simultaneously. Solver-side: not started — the search assigns exactly one
+  Room per placement regardless of `required_room_count`. "A Session with more
+  than one Room cannot cross the wire".
+
+* **`Offering.scheduling_pattern`** (`SchedulingPattern`: distributed vs.
+  block/intensive). Metadata only — nothing reads it yet, so every Offering
+  solves exactly as it does today regardless of what is set. Which
+  enforcement shape this takes (a per-Offering aggregate vs. a constraint type
+  per pattern) is still open; this stages the classification data without
+  committing to that answer. "Scheduling pattern per Offering".
+
+* **`MinimizeExamWeek.invert`**. One flag, not a new type — the same
+  `MinimizeRoomRank.invert` / `MinimizeBlockUsage` precedent. `false` (absent)
+  is today's only behavior, unchanged; `true` pushes exam-kind Sessions toward
+  the exam period instead of away from it. The solver does not read the field
+  yet, and a plain `bool` has no `UNIMPLEMENTED` refusal the way a whole
+  message does — setting `invert` today is accepted and silently does
+  nothing, which is worth knowing before relying on it. "Exam-specific
+  placement logic" (the wire half only; the lecturer-facing "create my own
+  exam" flow is app-side and untouched here).
+
+* **`Compactness`** and **`LecturerConsistency`**, two new `oneof params`
+  entries (29, 30). Both refuse with `ConvertError::ConstraintTypeUnimplemented`
+  → gRPC `UNIMPLEMENTED` if enabled — tested in
+  `crates/service/tests/rejections.rs` — rather than silently doing nothing,
+  which a bare `bool` flag (see `MinimizeExamWeek` above) cannot do but a whole
+  message can. `LecturerConsistency` additionally has a prerequisite that does
+  not exist yet: genuine lecturer-pool selection (`LecturerPoolUnsupported`).
+  "Compactness — minimize gaps in the day" and "Lecturer consistency across an
+  Offering's Sessions" (the evaluator and shape decisions for both remain
+  entirely open; only the catalogue slot and the refusal are staged).
+
+* **`Preference.preferred_room_features`**. Rides the existing
+  `person_preference_fit` tenant-level switch, per
+  `per-person-preferences-design.md` §1's own criterion (grid-shaped, widens
+  the row rather than needing a new table). References `Room.feature_tags`'
+  vocabulary by key, the same tradeoff `required_room_features` already
+  accepts. Solver-side: not started — `PersonPreferenceFit` counts
+  `days`/`blocks` only. "Room-type preference kind".
+
+* **`SolverOutput.candidates`** (`SolverCandidate`). Marked **DRAFT — NOT
+  COMMITTED** in the proto itself, not just here: unlike everything above,
+  "Multiple candidate schedules" was never scoped, and naming / de-duplication
+  / whether one run can produce this cheaply are all still open. The field
+  exists so the design conversation has a concrete shape to react to, not
+  because the shape is decided. `sessions` / `hard_violations` / `objective`
+  on `SolverOutput` are unchanged and remain authoritative for every existing
+  caller.
+
+**`LOCK_POLICY_MINIMIZE_MOVEMENT` needed no proto change at all** — checked
+while surveying the P0 backlog for wire gaps, and it already exists (`model.
+proto`'s `LockPolicy` enum, value 2), refused today with
+`ConvertError::MinimizeMovementUnsupported`. "v2 minimize-movement repair
+mode" is entirely solver-side (search) work.
 
 Previously `6107eb2` = **`v0.7.0`**, up from `v0.2.0`. What arrived across those
 that this repo cares about:

@@ -72,6 +72,7 @@ pub fn room(i: u32) -> pb::Room {
         is_virtual: false,
         feature_tags: vec![],
         location: String::new(),
+        feature_quantities: vec![],
     }
 }
 
@@ -130,6 +131,9 @@ pub fn offering(id: &str, required: u32) -> pb::Offering {
         min_capacity: 0,
         allowed_room_ids: vec![],
         allow_online: false,
+        room_feature_requirements: vec![],
+        required_room_count: 0,
+        scheduling_pattern: pb::SchedulingPattern::Unspecified as i32,
     }
 }
 
@@ -146,6 +150,7 @@ pub fn session(id: &str, offering_id: &str, at: pb::SlotRef) -> pb::Session {
         group_ids: vec!["g1".into()],
         person_ids: vec![],
         is_locked: false,
+        room_ids: vec![],
     }
 }
 

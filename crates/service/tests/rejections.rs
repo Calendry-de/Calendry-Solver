@@ -354,6 +354,53 @@ fn a_constraint_with_no_params_is_refused() {
 }
 
 #[test]
+fn compactness_is_unimplemented_not_invalid() {
+    // Staged schema-first: the type exists in the catalogue, but enabling it
+    // must be told there is nothing behind it yet rather than silently do
+    // nothing.
+    let mut input = base_input();
+    input.constraints.push(enabled(
+        "c-compact",
+        pb::constraint_config::Params::Compactness(pb::Compactness { scope: vec![] }),
+    ));
+
+    let e = reject(&input, &scope(&[]));
+    assert!(
+        matches!(
+            &e,
+            ConvertError::ConstraintTypeUnimplemented { constraint, constraint_type }
+                if constraint == "c-compact" && *constraint_type == "Compactness"
+        ),
+        "{e}"
+    );
+    assert_eq!(
+        code_of(&e),
+        Code::Unimplemented,
+        "the caller cannot fix this by changing their data"
+    );
+}
+
+#[test]
+fn lecturer_consistency_is_unimplemented_not_invalid() {
+    let mut input = base_input();
+    input.constraints.push(enabled(
+        "c-consistent",
+        pb::constraint_config::Params::LecturerConsistency(pb::LecturerConsistency {}),
+    ));
+
+    let e = reject(&input, &scope(&[]));
+    assert!(
+        matches!(
+            &e,
+            ConvertError::ConstraintTypeUnimplemented { constraint, constraint_type }
+                if constraint == "c-consistent" && *constraint_type == "LecturerConsistency"
+        ),
+        "{e}"
+    );
+    assert_eq!(code_of(&e), Code::Unimplemented);
+}
+
+#[test]
 fn a_disabled_constraint_with_no_params_is_ignored() {
     // Only *enabled* constraints are read, so an unfinished row in the tenant's
     // config is not a reason to reject the whole snapshot.
@@ -500,6 +547,10 @@ fn every_refusal_maps_to_invalid_argument_or_unimplemented_and_nothing_else() {
         ConvertError::PreferenceRolesUnsupported {
             constraint: "c".into(),
             roles: vec!["Student".into()],
+        },
+        ConvertError::ConstraintTypeUnimplemented {
+            constraint: "c".into(),
+            constraint_type: "Compactness",
         },
     ];
 
