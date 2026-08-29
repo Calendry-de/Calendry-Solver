@@ -165,11 +165,37 @@ fn minimize_exam_week_steers_out_of_the_exam_week() {
         testing::single_session(
             testing::exam_week_grid(),
             testing::rooms(1),
-            vec![testing::soft("e", w, SoftParams::MinimizeExamWeek)],
+            vec![testing::soft(
+                "e",
+                w,
+                SoftParams::MinimizeExamWeek { invert: false },
+            )],
         )
     });
     assert_eq!(off, 0, "unweighted, greedy takes the earliest slot");
     assert_eq!(on, 1, "the exam week must be vacated");
+}
+
+#[test]
+fn inverted_minimize_exam_week_steers_into_the_exam_week() {
+    // Reversed grid (slot 0 teaching, slot 1 exam): greedy's unweighted
+    // default lands OUTSIDE the exam week, so weighting the inverted rule has
+    // to actively MOVE the Session in, not just fail to move it out. A bug
+    // that dropped `invert` (behaving as if it were false, or ignored
+    // entirely) would leave `on == 0` — it would never make the move.
+    let (off, on) = slot_with_weight(|w| {
+        testing::single_session(
+            testing::teaching_then_exam_grid(),
+            testing::rooms(1),
+            vec![testing::soft(
+                "e",
+                w,
+                SoftParams::MinimizeExamWeek { invert: true },
+            )],
+        )
+    });
+    assert_eq!(off, 0, "unweighted, greedy takes the earliest slot");
+    assert_eq!(on, 1, "inverted: the Session must move INTO the exam week");
 }
 
 #[test]

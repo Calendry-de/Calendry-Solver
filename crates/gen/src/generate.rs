@@ -747,7 +747,7 @@ fn build_constraints(params: &InstanceParams, slots: &SlotTable) -> ConstraintSe
             id: "soft-exam-week".into(),
             kinds: vec![],
             weight: 5.0 * w,
-            params: SoftParams::MinimizeExamWeek,
+            params: SoftParams::MinimizeExamWeek { invert: false },
         },
         SoftInstance {
             id: "soft-online".into(),

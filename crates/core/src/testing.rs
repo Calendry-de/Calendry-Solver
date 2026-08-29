@@ -526,6 +526,25 @@ pub fn exam_week_grid() -> SlotTable {
     .unwrap()
 }
 
+/// The reverse of [`exam_week_grid`]: slot 0 is teaching, slot 1 is the exam
+/// week. Greedy construction's "earliest slot" default therefore lands
+/// OUTSIDE the exam week here, which is what lets a test show
+/// `MinimizeExamWeek { invert: true }` actually MOVE a Session into the exam
+/// week rather than merely fail to move it out — `exam_week_grid` alone
+/// cannot demonstrate that, since its unweighted default already sits on the
+/// exam week by coincidence of slot order.
+pub fn teaching_then_exam_grid() -> SlotTable {
+    SlotTable::build(
+        1,
+        &[1],
+        &[
+            WeekSpec { kind: WK::Teaching, holiday_weekdays: vec![] },
+            WeekSpec { kind: WK::Exam, holiday_weekdays: vec![] },
+        ],
+    )
+    .unwrap()
+}
+
 /// Monday and Saturday, one block each: slot 0 is Monday, slot 1 is Saturday.
 pub fn two_day_grid() -> SlotTable {
     SlotTable::build(1, &[1, 6], &teaching_weeks(1)).unwrap()

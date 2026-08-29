@@ -70,7 +70,17 @@ pub enum SoftParams {
         rank_threshold: u32,
         invert: bool,
     },
-    MinimizeExamWeek,
+    /// Penalize Sessions falling in a week whose `WeekKind` is EXAM.
+    ///
+    /// `invert` selects the direction, mirroring `MinimizeRoomRank`:
+    ///   false — penalize placing IN an exam week: keep ordinary lessons out.
+    ///   true  — penalize placing OUTSIDE an exam week: push exam-kind
+    ///           Sessions toward the exam period instead of away from it.
+    ///           Scoping this to exam-kind Sessions is the tenant's job via
+    ///           `applies_to_kinds`; this type has no notion of kind itself.
+    MinimizeExamWeek {
+        invert: bool,
+    },
     MinimizeOnline,
 }
 
@@ -82,7 +92,7 @@ impl SoftParams {
             SoftParams::MinimizeBlockUsage { .. } => "MinimizeBlockUsage",
             SoftParams::MinimizeDayUsage { .. } => "MinimizeDayUsage",
             SoftParams::MinimizeRoomRank { .. } => "MinimizeRoomRank",
-            SoftParams::MinimizeExamWeek => "MinimizeExamWeek",
+            SoftParams::MinimizeExamWeek { .. } => "MinimizeExamWeek",
             SoftParams::MinimizeOnline => "MinimizeOnline",
         }
     }
@@ -107,7 +117,7 @@ impl SoftParams {
                     room.rank >= *rank_threshold
                 }
             }
-            SoftParams::MinimizeExamWeek => f.week_kind == WeekKind::Exam,
+            SoftParams::MinimizeExamWeek { invert } => (f.week_kind == WeekKind::Exam) != *invert,
             SoftParams::MinimizeOnline => room.is_virtual,
         }
     }
@@ -486,8 +496,12 @@ mod tests {
         assert!(sat_rule.applies(sat, &plain));
         assert!(!sat_rule.applies(first, &plain));
 
-        assert!(SoftParams::MinimizeExamWeek.applies(exam, &plain));
-        assert!(!SoftParams::MinimizeExamWeek.applies(first, &plain));
+        assert!(SoftParams::MinimizeExamWeek { invert: false }.applies(exam, &plain));
+        assert!(!SoftParams::MinimizeExamWeek { invert: false }.applies(first, &plain));
+
+        // Inverted: penalize being OUTSIDE the exam week instead.
+        assert!(SoftParams::MinimizeExamWeek { invert: true }.applies(first, &plain));
+        assert!(!SoftParams::MinimizeExamWeek { invert: true }.applies(exam, &plain));
 
         let rank = SoftParams::MinimizeRoomRank { rank_threshold: 5, invert: false };
         assert!(rank.applies(first, &room_at(5, false)));

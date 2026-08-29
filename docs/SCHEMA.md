@@ -60,13 +60,17 @@ about for a tracked-gap entry.
 
 * **`MinimizeExamWeek.invert`**. One flag, not a new type — the same
   `MinimizeRoomRank.invert` / `MinimizeBlockUsage` precedent. `false` (absent)
-  is today's only behavior, unchanged; `true` pushes exam-kind Sessions toward
-  the exam period instead of away from it. The solver does not read the field
-  yet, and a plain `bool` has no `UNIMPLEMENTED` refusal the way a whole
-  message does — setting `invert` today is accepted and silently does
-  nothing, which is worth knowing before relying on it. "Exam-specific
+  is today's only prior behavior, unchanged; `true` pushes Sessions toward the
+  exam period instead of away from it. **Solver-side: done**, 2026-08-29 —
+  `SoftParams::MinimizeExamWeek` now carries `invert` and
+  `crates/service/src/convert.rs` reads `p.invert` from the wire; the
+  direction-flip is covered by a falsification test
+  (`inverted_minimize_exam_week_steers_into_the_exam_week`, on a grid built
+  specifically so the unweighted default sits OUTSIDE the exam week, or a
+  dropped `invert` would pass by never having to move). "Exam-specific
   placement logic" (the wire half only; the lecturer-facing "create my own
-  exam" flow is app-side and untouched here).
+  exam" flow, and pushing toward TERM-END specifically rather than just
+  "the exam period", are still app-side / unbuilt).
 
 * **`Compactness`** and **`LecturerConsistency`**, two new `oneof params`
   entries (29, 30). Both refuse with `ConvertError::ConstraintTypeUnimplemented`

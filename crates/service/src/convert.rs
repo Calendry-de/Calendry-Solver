@@ -733,9 +733,9 @@ fn build_constraints(input: &pb::SolverInput) -> Result<ConstraintSet, ConvertEr
                 c,
                 SoftParams::MinimizeRoomRank { rank_threshold: p.rank_threshold, invert: p.invert },
             )?),
-            Some(Params::MinimizeExamWeek(_)) => {
+            Some(Params::MinimizeExamWeek(p)) => {
                 set.soft
-                    .push(soft_instance(c, SoftParams::MinimizeExamWeek)?);
+                    .push(soft_instance(c, SoftParams::MinimizeExamWeek { invert: p.invert })?);
             }
             Some(Params::MinimizeOnline(_)) => {
                 set.soft.push(soft_instance(c, SoftParams::MinimizeOnline)?);
