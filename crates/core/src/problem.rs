@@ -245,6 +245,10 @@ pub struct ConstraintSet {
     /// spreading across a wide span of weeks — the `Compactness` gap shape, at
     /// week granularity and scoped by Offering.
     pub block_pattern_adherence: Vec<PatternAdherenceInstance>,
+    /// HARD, validation-shaped. Cross-checks a placement's Room capacity
+    /// against its Offering's own Groups' summed `Group.size` — see
+    /// [`crate::constraints::group_size_fits_room`].
+    pub group_size_fits_room: Vec<ConstraintInstance>,
 }
 
 fn any_covers(list: &[ConstraintInstance], kind: &str) -> bool {

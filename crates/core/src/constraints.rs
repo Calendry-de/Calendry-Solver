@@ -47,6 +47,7 @@ pub enum ConstraintType {
     OnlineOnsiteSameDay,
     MaxOnlineShare,
     PersonPreferenceFit,
+    GroupSizeFitsRoom,
 }
 
 impl ConstraintType {
@@ -63,6 +64,7 @@ impl ConstraintType {
             Self::OnlineOnsiteSameDay => "OnlineOnsiteSameDay",
             Self::MaxOnlineShare => "MaxOnlineShare",
             Self::PersonPreferenceFit => "PersonPreferenceFit",
+            Self::GroupSizeFitsRoom => "GroupSizeFitsRoom",
         }
     }
 }
@@ -133,8 +135,59 @@ pub fn evaluate_hard(problem: &Problem, solution: &Solution) -> Vec<Violation> {
     structural(problem, solution, &mut out);
     lecturer_veto(problem, solution, &mut out);
     group_veto(problem, solution, &mut out);
+    group_size_fits_room(problem, solution, &mut out);
     aggregates(problem, solution, &mut out);
     out
+}
+
+/// HARD, validation-shaped. Cross-checks a placement's Room capacity
+/// (summed across every Room in a multi-Room placement) against the SUMMED
+/// `Group.size` of the Offering's own Groups — a safety net against stale or
+/// wrong `Offering.min_capacity` input, not a preference.
+///
+/// Scoped to `own_groups` (the Offering's DIRECT Groups), not the downward
+/// closure: an Offering assigned to exactly one Group is the unambiguous
+/// case this exists for. Whether a cohort-level Offering should additionally
+/// sum its descendant classes' sizes — and whether a non-leaf Group's own
+/// `size` already includes them — is an app-side data question, not
+/// something the solver can infer; see the tracking issue.
+///
+/// Evaluated over placed Sessions only, same convention as `lecturer_veto`:
+/// immovable occupancy is reported by the caller's own data.
+pub fn group_size_fits_room(problem: &Problem, solution: &Solution, out: &mut Vec<Violation>) {
+    if problem.constraints.group_size_fits_room.is_empty() {
+        return;
+    }
+    for instance in &problem.constraints.group_size_fits_room {
+        for p in problem.placement_ids() {
+            let Some(pl) = solution.get(p) else { continue };
+            let o = problem.offering_of(p);
+            if !instance.covers(&o.kind) {
+                continue;
+            }
+            let capacity: u32 = pl
+                .all_rooms()
+                .map(|r| problem.rooms[r.get()].capacity)
+                .sum();
+            let attending: u32 = o
+                .own_groups
+                .iter()
+                .map(|g| problem.groups[g.get()].size)
+                .sum();
+            if attending > capacity {
+                out.push(Violation {
+                    constraint_id: instance.id.clone(),
+                    constraint_type: ConstraintType::GroupSizeFitsRoom,
+                    session_ids: vec![problem.placement_label(p)],
+                    offering_ids: vec![o.id.clone()],
+                    detail: format!(
+                        "'{}' seats {attending} (own Groups) in a Room seating only {capacity}",
+                        problem.placement_label(p)
+                    ),
+                });
+            }
+        }
+    }
 }
 
 /// HARD, unary. A lecturer is never assigned during their own blackout.

@@ -404,6 +404,69 @@ fn lecturer_consistency_is_unimplemented_not_invalid() {
     assert_eq!(code_of(&e), Code::Unimplemented);
 }
 
+/// The P2 batch, staged together for one proto version bump: every type
+/// refuses as UNIMPLEMENTED except `GroupSizeFitsRoom` (covered by its own
+/// `crates/core/tests/group_size_fits_room.rs` /
+/// `crates/service/tests/group_size_fits_room.rs`, not here) — one test per
+/// type rather than 13 near-identical functions.
+#[test]
+fn every_staged_p2_type_is_unimplemented_not_invalid() {
+    use pb::constraint_config::Params;
+
+    let cases: Vec<(&str, Params)> = vec![
+        (
+            "MinimizeCapacityWaste",
+            Params::MinimizeCapacityWaste(pb::MinimizeCapacityWaste::default()),
+        ),
+        (
+            "MinimizeLocationChange",
+            Params::MinimizeLocationChange(pb::MinimizeLocationChange::default()),
+        ),
+        (
+            "MaxConsecutiveBlocks",
+            Params::MaxConsecutiveBlocks(pb::MaxConsecutiveBlocks::default()),
+        ),
+        (
+            "MaxWeeklyTeachingLoad",
+            Params::MaxWeeklyTeachingLoad(pb::MaxWeeklyTeachingLoad::default()),
+        ),
+        ("ExamSpacingSameDay", Params::ExamSpacingSameDay(pb::ExamSpacingSameDay {})),
+        ("ExamSpacingWindow", Params::ExamSpacingWindow(pb::ExamSpacingWindow::default())),
+        ("ProtectedBlock", Params::ProtectedBlock(pb::ProtectedBlock::default())),
+        ("RoomConsistency", Params::RoomConsistency(pb::RoomConsistency {})),
+        ("MinimizeRoomChurn", Params::MinimizeRoomChurn(pb::MinimizeRoomChurn::default())),
+        ("MaxDailySpan", Params::MaxDailySpan(pb::MaxDailySpan::default())),
+        (
+            "MinimizeWeekdayImbalance",
+            Params::MinimizeWeekdayImbalance(pb::MinimizeWeekdayImbalance::default()),
+        ),
+        (
+            "RoomTurnaroundBuffer",
+            Params::RoomTurnaroundBuffer(pb::RoomTurnaroundBuffer::default()),
+        ),
+        (
+            "MaxConcurrentOnlineSessions",
+            Params::MaxConcurrentOnlineSessions(pb::MaxConcurrentOnlineSessions::default()),
+        ),
+    ];
+
+    for (name, params) in cases {
+        let mut input = base_input();
+        input.constraints.push(enabled("c-staged", params));
+
+        let e = reject(&input, &scope(&[]));
+        assert!(
+            matches!(
+                &e,
+                ConvertError::ConstraintTypeUnimplemented { constraint, constraint_type }
+                    if constraint == "c-staged" && *constraint_type == name
+            ),
+            "{name}: {e}"
+        );
+        assert_eq!(code_of(&e), Code::Unimplemented, "{name}");
+    }
+}
+
 #[test]
 fn a_disabled_constraint_with_no_params_is_ignored() {
     // Only *enabled* constraints are read, so an unfinished row in the tenant's

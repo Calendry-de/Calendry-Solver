@@ -1104,6 +1104,98 @@ fn build_constraints(input: &pb::SolverInput) -> Result<ConstraintSet, ConvertEr
                     weight: c.weight,
                 });
             }
+
+            // -- P2 batch, staged together for one version bump --
+            //
+            // Each refused as UNIMPLEMENTED until its own tracking issue lands
+            // an evaluator, same discipline `LecturerConsistency` above uses:
+            // a tenant configuring one of these gets a clear refusal, never a
+            // silently inert setting.
+            Some(Params::MinimizeCapacityWaste(_)) => {
+                return Err(ConvertError::ConstraintTypeUnimplemented {
+                    constraint: c.id.clone(),
+                    constraint_type: "MinimizeCapacityWaste",
+                });
+            }
+            Some(Params::MinimizeLocationChange(_)) => {
+                return Err(ConvertError::ConstraintTypeUnimplemented {
+                    constraint: c.id.clone(),
+                    constraint_type: "MinimizeLocationChange",
+                });
+            }
+            Some(Params::MaxConsecutiveBlocks(_)) => {
+                return Err(ConvertError::ConstraintTypeUnimplemented {
+                    constraint: c.id.clone(),
+                    constraint_type: "MaxConsecutiveBlocks",
+                });
+            }
+            Some(Params::MaxWeeklyTeachingLoad(_)) => {
+                return Err(ConvertError::ConstraintTypeUnimplemented {
+                    constraint: c.id.clone(),
+                    constraint_type: "MaxWeeklyTeachingLoad",
+                });
+            }
+            Some(Params::ExamSpacingSameDay(_)) => {
+                return Err(ConvertError::ConstraintTypeUnimplemented {
+                    constraint: c.id.clone(),
+                    constraint_type: "ExamSpacingSameDay",
+                });
+            }
+            Some(Params::ExamSpacingWindow(_)) => {
+                return Err(ConvertError::ConstraintTypeUnimplemented {
+                    constraint: c.id.clone(),
+                    constraint_type: "ExamSpacingWindow",
+                });
+            }
+            Some(Params::ProtectedBlock(_)) => {
+                return Err(ConvertError::ConstraintTypeUnimplemented {
+                    constraint: c.id.clone(),
+                    constraint_type: "ProtectedBlock",
+                });
+            }
+            Some(Params::RoomConsistency(_)) => {
+                return Err(ConvertError::ConstraintTypeUnimplemented {
+                    constraint: c.id.clone(),
+                    constraint_type: "RoomConsistency",
+                });
+            }
+            Some(Params::MinimizeRoomChurn(_)) => {
+                return Err(ConvertError::ConstraintTypeUnimplemented {
+                    constraint: c.id.clone(),
+                    constraint_type: "MinimizeRoomChurn",
+                });
+            }
+            Some(Params::MaxDailySpan(_)) => {
+                return Err(ConvertError::ConstraintTypeUnimplemented {
+                    constraint: c.id.clone(),
+                    constraint_type: "MaxDailySpan",
+                });
+            }
+            Some(Params::MinimizeWeekdayImbalance(_)) => {
+                return Err(ConvertError::ConstraintTypeUnimplemented {
+                    constraint: c.id.clone(),
+                    constraint_type: "MinimizeWeekdayImbalance",
+                });
+            }
+            Some(Params::RoomTurnaroundBuffer(_)) => {
+                return Err(ConvertError::ConstraintTypeUnimplemented {
+                    constraint: c.id.clone(),
+                    constraint_type: "RoomTurnaroundBuffer",
+                });
+            }
+            Some(Params::MaxConcurrentOnlineSessions(_)) => {
+                return Err(ConvertError::ConstraintTypeUnimplemented {
+                    constraint: c.id.clone(),
+                    constraint_type: "MaxConcurrentOnlineSessions",
+                });
+            }
+            // Built — see `crate::problem::ConstraintSet::group_size_fits_room`.
+            // No parameters: the values (`Group.size`, `Room.capacity`)
+            // already exist; this only switches the cross-check on.
+            Some(Params::GroupSizeFitsRoom(_)) => {
+                set.group_size_fits_room.push(instance);
+            }
+
             None => {
                 return Err(ConvertError::ConstraintWithoutParams { constraint: c.id.clone() });
             }

@@ -787,6 +787,11 @@ fn build_constraints(params: &InstanceParams, slots: &SlotTable) -> ConstraintSe
         // `lecturer_veto` shape, and the benchmark baseline is the last place
         // to put one.
         group_veto: Vec::new(),
+        // OFF for the same reason: the generator calibrates Room capacity
+        // against `min_capacity`, not against `Group.size`, so this check's
+        // firing rate here is uncalibrated noise rather than a signal worth
+        // asserting on in the benchmark baseline.
+        group_size_fits_room: Vec::new(),
         // Weight 5 mirrors the app catalogue's `defaultWeight`, so generated
         // benchmark instances price a mixed day the way a real tenant does.
         online_onsite_same_day: vec![DayMixInstance {

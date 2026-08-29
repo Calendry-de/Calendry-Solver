@@ -75,6 +75,12 @@ pub fn group(id: &str, parent: Option<u32>) -> Group {
     }
 }
 
+/// `group` with a real headcount — most fixtures leave `size: 0`, which is
+/// inert for `GroupSizeFitsRoom`; a test exercising it needs a nonzero value.
+pub fn group_with_size(id: &str, parent: Option<u32>, size: u32) -> Group {
+    Group { size, ..group(id, parent) }
+}
+
 pub fn person(id: &str, groups: &[u32]) -> Person {
     Person {
         id: id.to_string(),
@@ -214,6 +220,9 @@ pub fn all_constraints() -> ConstraintSet {
         // here means every existing test also asserts that switching group
         // vetoes on changes nothing when no Group has declared anything.
         group_veto: inst("c-group-veto"),
+        // Same asymmetry, same precedent: every fixture's Group defaults to
+        // `size: 0`, so this can never fire unless a test sets a real size.
+        group_size_fits_room: inst("c-group-size"),
         // Weight 5 mirrors the app catalogue's `defaultWeight` for this type,
         // so a fixture's day-mix cost reads the same as a real tenant's.
         online_onsite_same_day: day_mix("c-mix", 5.0),
