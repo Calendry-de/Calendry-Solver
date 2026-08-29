@@ -814,6 +814,7 @@ fn build_constraints(params: &InstanceParams, slots: &SlotTable) -> ConstraintSe
         minimize_location_change: Vec::new(),
         room_turnaround_buffer: Vec::new(),
         minimize_room_churn: Vec::new(),
+        room_consistency: Vec::new(),
         // Weight 5 mirrors the app catalogue's `defaultWeight`, so generated
         // benchmark instances price a mixed day the way a real tenant does.
         online_onsite_same_day: vec![DayMixInstance {

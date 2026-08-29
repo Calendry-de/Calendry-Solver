@@ -9,8 +9,8 @@ use crate::aggregates::{
     Aggregates, CompactnessInstance, DayMixInstance, ExamSpacingSameDayInstance,
     ExamSpacingWindowInstance, MaxConsecutiveInstance, MaxDailySpanInstance,
     MaxWeeklyTeachingLoadInstance, MinimizeLocationChangeInstance, MinimizeRoomChurnInstance,
-    MinimizeWeekdayImbalanceInstance, PatternAdherenceInstance, RoomTurnaroundBufferInstance,
-    ShareInstance,
+    MinimizeWeekdayImbalanceInstance, PatternAdherenceInstance, RoomConsistencyInstance,
+    RoomTurnaroundBufferInstance, ShareInstance,
 };
 use crate::bitset::BitSet;
 use crate::groups::{GroupClosure, GroupCycle};
@@ -313,6 +313,11 @@ pub struct ConstraintSet {
     /// over a WEEK, not distinct LOCATIONS within one day. See
     /// [`crate::aggregates::MinimizeRoomChurnInstance`].
     pub minimize_room_churn: Vec<MinimizeRoomChurnInstance>,
+    /// SOFT, aggregate over an entire Offering's Sessions across the WHOLE
+    /// TERM — keyed by Offering rather than Group, unbounded by day or
+    /// window, the same new shape `LecturerConsistency` is staged for. See
+    /// [`crate::aggregates::RoomConsistencyInstance`].
+    pub room_consistency: Vec<RoomConsistencyInstance>,
 }
 
 /// One `ProtectedBlock` instance. The FIRST hard type whose values
@@ -407,6 +412,7 @@ pub struct Enforce {
     pub minimize_location_change_person: bool,
     pub room_turnaround: bool,
     pub minimize_room_churn: bool,
+    pub room_consistency: bool,
 }
 
 impl ConstraintSet {
@@ -462,6 +468,7 @@ impl ConstraintSet {
                 .any(|c| c.person && c.covers(kind)),
             room_turnaround: self.room_turnaround_buffer.iter().any(|c| c.covers(kind)),
             minimize_room_churn: self.minimize_room_churn.iter().any(|c| c.covers(kind)),
+            room_consistency: self.room_consistency.iter().any(|c| c.covers(kind)),
         }
     }
 }
@@ -984,6 +991,9 @@ pub struct Problem {
     /// Summed weight of every configured `MinimizeRoomChurn` instance. Zero
     /// when not configured.
     pub room_churn_weight: f64,
+    /// Summed weight of every configured `RoomConsistency` instance. Zero
+    /// when not configured.
+    pub room_consistency_weight: f64,
     /// `Room.location`, interned to a dense index parallel to [`Self::rooms`].
     /// See [`Problem::room_location`].
     room_location: Vec<u32>,
@@ -1201,6 +1211,7 @@ impl Problem {
             constraints.room_turnaround_buffer.clone(),
             rooms.len(),
             constraints.minimize_room_churn.clone(),
+            constraints.room_consistency.clone(),
         );
 
         let day_mix_weight: f64 = constraints
@@ -1297,6 +1308,8 @@ impl Problem {
             .iter()
             .map(|i| i.weight)
             .sum();
+        let room_consistency_weight: f64 =
+            constraints.room_consistency.iter().map(|i| i.weight).sum();
         let distributed_pattern_weight: f64 = constraints
             .distributed_pattern_adherence
             .iter()
@@ -1435,6 +1448,7 @@ impl Problem {
             location_change_person_weight,
             room_turnaround_weight,
             room_churn_weight,
+            room_consistency_weight,
             room_location,
             in_scope,
             placement_counts,

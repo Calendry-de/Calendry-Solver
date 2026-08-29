@@ -404,6 +404,11 @@ pub struct Objective {
     /// than the day granularity every other aggregate cost above uses. See
     /// [`crate::aggregates::MinimizeRoomChurnInstance`].
     pub room_churn_cost: f64,
+    /// Sessions NOT in their Offering's modal Room, summed over every
+    /// Offering and already multiplied by the configured weight — read off
+    /// the running total like every other aggregate cost above. See
+    /// [`crate::aggregates::RoomConsistencyInstance`].
+    pub room_consistency_cost: f64,
     /// `DistributedPatternAdherence` and `BlockPatternAdherence` together,
     /// already multiplied by each type's configured weight. Read whole off
     /// `Aggregates`' running totals for the same reason `compactness_cost` is:
@@ -439,6 +444,7 @@ impl Objective {
             + self.location_change_cost
             + self.room_turnaround_cost
             + self.room_churn_cost
+            + self.room_consistency_cost
             + self.scheduling_pattern_cost
     }
 }
@@ -658,6 +664,7 @@ mod tests {
             location_change_cost: 0.0,
             room_turnaround_cost: 0.0,
             room_churn_cost: 0.0,
+            room_consistency_cost: 0.0,
             scheduling_pattern_cost: 0.0,
         };
         let one_unplaced = Objective {
@@ -675,6 +682,7 @@ mod tests {
             location_change_cost: 0.0,
             room_turnaround_cost: 0.0,
             room_churn_cost: 0.0,
+            room_consistency_cost: 0.0,
             scheduling_pattern_cost: 0.0,
         };
         assert!(one_unplaced.total(hard_penalty) > all_soft_bad.total(hard_penalty));
@@ -709,6 +717,7 @@ mod tests {
             location_change_cost: 0.0,
             room_turnaround_cost: 0.0,
             room_churn_cost: 0.0,
+            room_consistency_cost: 0.0,
             scheduling_pattern_cost: 0.0,
         };
         let one_unplaced = Objective {
@@ -726,6 +735,7 @@ mod tests {
             location_change_cost: 0.0,
             room_turnaround_cost: 0.0,
             room_churn_cost: 0.0,
+            room_consistency_cost: 0.0,
             scheduling_pattern_cost: 0.0,
         };
 

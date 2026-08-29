@@ -29,7 +29,8 @@ use calendry_solver_core::aggregates::{
     CompactnessInstance, DayMixInstance, ExamSpacingSameDayInstance, ExamSpacingWindowInstance,
     MaxConsecutiveInstance, MaxDailySpanInstance, MaxWeeklyTeachingLoadInstance,
     MinimizeLocationChangeInstance, MinimizeRoomChurnInstance, MinimizeWeekdayImbalanceInstance,
-    PatternAdherenceInstance, RoomTurnaroundBufferInstance, ShareInstance, ShareWindow,
+    PatternAdherenceInstance, RoomConsistencyInstance, RoomTurnaroundBufferInstance, ShareInstance,
+    ShareWindow,
 };
 use calendry_solver_core::ids::{GroupIdx, OfferingIdx, PersonIdx, RoomIdx, SlotIdx};
 use calendry_solver_core::preferences::{Preference, PreferenceInstance};
@@ -1269,10 +1270,19 @@ fn build_constraints(input: &pb::SolverInput) -> Result<ConstraintSet, ConvertEr
                         .collect(),
                 });
             }
+            // Built — see `crate::aggregates::RoomConsistencyInstance`. Empty
+            // message: no params beyond id/kinds/weight.
             Some(Params::RoomConsistency(_)) => {
-                return Err(ConvertError::ConstraintTypeUnimplemented {
-                    constraint: c.id.clone(),
-                    constraint_type: "RoomConsistency",
+                if c.weight < 0.0 || c.weight.is_nan() {
+                    return Err(ConvertError::NegativeSoftWeight {
+                        constraint: c.id.clone(),
+                        weight: c.weight,
+                    });
+                }
+                set.room_consistency.push(RoomConsistencyInstance {
+                    id: c.id.clone(),
+                    kinds: c.applies_to_kinds.clone(),
+                    weight: c.weight,
                 });
             }
             // Built — see `crate::aggregates::MinimizeRoomChurnInstance`.

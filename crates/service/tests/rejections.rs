@@ -404,34 +404,6 @@ fn lecturer_consistency_is_unimplemented_not_invalid() {
     assert_eq!(code_of(&e), Code::Unimplemented);
 }
 
-/// The P2 batch, staged together for one proto version bump: every type
-/// refuses as UNIMPLEMENTED except `GroupSizeFitsRoom` and
-/// `MaxConcurrentOnlineSessions` (each covered by their own test file, not
-/// here) — one test per type rather than a dozen near-identical functions.
-#[test]
-fn every_staged_p2_type_is_unimplemented_not_invalid() {
-    use pb::constraint_config::Params;
-
-    let cases: Vec<(&str, Params)> =
-        vec![("RoomConsistency", Params::RoomConsistency(pb::RoomConsistency {}))];
-
-    for (name, params) in cases {
-        let mut input = base_input();
-        input.constraints.push(enabled("c-staged", params));
-
-        let e = reject(&input, &scope(&[]));
-        assert!(
-            matches!(
-                &e,
-                ConvertError::ConstraintTypeUnimplemented { constraint, constraint_type }
-                    if constraint == "c-staged" && *constraint_type == name
-            ),
-            "{name}: {e}"
-        );
-        assert_eq!(code_of(&e), Code::Unimplemented, "{name}");
-    }
-}
-
 #[test]
 fn a_disabled_constraint_with_no_params_is_ignored() {
     // Only *enabled* constraints are read, so an unfinished row in the tenant's

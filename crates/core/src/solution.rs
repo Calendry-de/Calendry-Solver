@@ -932,6 +932,27 @@ impl SearchState {
             * problem.room_churn_weight
     }
 
+    /// The `RoomConsistency` cost DELTA of placing `who` at `span` — the
+    /// read-only preview, mirroring [`Self::scheduling_pattern_delta`]: keyed
+    /// by Offering with no day/week axis at all, so `who.offering` and
+    /// `who.room` (the PRIMARY Room only — an Offering has one "usual" Room,
+    /// not a set) are what matter, not `span`'s position.
+    pub fn room_consistency_delta(
+        &self,
+        problem: &Problem,
+        who: &Occupant<'_>,
+        span: &[SlotIdx],
+    ) -> f64 {
+        if span.is_empty() || !who.enforce.room_consistency {
+            return 0.0;
+        }
+        let (Some(offering), Some(room)) = (who.offering, who.room) else {
+            return 0.0;
+        };
+        self.aggregates.room_consistency_delta(offering, room) as f64
+            * problem.room_consistency_weight
+    }
+
     /// The `MaxWeeklyTeachingLoad` cost DELTA of placing `who` at `span` —
     /// the read-only preview, mirroring [`Self::max_daily_span_delta`].
     /// Keyed by `who.lecturers` and the WEEK `span` falls in, not by day —
@@ -1096,6 +1117,15 @@ impl SearchState {
                     self.aggregates.add_block(offering, week);
                 } else {
                     self.aggregates.remove_block(offering, week);
+                }
+            }
+            if who.enforce.room_consistency
+                && let Some(room) = who.room
+            {
+                if add {
+                    self.aggregates.add_room_consistency(offering, room);
+                } else {
+                    self.aggregates.remove_room_consistency(offering, room);
                 }
             }
         }
@@ -1275,6 +1305,11 @@ impl SearchState {
                     .aggregates
                     .block_ruin_cost(offering, problem.block_pattern_weight);
             }
+            if who.enforce.room_consistency {
+                score += self
+                    .aggregates
+                    .consistency_ruin_cost(offering, problem.room_consistency_weight);
+            }
         }
 
         if who.subtree_groups.is_empty() {
@@ -1409,6 +1444,16 @@ impl SearchState {
             return 0.0;
         }
         self.aggregates.churn_cost(problem.room_churn_weight)
+    }
+
+    /// What every currently-inconsistent Offering costs, at the configured
+    /// weight.
+    pub fn room_consistency_cost(&self, problem: &Problem) -> f64 {
+        if problem.room_consistency_weight == 0.0 {
+            return 0.0;
+        }
+        self.aggregates
+            .consistency_cost(problem.room_consistency_weight)
     }
 
     /// What the currently over-cap weekly teaching loads cost, at the

@@ -297,6 +297,28 @@ impl MinimizeRoomChurnInstance {
     }
 }
 
+/// One configured `RoomConsistency` rule. No parameters beyond the usual
+/// id/kinds/weight: an Offering's "usual" Room is the MODAL one among its
+/// own currently-placed Sessions, priced per Session that differs from it.
+/// Keyed by OFFERING rather than Group or Person — an aggregate over the
+/// WHOLE TERM, unbounded by day or week, the same new shape
+/// `LecturerConsistency` is staged for but has no prerequisite blocker: Room
+/// assignment is not gated behind an unimplemented pool-selection feature
+/// the way lecturer choice is.
+#[derive(Clone, Debug)]
+pub struct RoomConsistencyInstance {
+    pub id: String,
+    pub kinds: Vec<String>,
+    pub weight: f64,
+}
+
+impl RoomConsistencyInstance {
+    #[inline]
+    pub fn covers(&self, kind: &str) -> bool {
+        self.kinds.is_empty() || self.kinds.iter().any(|k| k == kind)
+    }
+}
+
 /// One configured `DistributedPatternAdherence` or `BlockPatternAdherence` —
 /// identical shape, kept as one type since both are just "id, kind scope,
 /// weight" with the actual per-pattern logic living in `Aggregates` instead.
@@ -580,6 +602,21 @@ pub struct Aggregates {
     /// configured, never `0`.
     n_rooms: usize,
     churn_rules: Vec<MinimizeRoomChurnInstance>,
+
+    /// `[offering * n_rooms + room]` — occurrence count of this Offering's
+    /// currently-placed Sessions in each Room. `RoomConsistency`'s own
+    /// histogram; the MODAL entry in one Offering's row is its "usual" Room.
+    consistency_room: Vec<u32>,
+    /// Running sum, over every Offering, of Sessions NOT in that Offering's
+    /// current modal Room — `total_placed - modal_count` per Offering,
+    /// maintained as a delta exactly like `group_gap_total`. Unlike the
+    /// distinct-count types above, this needs a full row rescan on EVERY
+    /// mutation (not only some), since removing the modal Room's own
+    /// occurrence can hand the mode to a different Room entirely — but
+    /// `n_rooms` is the same bounded width `location_group_loc`'s inner axis
+    /// already accepts a rescan over.
+    consistency_excess_total: u32,
+    consistency_rules: Vec<RoomConsistencyInstance>,
 }
 
 impl Aggregates {
@@ -609,6 +646,7 @@ impl Aggregates {
         turnaround_rules: Vec<RoomTurnaroundBufferInstance>,
         n_rooms: usize,
         churn_rules: Vec<MinimizeRoomChurnInstance>,
+        consistency_rules: Vec<RoomConsistencyInstance>,
     ) -> Self {
         let groups = n_groups.max(1);
         let counters = rules
@@ -707,6 +745,8 @@ impl Aggregates {
             .map(|r| r.max_rooms_per_week)
             .min()
             .unwrap_or(u32::MAX);
+
+        let track_consistency = !consistency_rules.is_empty();
 
         Self {
             online_day: vec![0; groups * n_days.max(1)],
@@ -833,6 +873,13 @@ impl Aggregates {
             churn_excess_total: 0,
             n_rooms: rooms,
             churn_rules,
+            consistency_room: if track_consistency {
+                vec![0; offerings * rooms]
+            } else {
+                Vec::new()
+            },
+            consistency_excess_total: 0,
+            consistency_rules,
         }
     }
 
@@ -2629,6 +2676,100 @@ impl Aggregates {
         cost
     }
 
+    // -- room consistency ----------------------------------------------------
+
+    pub fn consistency_rules(&self) -> &[RoomConsistencyInstance] {
+        &self.consistency_rules
+    }
+
+    /// Sessions NOT in the modal Room, for one Offering's row already
+    /// narrowed to its `n_rooms` cells — `total - max`. `0` for an empty row
+    /// (nothing placed yet) or one already unanimous.
+    #[inline]
+    fn consistency_excess(row_cells: &[u32]) -> u32 {
+        let total: u32 = row_cells.iter().sum();
+        let modal = row_cells.iter().copied().max().unwrap_or(0);
+        total - modal
+    }
+
+    /// The excess DELTA `RoomConsistency` would experience if this Offering
+    /// gained one more Session in `room` — the read-only preview, mirroring
+    /// [`Self::group_span_delta`]. One row scan, no allocation: adding one
+    /// occurrence always raises the total by 1, and raises the max only when
+    /// `room`'s own count was already (tied for) the max.
+    pub fn room_consistency_delta(&self, offering: OfferingIdx, room: RoomIdx) -> i64 {
+        if self.consistency_room.is_empty() {
+            return 0;
+        }
+        let row_start = offering.get() * self.n_rooms;
+        let row = &self.consistency_room[row_start..row_start + self.n_rooms];
+        let total: u32 = row.iter().sum();
+        let max = row.iter().copied().max().unwrap_or(0);
+        let before = total - max;
+        let after_total = total + 1;
+        let after_max = max.max(row[room.get()] + 1);
+        let after = after_total - after_max;
+        i64::from(after) - i64::from(before)
+    }
+
+    /// Mark `room` as this Offering's Session, updating
+    /// `consistency_excess_total` by the exact delta. A full row rescan on
+    /// EVERY call, not only some — see [`Self::consistency_excess_total`]'s
+    /// own doc for why the modal Room cannot be tracked with a cheaper
+    /// incremental rule the way the distinct-count types above are.
+    pub fn add_room_consistency(&mut self, offering: OfferingIdx, room: RoomIdx) {
+        if self.consistency_room.is_empty() {
+            return;
+        }
+        let row_start = offering.get() * self.n_rooms;
+        let row_end = row_start + self.n_rooms;
+        let before = Self::consistency_excess(&self.consistency_room[row_start..row_end]);
+        self.consistency_room[row_start + room.get()] += 1;
+        let after = Self::consistency_excess(&self.consistency_room[row_start..row_end]);
+        self.consistency_excess_total = (i64::from(self.consistency_excess_total)
+            + i64::from(after)
+            - i64::from(before)) as u32;
+    }
+
+    pub fn remove_room_consistency(&mut self, offering: OfferingIdx, room: RoomIdx) {
+        if self.consistency_room.is_empty() {
+            return;
+        }
+        let row_start = offering.get() * self.n_rooms;
+        let row_end = row_start + self.n_rooms;
+        let before = Self::consistency_excess(&self.consistency_room[row_start..row_end]);
+        self.consistency_room[row_start + room.get()] =
+            self.consistency_room[row_start + room.get()].saturating_sub(1);
+        let after = Self::consistency_excess(&self.consistency_room[row_start..row_end]);
+        self.consistency_excess_total = (i64::from(self.consistency_excess_total)
+            + i64::from(after)
+            - i64::from(before)) as u32;
+    }
+
+    /// What every currently-inconsistent Offering costs, at the configured
+    /// weight — O(1), read straight off `consistency_excess_total` rather
+    /// than rescanned.
+    pub fn consistency_cost(&self, weight: f64) -> f64 {
+        self.consistency_excess_total as f64 * weight
+    }
+
+    /// Whether this Offering's Sessions are currently unanimous on one Room —
+    /// for `ruin_worst`'s attribution: a flat charge for any occupant of an
+    /// Offering that currently has ANY excess, the same attribution
+    /// convention `distributed_ruin_cost`/`block_ruin_cost` use.
+    pub fn consistency_ruin_cost(&self, offering: OfferingIdx, weight: f64) -> f64 {
+        if weight == 0.0 || self.consistency_room.is_empty() {
+            return 0.0;
+        }
+        let row_start = offering.get() * self.n_rooms;
+        let row_end = row_start + self.n_rooms;
+        if Self::consistency_excess(&self.consistency_room[row_start..row_end]) > 0 {
+            weight
+        } else {
+            0.0
+        }
+    }
+
     // -- scheduling pattern ---------------------------------------------------
 
     pub fn distributed_rules(&self) -> &[PatternAdherenceInstance] {
@@ -3017,6 +3158,7 @@ mod tests {
             vec![],
             1,
             vec![],
+            vec![],
         );
         let g = [GroupIdx(0)];
 
@@ -3060,6 +3202,7 @@ mod tests {
             1,
             vec![],
             1,
+            vec![],
             vec![],
         );
         let g = [GroupIdx(0)];
@@ -3114,6 +3257,7 @@ mod tests {
             vec![],
             1,
             vec![],
+            vec![],
         );
         load(&mut term);
         assert_eq!(term.share_violations(), 0);
@@ -3143,6 +3287,7 @@ mod tests {
             1,
             vec![],
             1,
+            vec![],
             vec![],
         );
         load(&mut week);
@@ -3180,6 +3325,7 @@ mod tests {
             1,
             vec![],
             1,
+            vec![],
             vec![],
         );
         a.apply_share("staff_meeting", &[GroupIdx(0)], 0, true, true);
@@ -3225,6 +3371,7 @@ mod tests {
             1,
             vec![],
             1,
+            vec![],
             vec![],
         );
         let g = [GroupIdx(0)];
@@ -3275,6 +3422,7 @@ mod tests {
             vec![],
             1,
             vec![],
+            vec![],
         );
         let g = [GroupIdx(0)];
         a.apply_share("lecture", &g, 0, true, true);
@@ -3316,6 +3464,7 @@ mod tests {
             1,
             vec![],
             1,
+            vec![],
             vec![],
         );
         let g = [GroupIdx(0)];
@@ -3365,6 +3514,7 @@ mod tests {
             vec![],
             1,
             vec![],
+            vec![],
         );
         let g = [GroupIdx(0)];
 
@@ -3412,6 +3562,7 @@ mod tests {
             vec![],
             1,
             vec![],
+            vec![],
         );
         let g = [GroupIdx(0)];
         a.add_group_compactness(&g, 0, &[SlotIdx(0)]);
@@ -3445,6 +3596,7 @@ mod tests {
             1,
             vec![],
             1,
+            vec![],
             vec![],
         );
         let p = [PersonIdx(0)];
@@ -3486,6 +3638,7 @@ mod tests {
             vec![],
             1,
             vec![],
+            vec![],
         );
         a.add_person_compactness(&[PersonIdx(0)], 0, &[SlotIdx(0), SlotIdx(3)]);
         assert_eq!(a.compactness_cost(0.0, 1.0), 0.0, "Person axis was never configured");
@@ -3521,6 +3674,7 @@ mod tests {
             1,
             vec![],
             1,
+            vec![],
             vec![],
         );
         let g = [GroupIdx(0)];
@@ -3564,6 +3718,7 @@ mod tests {
             1,
             vec![],
             1,
+            vec![],
             vec![],
         );
         let g = [GroupIdx(0)];
@@ -3615,6 +3770,7 @@ mod tests {
             vec![],
             1,
             vec![],
+            vec![],
         );
         let o = OfferingIdx(0);
         a.add_distributed(o, 0);
@@ -3649,6 +3805,7 @@ mod tests {
             1,
             vec![],
             1,
+            vec![],
             vec![],
         );
         let o = OfferingIdx(0);
@@ -3688,6 +3845,7 @@ mod tests {
             vec![],
             1,
             vec![],
+            vec![],
         );
         let o = OfferingIdx(0);
         a.add_distributed(o, 0);
@@ -3726,6 +3884,7 @@ mod tests {
             vec![],
             1,
             vec![],
+            vec![],
         );
         a.add_distributed(OfferingIdx(0), 0);
         a.add_distributed(OfferingIdx(0), 1);
@@ -3761,6 +3920,7 @@ mod tests {
             1,
             vec![],
             1,
+            vec![],
             vec![],
         );
         let o = OfferingIdx(0);
@@ -3804,6 +3964,7 @@ mod tests {
             vec![],
             1,
             vec![],
+            vec![],
         );
         let o = OfferingIdx(0);
         a.add_block(o, 0);
@@ -3843,6 +4004,7 @@ mod tests {
             1,
             vec![],
             1,
+            vec![],
             vec![],
         );
         a.add_distributed(OfferingIdx(0), 0);
