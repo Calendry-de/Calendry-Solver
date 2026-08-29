@@ -31,8 +31,9 @@ use calendry_solver_core::aggregates::{
 use calendry_solver_core::ids::{GroupIdx, OfferingIdx, PersonIdx, RoomIdx, SlotIdx};
 use calendry_solver_core::preferences::{Preference, PreferenceInstance};
 use calendry_solver_core::problem::{
-    ConstraintInstance, ConstraintSet, FixedSpec, Immovable, OfferingSpec, PlacementVar, Problem,
-    ProblemSpec, Room, SchedulingPattern, ScopeSpec, Unavailability, classify_immovable,
+    ConstraintInstance, ConstraintSet, FixedSpec, Immovable, MaxConcurrentOnlineInstance,
+    OfferingSpec, PlacementVar, Problem, ProblemSpec, Room, SchedulingPattern, ScopeSpec,
+    Unavailability, classify_immovable,
 };
 use calendry_solver_core::slots::{SlotTable, WeekKind, WeekSpec};
 use calendry_solver_core::soft::{SoftInstance, SoftParams};
@@ -1183,11 +1184,15 @@ fn build_constraints(input: &pb::SolverInput) -> Result<ConstraintSet, ConvertEr
                     constraint_type: "RoomTurnaroundBuffer",
                 });
             }
-            Some(Params::MaxConcurrentOnlineSessions(_)) => {
-                return Err(ConvertError::ConstraintTypeUnimplemented {
-                    constraint: c.id.clone(),
-                    constraint_type: "MaxConcurrentOnlineSessions",
-                });
+            // Built — see `crate::problem::Problem::max_concurrent_online`.
+            // `kinds` is intentionally not read: every online Session counts
+            // toward this cap, whatever kind it realizes.
+            Some(Params::MaxConcurrentOnlineSessions(p)) => {
+                set.max_concurrent_online_sessions
+                    .push(MaxConcurrentOnlineInstance {
+                        id: c.id.clone(),
+                        max_concurrent: p.max_concurrent,
+                    });
             }
             // Built — see `crate::problem::ConstraintSet::group_size_fits_room`.
             // No parameters: the values (`Group.size`, `Room.capacity`)

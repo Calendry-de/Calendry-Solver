@@ -48,6 +48,7 @@ pub enum ConstraintType {
     MaxOnlineShare,
     PersonPreferenceFit,
     GroupSizeFitsRoom,
+    MaxConcurrentOnlineSessions,
 }
 
 impl ConstraintType {
@@ -65,6 +66,7 @@ impl ConstraintType {
             Self::MaxOnlineShare => "MaxOnlineShare",
             Self::PersonPreferenceFit => "PersonPreferenceFit",
             Self::GroupSizeFitsRoom => "GroupSizeFitsRoom",
+            Self::MaxConcurrentOnlineSessions => "MaxConcurrentOnlineSessions",
         }
     }
 }
@@ -136,8 +138,61 @@ pub fn evaluate_hard(problem: &Problem, solution: &Solution) -> Vec<Violation> {
     lecturer_veto(problem, solution, &mut out);
     group_veto(problem, solution, &mut out);
     group_size_fits_room(problem, solution, &mut out);
+    max_concurrent_online_sessions(problem, solution, &mut out);
     aggregates(problem, solution, &mut out);
     out
+}
+
+/// HARD, filterable. Reports a slot where more than `max_concurrent` online
+/// Sessions coexist — pairwise-adjacent to the four structural
+/// double-booking types (a COUNT cap rather than exclusivity), so it walks
+/// `collect_views` the same way `structural` does: both fixed and placed
+/// occupancy count, since a Session's "online-ness" is a static property of
+/// its Room, not something only the search's own placements have.
+///
+/// The search itself cannot create this violation once configured (see
+/// `Occupancy::is_free`); this exists for the same reason `structural`'s
+/// pairwise checks still run independently — the authoritative check must
+/// not simply trust the constructive heuristic, and locked/fixed occupancy
+/// the caller supplied is never filtered at all.
+pub fn max_concurrent_online_sessions(
+    problem: &Problem,
+    solution: &Solution,
+    out: &mut Vec<Violation>,
+) {
+    let Some(cap) = problem.max_concurrent_online else {
+        return;
+    };
+    let views = collect_views(problem, solution);
+
+    let mut count = vec![0u32; problem.slots.len()];
+    for v in &views {
+        if v.room.is_some_and(|r| problem.rooms[r.get()].is_virtual) {
+            for &s in &v.span {
+                count[s.get()] += 1;
+            }
+        }
+    }
+
+    // Deterministic ordering: slots ascending, same discipline every other
+    // phase here follows.
+    for (i, &n) in count.iter().enumerate() {
+        if n > cap {
+            let f = problem.slots.flags(SlotIdx(i as u32));
+            out.push(Violation {
+                constraint_id: problem
+                    .constraints
+                    .max_concurrent_online_sessions
+                    .first()
+                    .map(|c| c.id.clone())
+                    .unwrap_or_default(),
+                constraint_type: ConstraintType::MaxConcurrentOnlineSessions,
+                session_ids: Vec::new(),
+                offering_ids: Vec::new(),
+                detail: format!("{n} concurrent online Sessions at {}, cap is {cap}", SlotLabel(f)),
+            });
+        }
+    }
 }
 
 /// HARD, validation-shaped. Cross-checks a placement's Room capacity

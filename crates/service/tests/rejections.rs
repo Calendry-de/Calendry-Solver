@@ -405,10 +405,9 @@ fn lecturer_consistency_is_unimplemented_not_invalid() {
 }
 
 /// The P2 batch, staged together for one proto version bump: every type
-/// refuses as UNIMPLEMENTED except `GroupSizeFitsRoom` (covered by its own
-/// `crates/core/tests/group_size_fits_room.rs` /
-/// `crates/service/tests/group_size_fits_room.rs`, not here) — one test per
-/// type rather than 13 near-identical functions.
+/// refuses as UNIMPLEMENTED except `GroupSizeFitsRoom` and
+/// `MaxConcurrentOnlineSessions` (each covered by their own test file, not
+/// here) — one test per type rather than a dozen near-identical functions.
 #[test]
 fn every_staged_p2_type_is_unimplemented_not_invalid() {
     use pb::constraint_config::Params;
@@ -443,10 +442,6 @@ fn every_staged_p2_type_is_unimplemented_not_invalid() {
         (
             "RoomTurnaroundBuffer",
             Params::RoomTurnaroundBuffer(pb::RoomTurnaroundBuffer::default()),
-        ),
-        (
-            "MaxConcurrentOnlineSessions",
-            Params::MaxConcurrentOnlineSessions(pb::MaxConcurrentOnlineSessions::default()),
         ),
     ];
 

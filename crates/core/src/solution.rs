@@ -253,6 +253,12 @@ struct Occupancy {
     lecturer: BitMatrix,
     attendee: BitMatrix,
     group: BitMatrix,
+    /// Per-slot count of currently-marked ONLINE Sessions (primary Room
+    /// virtual). Meaningful only when [`Problem::max_concurrent_online`] is
+    /// `Some`; maintained unconditionally regardless since the counter itself
+    /// is cheap and a `bool` guard at every call site would be one more thing
+    /// to keep in sync with `is_free`'s own check.
+    online: Vec<u32>,
 }
 
 impl Occupancy {
@@ -296,7 +302,17 @@ impl Occupancy {
             lecturer: BitMatrix::new(problem.persons.len().max(1), slots),
             attendee: BitMatrix::new(problem.persons.len().max(1), slots),
             group: BitMatrix::new(problem.groups.len().max(1), slots),
+            online: vec![0; slots],
         }
+    }
+
+    /// Whether `who`'s PRIMARY Room is virtual — the same "online" reading
+    /// `MinimizeOnline`/day-mix already use, and the same reason a multi-Room
+    /// Session is never online (ADR: multi-room capacity sums, but "online"
+    /// stays a property of the primary Room alone).
+    #[inline]
+    fn is_online(problem: &Problem, who: &Occupant<'_>) -> bool {
+        who.room.is_some_and(|r| problem.rooms[r.get()].is_virtual)
     }
 
     /// Mark a Session busy.
@@ -306,6 +322,7 @@ impl Occupancy {
     /// ancestors. Only one side expands; see [`crate::groups`].
     fn mark(&mut self, problem: &Problem, who: &Occupant<'_>, span: &[SlotIdx]) {
         let rooms = Self::exclusive_rooms(problem, who);
+        let online = Self::is_online(problem, who);
         for &s in span {
             let c = s.get();
             if who.enforce.room {
@@ -328,11 +345,15 @@ impl Occupancy {
                     self.attendee.set(p.get(), c);
                 }
             }
+            if online {
+                self.online[c] += 1;
+            }
         }
     }
 
     fn unmark(&mut self, problem: &Problem, who: &Occupant<'_>, span: &[SlotIdx]) {
         let rooms = Self::exclusive_rooms(problem, who);
+        let online = Self::is_online(problem, who);
         for &s in span {
             let c = s.get();
             if who.enforce.room {
@@ -355,6 +376,10 @@ impl Occupancy {
                     self.attendee.clear(p.get(), c);
                 }
             }
+            if online {
+                debug_assert!(self.online[c] > 0, "unmark must follow a balanced mark");
+                self.online[c] -= 1;
+            }
         }
     }
 
@@ -365,6 +390,9 @@ impl Occupancy {
     /// but neither is in the other's closure.
     fn is_free(&self, problem: &Problem, who: &Occupant<'_>, span: &[SlotIdx]) -> bool {
         let rooms = Self::exclusive_rooms(problem, who);
+        let online_cap = problem
+            .max_concurrent_online
+            .filter(|_| Self::is_online(problem, who));
         for &s in span {
             let c = s.get();
             if who.enforce.room
@@ -382,6 +410,11 @@ impl Occupancy {
                 return false;
             }
             if who.enforce.person && who.attendees.iter().any(|p| self.attendee.get(p.get(), c)) {
+                return false;
+            }
+            if let Some(cap) = online_cap
+                && self.online[c] >= cap
+            {
                 return false;
             }
         }

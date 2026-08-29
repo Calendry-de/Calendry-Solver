@@ -223,6 +223,7 @@ pub fn all_constraints() -> ConstraintSet {
         // Same asymmetry, same precedent: every fixture's Group defaults to
         // `size: 0`, so this can never fire unless a test sets a real size.
         group_size_fits_room: inst("c-group-size"),
+        max_concurrent_online_sessions: Vec::new(),
         // Weight 5 mirrors the app catalogue's `defaultWeight` for this type,
         // so a fixture's day-mix cost reads the same as a real tenant's.
         online_onsite_same_day: day_mix("c-mix", 5.0),

@@ -249,6 +249,21 @@ pub struct ConstraintSet {
     /// against its Offering's own Groups' summed `Group.size` — see
     /// [`crate::constraints::group_size_fits_room`].
     pub group_size_fits_room: Vec<ConstraintInstance>,
+    /// HARD, filterable. Caps concurrent online Sessions tenant-wide,
+    /// independent of kind — see [`Problem::max_concurrent_online`], the
+    /// derived scalar the search actually enforces.
+    pub max_concurrent_online_sessions: Vec<MaxConcurrentOnlineInstance>,
+}
+
+/// One `MaxConcurrentOnlineSessions` instance. Not a plain
+/// [`ConstraintInstance`]: the cap value is a message field
+/// (`max_concurrent`), not `ConstraintConfig.weight`, and this type does not
+/// read `kinds` at all — every online Session counts regardless of kind, by
+/// design.
+#[derive(Clone, Debug)]
+pub struct MaxConcurrentOnlineInstance {
+    pub id: String,
+    pub max_concurrent: u32,
 }
 
 fn any_covers(list: &[ConstraintInstance], kind: &str) -> bool {
@@ -751,6 +766,13 @@ pub struct Problem {
     /// per mixed `(group, day)` cell. Zero when the type is not configured, so
     /// the term costs nothing rather than needing a branch at every use.
     pub day_mix_weight: f64,
+    /// HARD. The tightest `max_concurrent` among every enabled
+    /// `MaxConcurrentOnlineSessions` instance — see
+    /// [`crate::solution::SearchState`]'s occupancy index, which enforces it
+    /// as a filter. `None` when not configured: no cap, today's behavior.
+    /// Kind-independent by design: every online Session counts toward it,
+    /// whatever `kind` it realizes.
+    pub max_concurrent_online: Option<u32>,
     /// Bias against disturbing a movable out-of-scope placement. See
     /// [`ProblemSpec::movement_weight`] and [`Problem::movement_cost`].
     pub movement_weight: f64,
@@ -936,6 +958,16 @@ impl Problem {
             .map(|i| i.weight)
             .sum();
 
+        // The TIGHTEST cap among every enabled instance — multiple caps on
+        // one tenant-wide resource compose as "whichever binds hardest",
+        // never as a sum. `None` (today's behavior) when nothing is
+        // configured.
+        let max_concurrent_online: Option<u32> = constraints
+            .max_concurrent_online_sessions
+            .iter()
+            .map(|i| i.max_concurrent)
+            .min();
+
         let compactness_group_weight: f64 = constraints
             .compactness
             .iter()
@@ -1051,6 +1083,7 @@ impl Problem {
             aggregate_template,
             hard_penalty,
             day_mix_weight,
+            max_concurrent_online,
             movement_weight,
             compactness_group_weight,
             compactness_person_weight,

@@ -792,6 +792,7 @@ fn build_constraints(params: &InstanceParams, slots: &SlotTable) -> ConstraintSe
         // firing rate here is uncalibrated noise rather than a signal worth
         // asserting on in the benchmark baseline.
         group_size_fits_room: Vec::new(),
+        max_concurrent_online_sessions: Vec::new(),
         // Weight 5 mirrors the app catalogue's `defaultWeight`, so generated
         // benchmark instances price a mixed day the way a real tenant does.
         online_onsite_same_day: vec![DayMixInstance {
