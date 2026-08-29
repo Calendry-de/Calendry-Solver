@@ -4,15 +4,28 @@ Status, not decisions. The decision this records is
 [ADR-0003](adr/0003-proto-schema-as-a-pinned-submodule.md) — the schema lives in
 a separate repo, consumed as a pinned submodule.
 
-## Current pin: `992563f`, awaiting the `v0.8.0` tag
+## Current pin: `992563f` = `v0.8.0`
 
-Submodule `vendor/calendry-proto` is pinned to `992563f` — the `Group.blackouts`
-/ `GroupVeto` commit — which is **not yet tagged**. That is a deliberate,
-temporary state and the only one of its kind in this repo's history: the schema
-change and the evaluator that reads it were built together, so there was no
-version to pin to while the work was in flight. Tag `v0.8.0` on that commit and
-re-pin; until then this repo is pinned to a commit rather than a release, which
-the "a TAG, not a branch tip" rule in `CLAUDE.md` otherwise forbids.
+**Correction, 2026-08-29:** this section previously said `992563f` was "not yet
+tagged" and asked for `v0.8.0` to be cut. That was already stale when read —
+the tag exists (`git show v0.8.0` resolves to `992563f`, tagged minutes after
+the commit) and always had; the entry just never got updated once the tag
+landed. Caught while adding `PlacedSession.placement_ref` below, which needs a
+pin of its own — checked directly against the submodule rather than assumed
+from this file, since this is exactly the drift `CLAUDE.md` warns about for a
+tracked-gap entry.
+
+A `v0.9.0` is pending for `PlacedSession.placement_ref` (field 9): additive,
+staged in `vendor/calendry-proto` but not yet committed/tagged/re-pinned. A
+`ConstraintViolation.session_ids` entry names a Session by
+`Problem::placement_label` — the real `session_id` when one exists, otherwise
+`offering_id#occurrence` for a Session this run invented. Nothing on the wire
+carried that same label for an invented Session, because `PlacedSession.
+session_id` is deliberately empty for one ("empty = newly created"), so a
+violation naming one pointed at nothing else in the response. `placement_ref`
+carries the label unconditionally, on every Session, so a violation is always
+resolvable to a concrete entry in `sessions` — this repo's part of "Solver
+violations naming Sessions the solver invented".
 
 Previously `6107eb2` = **`v0.7.0`**, up from `v0.2.0`. What arrived across those
 that this repo cares about:

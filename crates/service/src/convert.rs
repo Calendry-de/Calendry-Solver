@@ -838,6 +838,11 @@ pub fn build_output(
 
         sessions.push(pb::PlacedSession {
             session_id: var.existing_session_id.clone().unwrap_or_default(),
+            // Same value a hard violation's `session_ids` carries for this
+            // placement (`Problem::placement_label`), so a violation naming a
+            // Session this run invented — whose `session_id` above is
+            // deliberately empty — still resolves to this entry.
+            placement_ref: problem.placement_label(p),
             offering_id: offering.id.clone(),
             start_slot: Some(pb::SlotRef { week: f.week, day: f.iso_weekday, block: f.block }),
             duration_blocks: offering.duration_blocks,

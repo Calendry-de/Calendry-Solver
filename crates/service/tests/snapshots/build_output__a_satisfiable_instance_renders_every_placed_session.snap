@@ -23,6 +23,7 @@ SolverOutput {
                 "g1",
             ],
             person_ids: [],
+            placement_ref: "o1#0",
         },
         PlacedSession {
             session_id: "",
@@ -43,6 +44,7 @@ SolverOutput {
                 "g1",
             ],
             person_ids: [],
+            placement_ref: "o1#1",
         },
         PlacedSession {
             session_id: "",
@@ -63,6 +65,7 @@ SolverOutput {
                 "g1",
             ],
             person_ids: [],
+            placement_ref: "o1#2",
         },
     ],
     hard_violations: [],
