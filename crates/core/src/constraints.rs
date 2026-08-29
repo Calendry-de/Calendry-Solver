@@ -43,6 +43,7 @@ pub enum ConstraintType {
     PersonDoubleBooking,
     ExactFrequency,
     LecturerVeto,
+    GroupVeto,
     OnlineOnsiteSameDay,
     MaxOnlineShare,
     PersonPreferenceFit,
@@ -58,6 +59,7 @@ impl ConstraintType {
             Self::PersonDoubleBooking => "PersonDoubleBooking",
             Self::ExactFrequency => "ExactFrequency",
             Self::LecturerVeto => "LecturerVeto",
+            Self::GroupVeto => "GroupVeto",
             Self::OnlineOnsiteSameDay => "OnlineOnsiteSameDay",
             Self::MaxOnlineShare => "MaxOnlineShare",
             Self::PersonPreferenceFit => "PersonPreferenceFit",
@@ -118,6 +120,7 @@ pub fn evaluate_hard(problem: &Problem, solution: &Solution) -> Vec<Violation> {
     exact_frequency(problem, solution, &mut out);
     structural(problem, solution, &mut out);
     lecturer_veto(problem, solution, &mut out);
+    group_veto(problem, solution, &mut out);
     aggregates(problem, solution, &mut out);
     out
 }
@@ -165,6 +168,70 @@ pub fn lecturer_veto(problem: &Problem, solution: &Solution, out: &mut Vec<Viola
                     offering_ids: vec![o.id.clone()],
                     detail: format!(
                         "lecturer '{who}' is unavailable at week {} day {} block {}",
+                        f.week, f.iso_weekday, f.block
+                    ),
+                });
+                break;
+            }
+        }
+    }
+}
+
+/// HARD, unary. A Session is never placed during a blackout of a Group
+/// attending it.
+///
+/// `lecturer_veto` above, one entity across, and deliberately a separate
+/// function rather than a parameter of it: the two are separately enableable, a
+/// violation has to name which entity was away, and merging them would make
+/// "the cohort is on placement" indistinguishable from "the lecturer is on
+/// leave" in the report a timetabler reads.
+///
+/// The blackout of a Group binds that Group and its DESCENDANTS, so the mask
+/// this reads was built by walking UP from the Session's own Groups. Getting
+/// that direction backwards is invisible on a flat hierarchy — see
+/// [`crate::groups::GroupClosure::expand_ancestry`].
+pub fn group_veto(problem: &Problem, solution: &Solution, out: &mut Vec<Violation>) {
+    if problem.constraints.group_veto.is_empty() {
+        return;
+    }
+    for instance in &problem.constraints.group_veto {
+        for p in problem.placement_ids() {
+            let Some(pl) = solution.get(p) else { continue };
+            let o = problem.offering_of(p);
+            if !instance.covers(&o.kind) {
+                continue;
+            }
+            let Some(span) = problem.slots.span(pl.start, o.duration_blocks) else {
+                continue;
+            };
+            for &s in &span {
+                if !o.group_veto_slots.contains(s.get()) {
+                    continue;
+                }
+                let f = problem.slots.flags(s);
+                // Reported from the ancestry set, not from `own_groups`: the
+                // Group that declared the blackout may be an ancestor of the
+                // one actually attached, and naming the attached child would
+                // send a timetabler to a Group with no window on it.
+                let who = problem
+                    .closure
+                    .expand_ancestry(&o.own_groups)
+                    .into_iter()
+                    .find(|g| {
+                        problem.groups[g.get()]
+                            .blackouts
+                            .iter()
+                            .any(|b| b.matches(f))
+                    })
+                    .map(|g| problem.groups[g.get()].id.clone())
+                    .unwrap_or_default();
+                out.push(Violation {
+                    constraint_id: instance.id.clone(),
+                    constraint_type: ConstraintType::GroupVeto,
+                    session_ids: vec![problem.placement_label(p)],
+                    offering_ids: vec![o.id.clone()],
+                    detail: format!(
+                        "group '{who}' is unavailable at week {} day {} block {}",
                         f.week, f.iso_weekday, f.block
                     ),
                 });

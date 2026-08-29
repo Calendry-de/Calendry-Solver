@@ -57,6 +57,7 @@ Check any change against these. Each links to the decision behind it.
 - [ ] Group conflict checks use precomputed ancestor+descendant sets, never a live tree walk
 - [ ] Move evaluation stays behind the trait boundary — [ADR-0013](docs/adr/0013-move-evaluation-behind-a-trait.md)
 - [ ] No soft term is ever negative; a preference charges what it did *not* meet — [ADR-0026](docs/adr/0026-personpreferencefit-charges-the-unmet-fraction.md)
+- [ ] Group blackouts resolve through `expand_ancestry`, never `expand_subtree`/`expand_conflict` — [ADR-0027](docs/adr/0027-group-blackouts-inherit-downward.md)
 - [ ] If lecturer-pool selection is ever built, `preferences.rs`'s table key is wrong — [ADR-0026](docs/adr/0026-personpreferencefit-charges-the-unmet-fraction.md)
 - [ ] The solver tolerates infeasible input; the app's "warn and allow" UX produces it
 - [ ] Tests use move budgets, never wall-clock budgets — [ADR-0006](docs/adr/0006-two-budgets-and-the-limit-of-determinism.md)
@@ -158,9 +159,13 @@ cd ../.. && git add vendor/calendry-proto && git commit -m "proto: bump to v0.3.
 ## What is built, and what is not
 
 **Every catalogue constraint type the schema defines is implemented.**
-`PersonPreferenceFit` was the last holdout — it arrived in schema v0.7.0 and was
-refused as `UNIMPLEMENTED` until it was built
+`PersonPreferenceFit` was the last of the original set — it arrived in schema
+v0.7.0 and was refused as `UNIMPLEMENTED` until it was built
 ([ADR-0026](docs/adr/0026-personpreferencefit-charges-the-unmet-fraction.md)).
+`GroupVeto` arrived with the `Group.blackouts` commit (tagged `v0.8.0` once
+published) and was built in the same change as the schema field it reads, so it
+never had an `UNIMPLEMENTED` phase
+([ADR-0027](docs/adr/0027-group-blackouts-inherit-downward.md)).
 What is still refused is one *parameter* of it: a non-empty
 `PersonPreferenceFit.roles`, because the counted set is lecturers only and
 widening it silently is the failure that decision exists to prevent. The
@@ -263,6 +268,16 @@ to both ([ADR-0025](docs/adr/0025-maxonlineshare-is-not-enforced-by-the-search.m
 * **Attendance, and both Group-scoped aggregate types**, propagate **downward
   only**. A cohort Session implicates its classes' members; a class Session does
   not implicate the cohort.
+* **`GroupVeto` blackouts bind downward, so the QUERY walks up.** A window
+  declared on a Group binds that Group and its descendants — a programme
+  suspended for a period takes its cohorts with it — so a Session attached to `g`
+  is blocked by the windows of `{g} ∪ ancestors(g)`. That is a third table,
+  `GroupClosure::expand_ancestry`, and neither of the two above: `subtree` points
+  the wrong way and `conflict` contains it plus every descendant, so both would
+  let one seminar's absence veto the lecture its whole cohort attends. All three
+  agree on a flat hierarchy, which is why the guard is a pair of tests over a
+  two-level fixture and an ADR — `expand_conflict` fails exactly ONE of the eight
+  tests in `group_veto.rs`. [ADR-0027](docs/adr/0027-group-blackouts-inherit-downward.md).
 * **`PersonPreferenceFit` does not propagate at all.** It counts a placement's
   *lecturers*, never its attendees, so no Group axis enters it. That is a scope
   decision rather than an omission: an attendee set averages ~65 people at

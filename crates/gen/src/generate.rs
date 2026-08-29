@@ -316,6 +316,11 @@ fn build_groups(params: &InstanceParams) -> Vec<Group> {
             parent: None,
             name: format!("Cohort {c}"),
             size: sizes.cohort,
+            // Generated instances declare no Group blackouts. Drawing them
+            // randomly here would change every preset's output, and the presets
+            // are the benchmark baseline — realism for this field belongs behind
+            // a gated parameter, the way per-person preferences were added.
+            blackouts: vec![],
         });
     }
     for c in 0..params.cohorts {
@@ -325,6 +330,7 @@ fn build_groups(params: &InstanceParams) -> Vec<Group> {
                 parent: Some(GroupIdx(cohort_idx(params, c))),
                 name: format!("Class {c}.{k}"),
                 size: sizes.class,
+                blackouts: vec![],
             });
         }
     }
@@ -336,6 +342,7 @@ fn build_groups(params: &InstanceParams) -> Vec<Group> {
                     parent: Some(GroupIdx(class_idx(params, c, k))),
                     name: format!("Seminar {c}.{k}.{s}"),
                     size: sizes.seminar,
+                    blackouts: vec![],
                 });
             }
         }
@@ -353,6 +360,7 @@ fn build_groups(params: &InstanceParams) -> Vec<Group> {
             parent: None,
             name: format!("Elective {e}"),
             size: sizes.class,
+            blackouts: vec![],
         });
     }
 
@@ -758,6 +766,12 @@ fn build_constraints(params: &InstanceParams, slots: &SlotTable) -> ConstraintSe
         person_double_booking: vec![all("c-person")],
         exact_frequency: vec![all("c-frequency")],
         lecturer_veto: vec![all("c-veto")],
+        // OFF in generated instances, unlike `lecturer_veto` above: no
+        // generated Group declares a blackout, so the mask would be empty and
+        // the rule inert. An enabled rule that can never fire is the
+        // `lecturer_veto` shape, and the benchmark baseline is the last place
+        // to put one.
+        group_veto: Vec::new(),
         // Weight 5 mirrors the app catalogue's `defaultWeight`, so generated
         // benchmark instances price a mixed day the way a real tenant does.
         online_onsite_same_day: vec![DayMixInstance {

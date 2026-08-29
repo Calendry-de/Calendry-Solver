@@ -94,7 +94,15 @@ pub fn person(id: &str) -> pb::Person {
 }
 
 pub fn group(id: &str) -> pb::Group {
-    pb::Group { id: id.into(), parent_id: String::new(), name: format!("Group {id}"), size: 20 }
+    pb::Group {
+        id: id.into(),
+        parent_id: String::new(),
+        name: format!("Group {id}"),
+        size: 20,
+        // No windows. `GroupVeto` is in the schema but no fixture here declares
+        // a Group absence — the ones that mean to say so build their own.
+        blackouts: vec![],
+    }
 }
 
 pub fn enabled(id: &str, params: pb::constraint_config::Params) -> pb::ConstraintConfig {

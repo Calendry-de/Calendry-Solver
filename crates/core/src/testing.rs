@@ -65,7 +65,13 @@ pub fn rooms(n: u32) -> Vec<Room> {
 }
 
 pub fn group(id: &str, parent: Option<u32>) -> Group {
-    Group { id: id.to_string(), parent: parent.map(GroupIdx), name: id.to_string(), size: 0 }
+    Group {
+        id: id.to_string(),
+        parent: parent.map(GroupIdx),
+        name: id.to_string(),
+        size: 0,
+        blackouts: vec![],
+    }
 }
 
 pub fn person(id: &str, groups: &[u32]) -> Person {
@@ -147,6 +153,14 @@ pub fn all_constraints() -> ConstraintSet {
         person_double_booking: inst("c-person"),
         exact_frequency: inst("c-freq"),
         lecturer_veto: inst("c-veto"),
+        // Included, unlike `person_preference_fit` below, and the asymmetry is
+        // the precedent `lecturer_veto` already set: a veto with no declared
+        // windows produces an EMPTY mask, so it cannot change any fixture's
+        // outcome — where an enabled soft rule with nothing to say still lands
+        // an inert term in the objective of most of the suite. Keeping it on
+        // here means every existing test also asserts that switching group
+        // vetoes on changes nothing when no Group has declared anything.
+        group_veto: inst("c-group-veto"),
         // Weight 5 mirrors the app catalogue's `defaultWeight` for this type,
         // so a fixture's day-mix cost reads the same as a real tenant's.
         online_onsite_same_day: day_mix("c-mix", 5.0),
@@ -725,6 +739,78 @@ use crate::problem::Unavailability;
 
 pub fn blackout(days: &[u32], blocks: &[u32], weeks: &[u32]) -> Unavailability {
     Unavailability { days: days.to_vec(), blocks: blocks.to_vec(), weeks: weeks.to_vec() }
+}
+
+/// A Group unavailable in the given calendar WEEKS, every day and block.
+///
+/// The shape an academic calendar actually produces: "this cohort runs the first
+/// six weeks of the Term" arrives as the COMPLEMENT of that range, with both
+/// other axes empty meaning "all values on that axis". Days and blocks are
+/// equally expressible — it is the same `Unavailability` a Person carries — but
+/// no caller has wanted a Group away only on Fridays, so this does not invent an
+/// interface for it.
+pub fn group_away_in_weeks(id: &str, parent: Option<u32>, weeks: &[u32]) -> Group {
+    group_with_blackouts(id, parent, vec![blackout(&[], &[], weeks)])
+}
+
+/// The general form, mirroring [`person_with_blackouts`].
+pub fn group_with_blackouts(id: &str, parent: Option<u32>, b: Vec<Unavailability>) -> Group {
+    Group { blackouts: b, ..group(id, parent) }
+}
+
+/// Structural checks with group vetoes switched OFF, for the inertness test.
+pub fn without_group_veto() -> ConstraintSet {
+    ConstraintSet { group_veto: Vec::new(), ..all_constraints() }
+}
+
+/// **The discriminating pair for blackout DIRECTION**, built as one hierarchy
+/// so both halves read from the same picture.
+///
+/// `cohort` (index 0) is the parent; `seminar` (index 1) is its child. The
+/// cohort is away on Monday. Two Offerings, each attached to one of them, on a
+/// grid whose only two slots are Monday and Saturday:
+///
+/// | Offering attached to | must avoid Monday? | why |
+/// |---|---|---|
+/// | `seminar` — the CHILD of the absent group | YES | a blackout binds descendants |
+/// | `cohort` — the group that is itself absent | YES | its own window |
+///
+/// and the mirror case, [`seminar_away_cohort_free`], where the CHILD is the one
+/// away and the parent's Offering must stay free to sit on Monday.
+///
+/// A flat fixture cannot tell `expand_ancestry` from `expand_subtree` or
+/// `expand_conflict`: with no hierarchy all three return the same set. This pair
+/// is the only reason the direction is pinned rather than assumed.
+pub fn cohort_away_seminar_bound() -> Problem {
+    assemble(ProblemSpec {
+        rooms: rooms(1),
+        groups: vec![
+            group_with_blackouts("cohort", None, vec![blackout(&[1], &[], &[])]),
+            group("seminar", Some(0)),
+        ],
+        offerings: vec![with_groups(offering("S", 1, &[0]), &[1])],
+        constraints: all_constraints(),
+        ..ProblemSpec::new(two_day_grid())
+    })
+}
+
+/// The mirror of [`cohort_away_seminar_bound`]: the CHILD is away, and the
+/// parent's Offering must remain placeable on Monday.
+///
+/// This is the half that fails against a downward expansion, and the failure it
+/// prevents is concrete: one seminar on block placement would veto the lecture
+/// its whole cohort attends.
+pub fn seminar_away_cohort_free() -> Problem {
+    assemble(ProblemSpec {
+        rooms: rooms(1),
+        groups: vec![
+            group("cohort", None),
+            group_with_blackouts("seminar", Some(0), vec![blackout(&[1], &[], &[])]),
+        ],
+        offerings: vec![with_groups(offering("S", 1, &[0]), &[0])],
+        constraints: all_constraints(),
+        ..ProblemSpec::new(two_day_grid())
+    })
 }
 
 pub fn person_with_blackouts(id: &str, groups: &[u32], b: Vec<Unavailability>) -> Person {
