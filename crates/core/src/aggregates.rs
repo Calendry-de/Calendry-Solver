@@ -114,6 +114,27 @@ impl CompactnessInstance {
     }
 }
 
+/// One configured `MaxConsecutiveBlocks` rule — the mirror image of
+/// `CompactnessInstance`: same `group`/`person` axis split, plus the run-
+/// length cap `Compactness` has no equivalent of.
+#[derive(Clone, Debug)]
+pub struct MaxConsecutiveInstance {
+    pub id: String,
+    /// Empty means all kinds.
+    pub kinds: Vec<String>,
+    pub weight: f64,
+    pub group: bool,
+    pub person: bool,
+    pub max_consecutive: u32,
+}
+
+impl MaxConsecutiveInstance {
+    #[inline]
+    pub fn covers(&self, kind: &str) -> bool {
+        self.kinds.is_empty() || self.kinds.iter().any(|k| k == kind)
+    }
+}
+
 /// One configured `DistributedPatternAdherence` or `BlockPatternAdherence` —
 /// identical shape, kept as one type since both are just "id, kind scope,
 /// weight" with the actual per-pattern logic living in `Aggregates` instead.
@@ -229,6 +250,31 @@ pub struct Aggregates {
 
     distributed_rules: Vec<PatternAdherenceInstance>,
     block_rules: Vec<PatternAdherenceInstance>,
+
+    /// `[group * n_slots + slot]` — the `MaxConsecutiveBlocks` counterpart of
+    /// `group_slot`: same shape, same reason it is a count rather than a
+    /// bitset, but read by `run_excess_u32` (longest RUN of consecutive
+    /// occupied blocks) instead of `gap_u32` (idle blocks between the ends).
+    /// A separate array from `group_slot` even though both track "is this
+    /// block occupied" — `Compactness` and `MaxConsecutiveBlocks` are
+    /// independently switchable, so one may be configured without the other.
+    run_group_slot: Vec<u32>,
+    /// The Person counterpart, `u8` for the same footprint reason
+    /// `person_slot` is.
+    run_person_slot: Vec<u8>,
+    /// The TIGHTEST `max_consecutive` among every enabled instance covering
+    /// each axis — multiple instances compose as "whichever binds hardest",
+    /// the same convention `Problem::max_concurrent_online` uses.
+    /// `u32::MAX` (never exceeded) when nothing configures that axis.
+    run_group_threshold: u32,
+    run_person_threshold: u32,
+    /// Running sum of excess-over-threshold blocks over every currently
+    /// occupied `(entity, day)` cell, maintained as a delta exactly like
+    /// `group_gap_total`/`person_gap_total`.
+    run_group_excess_total: u32,
+    run_person_excess_total: u32,
+
+    max_consecutive_rules: Vec<MaxConsecutiveInstance>,
 }
 
 impl Aggregates {
@@ -246,6 +292,7 @@ impl Aggregates {
         weekly_cells: usize,
         distributed_rules: Vec<PatternAdherenceInstance>,
         block_rules: Vec<PatternAdherenceInstance>,
+        max_consecutive_rules: Vec<MaxConsecutiveInstance>,
     ) -> Self {
         let groups = n_groups.max(1);
         let counters = rules
@@ -265,6 +312,21 @@ impl Aggregates {
         let offerings = n_offerings.max(1);
         let cells = weekly_cells.max(1);
         let weeks = n_weeks.max(1);
+
+        let track_run_group = max_consecutive_rules.iter().any(|r| r.group);
+        let track_run_person = max_consecutive_rules.iter().any(|r| r.person);
+        let run_group_threshold = max_consecutive_rules
+            .iter()
+            .filter(|r| r.group)
+            .map(|r| r.max_consecutive)
+            .min()
+            .unwrap_or(u32::MAX);
+        let run_person_threshold = max_consecutive_rules
+            .iter()
+            .filter(|r| r.person)
+            .map(|r| r.max_consecutive)
+            .min()
+            .unwrap_or(u32::MAX);
 
         Self {
             online_day: vec![0; groups * n_days.max(1)],
@@ -300,6 +362,17 @@ impl Aggregates {
             n_weeks: weeks,
             distributed_rules,
             block_rules,
+            run_group_slot: if track_run_group { vec![0; groups * slots] } else { Vec::new() },
+            run_person_slot: if track_run_person {
+                vec![0; n_persons.max(1) * slots]
+            } else {
+                Vec::new()
+            },
+            run_group_threshold,
+            run_person_threshold,
+            run_group_excess_total: 0,
+            run_person_excess_total: 0,
+            max_consecutive_rules,
         }
     }
 
@@ -654,6 +727,288 @@ impl Aggregates {
             for &p in persons {
                 let row = p.get() * self.n_slots;
                 if Self::gap_u8(&self.person_slot[row + start..row + end]) > 0 {
+                    cost += person_weight;
+                }
+            }
+        }
+        cost
+    }
+
+    // -- max consecutive blocks -----------------------------------------------
+
+    pub fn max_consecutive_rules(&self) -> &[MaxConsecutiveInstance] {
+        &self.max_consecutive_rules
+    }
+
+    /// Blocks charged over a run longer than `threshold`, for a row already
+    /// narrowed to one day's `blocks_per_day` cells — the mirror of
+    /// `gap_u32`: instead of idle blocks between the ends, this sums, over
+    /// every maximal run of CONSECUTIVE occupied blocks, how far past
+    /// `threshold` that run reaches. Zero when every run fits.
+    #[inline]
+    fn run_excess_u32(day_cells: &[u32], threshold: u32) -> u32 {
+        let mut total = 0u32;
+        let mut run = 0u32;
+        for &c in day_cells {
+            if c > 0 {
+                run += 1;
+            } else {
+                total += run.saturating_sub(threshold);
+                run = 0;
+            }
+        }
+        total + run.saturating_sub(threshold)
+    }
+
+    /// See [`Self::run_excess_u32`]; the `u8` counterpart, for the same
+    /// footprint reason [`Self::gap_u8`] exists.
+    #[inline]
+    fn run_excess_u8(day_cells: &[u8], threshold: u32) -> u32 {
+        let mut total = 0u32;
+        let mut run = 0u32;
+        for &c in day_cells {
+            if c > 0 {
+                run += 1;
+            } else {
+                total += run.saturating_sub(threshold);
+                run = 0;
+            }
+        }
+        total + run.saturating_sub(threshold)
+    }
+
+    /// `run_excess_u32`, but with `span` treated as already occupied —
+    /// WITHOUT mutating or allocating, mirroring [`Self::gap_u32_with`].
+    #[inline]
+    fn run_excess_u32_with(
+        day_cells: &[u32],
+        start: usize,
+        span: &[SlotIdx],
+        threshold: u32,
+    ) -> u32 {
+        let mut total = 0u32;
+        let mut run = 0u32;
+        for (i, &c) in day_cells.iter().enumerate() {
+            let is_occupied = c > 0 || span.iter().any(|s| s.get() == start + i);
+            if is_occupied {
+                run += 1;
+            } else {
+                total += run.saturating_sub(threshold);
+                run = 0;
+            }
+        }
+        total + run.saturating_sub(threshold)
+    }
+
+    /// See [`Self::run_excess_u32_with`]; the `u8` counterpart.
+    #[inline]
+    fn run_excess_u8_with(day_cells: &[u8], start: usize, span: &[SlotIdx], threshold: u32) -> u32 {
+        let mut total = 0u32;
+        let mut run = 0u32;
+        for (i, &c) in day_cells.iter().enumerate() {
+            let is_occupied = c > 0 || span.iter().any(|s| s.get() == start + i);
+            if is_occupied {
+                run += 1;
+            } else {
+                total += run.saturating_sub(threshold);
+                run = 0;
+            }
+        }
+        total + run.saturating_sub(threshold)
+    }
+
+    /// The run-excess DELTA `MaxConsecutiveBlocks` would experience if
+    /// `groups` gained occupancy at `span` — the read-only preview
+    /// `evaluator::score_one` ranks candidates against, mirroring
+    /// [`Self::group_compactness_delta`].
+    pub fn group_run_delta(&self, groups: &[GroupIdx], day: u32, span: &[SlotIdx]) -> i64 {
+        if self.run_group_slot.is_empty() || span.is_empty() {
+            return 0;
+        }
+        let (start, end) = self.day_range(day);
+        let mut delta = 0i64;
+        for &g in groups {
+            let row = g.get() * self.n_slots;
+            let before = Self::run_excess_u32(
+                &self.run_group_slot[row + start..row + end],
+                self.run_group_threshold,
+            );
+            let after = Self::run_excess_u32_with(
+                &self.run_group_slot[row + start..row + end],
+                start,
+                span,
+                self.run_group_threshold,
+            );
+            delta += i64::from(after) - i64::from(before);
+        }
+        delta
+    }
+
+    /// See [`Self::group_run_delta`]; the Person counterpart.
+    pub fn person_run_delta(&self, persons: &[PersonIdx], day: u32, span: &[SlotIdx]) -> i64 {
+        if self.run_person_slot.is_empty() || span.is_empty() {
+            return 0;
+        }
+        let (start, end) = self.day_range(day);
+        let mut delta = 0i64;
+        for &p in persons {
+            let row = p.get() * self.n_slots;
+            let before = Self::run_excess_u8(
+                &self.run_person_slot[row + start..row + end],
+                self.run_person_threshold,
+            );
+            let after = Self::run_excess_u8_with(
+                &self.run_person_slot[row + start..row + end],
+                start,
+                span,
+                self.run_person_threshold,
+            );
+            delta += i64::from(after) - i64::from(before);
+        }
+        delta
+    }
+
+    pub fn add_group_run(&mut self, groups: &[GroupIdx], day: u32, span: &[SlotIdx]) {
+        if self.run_group_slot.is_empty() || span.is_empty() {
+            return;
+        }
+        let (start, end) = self.day_range(day);
+        for &g in groups {
+            let row = g.get() * self.n_slots;
+            let before = Self::run_excess_u32(
+                &self.run_group_slot[row + start..row + end],
+                self.run_group_threshold,
+            );
+            for &s in span {
+                self.run_group_slot[row + s.get()] += 1;
+            }
+            let after = Self::run_excess_u32(
+                &self.run_group_slot[row + start..row + end],
+                self.run_group_threshold,
+            );
+            self.run_group_excess_total = (i64::from(self.run_group_excess_total)
+                + i64::from(after)
+                - i64::from(before)) as u32;
+        }
+    }
+
+    pub fn remove_group_run(&mut self, groups: &[GroupIdx], day: u32, span: &[SlotIdx]) {
+        if self.run_group_slot.is_empty() || span.is_empty() {
+            return;
+        }
+        let (start, end) = self.day_range(day);
+        for &g in groups {
+            let row = g.get() * self.n_slots;
+            let before = Self::run_excess_u32(
+                &self.run_group_slot[row + start..row + end],
+                self.run_group_threshold,
+            );
+            for &s in span {
+                self.run_group_slot[row + s.get()] =
+                    self.run_group_slot[row + s.get()].saturating_sub(1);
+            }
+            let after = Self::run_excess_u32(
+                &self.run_group_slot[row + start..row + end],
+                self.run_group_threshold,
+            );
+            self.run_group_excess_total = (i64::from(self.run_group_excess_total)
+                + i64::from(after)
+                - i64::from(before)) as u32;
+        }
+    }
+
+    pub fn add_person_run(&mut self, persons: &[PersonIdx], day: u32, span: &[SlotIdx]) {
+        if self.run_person_slot.is_empty() || span.is_empty() {
+            return;
+        }
+        let (start, end) = self.day_range(day);
+        for &p in persons {
+            let row = p.get() * self.n_slots;
+            let before = Self::run_excess_u8(
+                &self.run_person_slot[row + start..row + end],
+                self.run_person_threshold,
+            );
+            for &s in span {
+                let c = row + s.get();
+                self.run_person_slot[c] = self.run_person_slot[c].saturating_add(1);
+            }
+            let after = Self::run_excess_u8(
+                &self.run_person_slot[row + start..row + end],
+                self.run_person_threshold,
+            );
+            self.run_person_excess_total = (i64::from(self.run_person_excess_total)
+                + i64::from(after)
+                - i64::from(before)) as u32;
+        }
+    }
+
+    pub fn remove_person_run(&mut self, persons: &[PersonIdx], day: u32, span: &[SlotIdx]) {
+        if self.run_person_slot.is_empty() || span.is_empty() {
+            return;
+        }
+        let (start, end) = self.day_range(day);
+        for &p in persons {
+            let row = p.get() * self.n_slots;
+            let before = Self::run_excess_u8(
+                &self.run_person_slot[row + start..row + end],
+                self.run_person_threshold,
+            );
+            for &s in span {
+                let c = row + s.get();
+                self.run_person_slot[c] = self.run_person_slot[c].saturating_sub(1);
+            }
+            let after = Self::run_excess_u8(
+                &self.run_person_slot[row + start..row + end],
+                self.run_person_threshold,
+            );
+            self.run_person_excess_total = (i64::from(self.run_person_excess_total)
+                + i64::from(after)
+                - i64::from(before)) as u32;
+        }
+    }
+
+    /// What the currently over-cap runs cost, at the configured weight(s) —
+    /// O(1), read straight off the running totals. Mirrors
+    /// [`Self::compactness_cost`].
+    pub fn max_consecutive_cost(&self, group_weight: f64, person_weight: f64) -> f64 {
+        self.run_group_excess_total as f64 * group_weight
+            + self.run_person_excess_total as f64 * person_weight
+    }
+
+    /// Sum of `weight` over every currently over-cap `(entity, day)` cell
+    /// this occupant participates in, for `ruin_worst`'s attribution.
+    /// Mirrors [`Self::compactness_ruin_cost`].
+    pub fn max_consecutive_ruin_cost(
+        &self,
+        groups: &[GroupIdx],
+        persons: &[PersonIdx],
+        day: u32,
+        group_weight: f64,
+        person_weight: f64,
+    ) -> f64 {
+        let mut cost = 0.0;
+        if group_weight != 0.0 && !self.run_group_slot.is_empty() {
+            let (start, end) = self.day_range(day);
+            for &g in groups {
+                let row = g.get() * self.n_slots;
+                if Self::run_excess_u32(
+                    &self.run_group_slot[row + start..row + end],
+                    self.run_group_threshold,
+                ) > 0
+                {
+                    cost += group_weight;
+                }
+            }
+        }
+        if person_weight != 0.0 && !self.run_person_slot.is_empty() {
+            let (start, end) = self.day_range(day);
+            for &p in persons {
+                let row = p.get() * self.n_slots;
+                if Self::run_excess_u8(
+                    &self.run_person_slot[row + start..row + end],
+                    self.run_person_threshold,
+                ) > 0
+                {
                     cost += person_weight;
                 }
             }
@@ -1024,7 +1379,7 @@ mod tests {
 
     #[test]
     fn day_mix_blocks_only_the_opposite_mode() {
-        let mut a = Aggregates::new(2, 3, 1, vec![], 0, 0, 1, vec![], 0, 0, vec![], vec![]);
+        let mut a = Aggregates::new(2, 3, 1, vec![], 0, 0, 1, vec![], 0, 0, vec![], vec![], vec![]);
         let g = [GroupIdx(0)];
 
         assert!(a.day_mix_allows(&g, &[0], true), "empty day accepts anything");
@@ -1054,6 +1409,7 @@ mod tests {
             vec![],
             0,
             0,
+            vec![],
             vec![],
             vec![],
         );
@@ -1097,6 +1453,7 @@ mod tests {
             0,
             vec![],
             vec![],
+            vec![],
         );
         load(&mut term);
         assert_eq!(term.share_violations(), 0);
@@ -1113,6 +1470,7 @@ mod tests {
             vec![],
             0,
             0,
+            vec![],
             vec![],
             vec![],
         );
@@ -1140,6 +1498,7 @@ mod tests {
             0,
             vec![],
             vec![],
+            vec![],
         );
         a.apply_share("staff_meeting", &[GroupIdx(0)], 0, true, true);
         assert_eq!(a.share_violations(), 0, "out-of-scope kind must not count");
@@ -1160,7 +1519,8 @@ mod tests {
             max_ratio: 0.5,
             window: ShareWindow::PerTerm,
         };
-        let mut a = Aggregates::new(1, 1, 1, vec![scoped], 0, 0, 1, vec![], 0, 0, vec![], vec![]);
+        let mut a =
+            Aggregates::new(1, 1, 1, vec![scoped], 0, 0, 1, vec![], 0, 0, vec![], vec![], vec![]);
         let g = [GroupIdx(0)];
         // 2 online of 2 total = 100% > 50%: violated.
         a.apply_share("lecture", &g, 0, true, true);
@@ -1197,6 +1557,7 @@ mod tests {
             0,
             vec![],
             vec![],
+            vec![],
         );
         let g = [GroupIdx(0)];
         a.apply_share("lecture", &g, 0, true, true);
@@ -1214,7 +1575,7 @@ mod tests {
     /// cell are charged — the asymmetry above does not apply here.
     #[test]
     fn day_mix_violation_cost_charges_both_modes_in_a_mixed_cell() {
-        let mut a = Aggregates::new(1, 2, 1, vec![], 0, 0, 1, vec![], 0, 0, vec![], vec![]);
+        let mut a = Aggregates::new(1, 2, 1, vec![], 0, 0, 1, vec![], 0, 0, vec![], vec![], vec![]);
         let g = [GroupIdx(0)];
         a.add_day_mode(&g, &[0], true);
         assert_eq!(a.day_mix_violation_cost(&g, &[0], 10.0), 0.0, "one mode alone is not mixed");
@@ -1248,6 +1609,7 @@ mod tests {
             vec![compactness_rule(true, false)],
             0,
             0,
+            vec![],
             vec![],
             vec![],
         );
@@ -1285,6 +1647,7 @@ mod tests {
             0,
             vec![],
             vec![],
+            vec![],
         );
         let g = [GroupIdx(0)];
         a.add_group_compactness(&g, 0, &[SlotIdx(0)]);
@@ -1305,6 +1668,7 @@ mod tests {
             vec![compactness_rule(false, true)],
             0,
             0,
+            vec![],
             vec![],
             vec![],
         );
@@ -1335,6 +1699,7 @@ mod tests {
             0,
             vec![],
             vec![],
+            vec![],
         );
         a.add_person_compactness(&[PersonIdx(0)], 0, &[SlotIdx(0), SlotIdx(3)]);
         assert_eq!(a.compactness_cost(0.0, 1.0), 0.0, "Person axis was never configured");
@@ -1357,6 +1722,7 @@ mod tests {
             vec![compactness_rule(true, false)],
             0,
             0,
+            vec![],
             vec![],
             vec![],
         );
@@ -1390,6 +1756,7 @@ mod tests {
             0,
             vec![],
             vec![],
+            vec![],
         );
         let g = [GroupIdx(0)];
         a.add_group_compactness(&g, 0, &[SlotIdx(0)]);
@@ -1415,8 +1782,21 @@ mod tests {
     #[test]
     fn distributed_costs_nothing_for_one_consistent_weekly_slot() {
         // 3 weeks, weekly_cells = 2 (say Monday/Tuesday), 1 Offering.
-        let mut a =
-            Aggregates::new(0, 0, 3, vec![], 0, 0, 1, vec![], 1, 2, vec![pattern_rule()], vec![]);
+        let mut a = Aggregates::new(
+            0,
+            0,
+            3,
+            vec![],
+            0,
+            0,
+            1,
+            vec![],
+            1,
+            2,
+            vec![pattern_rule()],
+            vec![],
+            vec![],
+        );
         let o = OfferingIdx(0);
         a.add_distributed(o, 0);
         a.add_distributed(o, 0);
@@ -1426,8 +1806,21 @@ mod tests {
 
     #[test]
     fn distributed_charges_per_extra_distinct_slot() {
-        let mut a =
-            Aggregates::new(0, 0, 3, vec![], 0, 0, 1, vec![], 1, 2, vec![pattern_rule()], vec![]);
+        let mut a = Aggregates::new(
+            0,
+            0,
+            3,
+            vec![],
+            0,
+            0,
+            1,
+            vec![],
+            1,
+            2,
+            vec![pattern_rule()],
+            vec![],
+            vec![],
+        );
         let o = OfferingIdx(0);
         a.add_distributed(o, 0);
         assert_eq!(a.distributed_cost(1.0), 0.0, "the first slot used is free");
@@ -1440,8 +1833,21 @@ mod tests {
 
     #[test]
     fn distributed_delta_preview_matches_the_real_charge() {
-        let mut a =
-            Aggregates::new(0, 0, 3, vec![], 0, 0, 1, vec![], 1, 2, vec![pattern_rule()], vec![]);
+        let mut a = Aggregates::new(
+            0,
+            0,
+            3,
+            vec![],
+            0,
+            0,
+            1,
+            vec![],
+            1,
+            2,
+            vec![pattern_rule()],
+            vec![],
+            vec![],
+        );
         let o = OfferingIdx(0);
         a.add_distributed(o, 0);
 
@@ -1454,8 +1860,21 @@ mod tests {
 
     #[test]
     fn distributed_is_independent_per_offering() {
-        let mut a =
-            Aggregates::new(0, 0, 3, vec![], 0, 0, 1, vec![], 2, 2, vec![pattern_rule()], vec![]);
+        let mut a = Aggregates::new(
+            0,
+            0,
+            3,
+            vec![],
+            0,
+            0,
+            1,
+            vec![],
+            2,
+            2,
+            vec![pattern_rule()],
+            vec![],
+            vec![],
+        );
         a.add_distributed(OfferingIdx(0), 0);
         a.add_distributed(OfferingIdx(0), 1);
         // Offering 1 uses only one slot: must not be charged for Offering 0's spread.
@@ -1466,8 +1885,21 @@ mod tests {
     #[test]
     fn block_counts_idle_weeks_between_first_and_last() {
         // 5 weeks, 1 Offering.
-        let mut a =
-            Aggregates::new(0, 0, 5, vec![], 0, 0, 1, vec![], 1, 1, vec![], vec![pattern_rule()]);
+        let mut a = Aggregates::new(
+            0,
+            0,
+            5,
+            vec![],
+            0,
+            0,
+            1,
+            vec![],
+            1,
+            1,
+            vec![],
+            vec![pattern_rule()],
+            vec![],
+        );
         let o = OfferingIdx(0);
         a.add_block(o, 0);
         assert_eq!(a.block_cost(1.0), 0.0, "one week has nothing between");
@@ -1484,8 +1916,21 @@ mod tests {
 
     #[test]
     fn block_delta_preview_matches_the_real_charge() {
-        let mut a =
-            Aggregates::new(0, 0, 5, vec![], 0, 0, 1, vec![], 1, 1, vec![], vec![pattern_rule()]);
+        let mut a = Aggregates::new(
+            0,
+            0,
+            5,
+            vec![],
+            0,
+            0,
+            1,
+            vec![],
+            1,
+            1,
+            vec![],
+            vec![pattern_rule()],
+            vec![],
+        );
         let o = OfferingIdx(0);
         a.add_block(o, 0);
 
@@ -1500,8 +1945,21 @@ mod tests {
     fn an_axis_not_configured_costs_nothing_regardless_of_activity() {
         // Only BLOCK is configured; DISTRIBUTED tracking must be entirely
         // absent, not merely zero-weighted.
-        let mut a =
-            Aggregates::new(0, 0, 5, vec![], 0, 0, 1, vec![], 1, 2, vec![], vec![pattern_rule()]);
+        let mut a = Aggregates::new(
+            0,
+            0,
+            5,
+            vec![],
+            0,
+            0,
+            1,
+            vec![],
+            1,
+            2,
+            vec![],
+            vec![pattern_rule()],
+            vec![],
+        );
         a.add_distributed(OfferingIdx(0), 0);
         a.add_distributed(OfferingIdx(0), 1);
         assert_eq!(a.distributed_cost(1.0), 0.0, "distributed was never configured");

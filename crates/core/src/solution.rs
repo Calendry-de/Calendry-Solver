@@ -706,6 +706,35 @@ impl SearchState {
         delta
     }
 
+    /// The `MaxConsecutiveBlocks` cost DELTA of placing `who` at `span` —
+    /// mirrors [`Self::compactness_delta`] exactly, run-excess instead of
+    /// gap count.
+    pub fn max_consecutive_delta(
+        &self,
+        problem: &Problem,
+        who: &Occupant<'_>,
+        span: &[SlotIdx],
+    ) -> f64 {
+        if span.is_empty()
+            || (!who.enforce.max_consecutive_group && !who.enforce.max_consecutive_person)
+        {
+            return 0.0;
+        }
+        let day = problem.slots.flags(span[0]).day_index;
+        let mut delta = 0.0;
+        if who.enforce.max_consecutive_group {
+            delta += self
+                .aggregates
+                .group_run_delta(who.subtree_groups, day, span) as f64
+                * problem.max_consecutive_group_weight;
+        }
+        if who.enforce.max_consecutive_person {
+            delta += self.aggregates.person_run_delta(who.attendees, day, span) as f64
+                * problem.max_consecutive_person_weight;
+        }
+        delta
+    }
+
     pub fn mark(&mut self, problem: &Problem, who: &Occupant<'_>, span: &[SlotIdx]) {
         self.occupancy.mark(problem, who, span);
         self.apply_aggregates(problem, who, span, true);
@@ -750,6 +779,21 @@ impl SearchState {
             } else {
                 self.aggregates
                     .remove_person_compactness(who.attendees, day, span);
+            }
+        }
+        if who.enforce.max_consecutive_group {
+            if add {
+                self.aggregates.add_group_run(who.subtree_groups, day, span);
+            } else {
+                self.aggregates
+                    .remove_group_run(who.subtree_groups, day, span);
+            }
+        }
+        if who.enforce.max_consecutive_person {
+            if add {
+                self.aggregates.add_person_run(who.attendees, day, span);
+            } else {
+                self.aggregates.remove_person_run(who.attendees, day, span);
             }
         }
 
@@ -844,6 +888,17 @@ impl SearchState {
             );
         }
 
+        if who.enforce.max_consecutive_group || who.enforce.max_consecutive_person {
+            let day = problem.slots.flags(span[0]).day_index;
+            score += self.aggregates.max_consecutive_ruin_cost(
+                who.subtree_groups,
+                who.attendees,
+                day,
+                problem.max_consecutive_group_weight,
+                problem.max_consecutive_person_weight,
+            );
+        }
+
         if let Some(offering) = who.offering {
             use crate::problem::SchedulingPattern;
             if who.enforce.distributed_pattern
@@ -896,6 +951,20 @@ impl SearchState {
         }
         self.aggregates
             .compactness_cost(problem.compactness_group_weight, problem.compactness_person_weight)
+    }
+
+    /// What the currently over-cap runs cost, at the configured weight(s).
+    /// Mirrors [`Self::compactness_cost`].
+    pub fn max_consecutive_cost(&self, problem: &Problem) -> f64 {
+        if problem.max_consecutive_group_weight == 0.0
+            && problem.max_consecutive_person_weight == 0.0
+        {
+            return 0.0;
+        }
+        self.aggregates.max_consecutive_cost(
+            problem.max_consecutive_group_weight,
+            problem.max_consecutive_person_weight,
+        )
     }
 
     /// What every Offering's scheduling-pattern adherence currently costs, at

@@ -26,7 +26,8 @@
 use std::collections::{HashMap, HashSet};
 
 use calendry_solver_core::aggregates::{
-    CompactnessInstance, DayMixInstance, PatternAdherenceInstance, ShareInstance, ShareWindow,
+    CompactnessInstance, DayMixInstance, MaxConsecutiveInstance, PatternAdherenceInstance,
+    ShareInstance, ShareWindow,
 };
 use calendry_solver_core::ids::{GroupIdx, OfferingIdx, PersonIdx, RoomIdx, SlotIdx};
 use calendry_solver_core::preferences::{Preference, PreferenceInstance};
@@ -1134,10 +1135,36 @@ fn build_constraints(input: &pb::SolverInput) -> Result<ConstraintSet, ConvertEr
                     constraint_type: "MinimizeLocationChange",
                 });
             }
-            Some(Params::MaxConsecutiveBlocks(_)) => {
-                return Err(ConvertError::ConstraintTypeUnimplemented {
-                    constraint: c.id.clone(),
-                    constraint_type: "MaxConsecutiveBlocks",
+            // Built — see `crate::aggregates::MaxConsecutiveInstance`. Same
+            // `CompactnessScope` parsing as `Compactness` above, including
+            // the same "unrecognized enum value counts toward neither axis"
+            // reading.
+            Some(Params::MaxConsecutiveBlocks(p)) => {
+                if c.weight < 0.0 || c.weight.is_nan() {
+                    return Err(ConvertError::NegativeSoftWeight {
+                        constraint: c.id.clone(),
+                        weight: c.weight,
+                    });
+                }
+                let (mut group, mut person) = (false, false);
+                for &s in &p.scope {
+                    match pb::CompactnessScope::try_from(s) {
+                        Ok(pb::CompactnessScope::Group) => group = true,
+                        Ok(pb::CompactnessScope::Person) => person = true,
+                        _ => {}
+                    }
+                }
+                if p.scope.is_empty() {
+                    group = true;
+                    person = true;
+                }
+                set.max_consecutive_blocks.push(MaxConsecutiveInstance {
+                    id: c.id.clone(),
+                    kinds: c.applies_to_kinds.clone(),
+                    weight: c.weight,
+                    group,
+                    person,
+                    max_consecutive: p.max_consecutive,
                 });
             }
             Some(Params::MaxWeeklyTeachingLoad(_)) => {

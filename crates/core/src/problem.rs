@@ -6,7 +6,8 @@
 //! loop.
 
 use crate::aggregates::{
-    Aggregates, CompactnessInstance, DayMixInstance, PatternAdherenceInstance, ShareInstance,
+    Aggregates, CompactnessInstance, DayMixInstance, MaxConsecutiveInstance,
+    PatternAdherenceInstance, ShareInstance,
 };
 use crate::bitset::BitSet;
 use crate::groups::{GroupClosure, GroupCycle};
@@ -259,6 +260,11 @@ pub struct ConstraintSet {
     /// HARD, filterable. A tenant-wide reserved window — see
     /// [`Offering::protected_block_slots`], the precomputed mask.
     pub protected_block: Vec<ProtectedBlockInstance>,
+    /// SOFT, aggregate over a whole day. The mirror image of `compactness`:
+    /// caps how many blocks in a row a Group or Person may be scheduled
+    /// without a break, rather than minimizing the gaps between Sessions.
+    /// See [`crate::aggregates::MaxConsecutiveInstance`].
+    pub max_consecutive_blocks: Vec<MaxConsecutiveInstance>,
 }
 
 /// One `ProtectedBlock` instance. The FIRST hard type whose values
@@ -341,6 +347,8 @@ pub struct Enforce {
     pub distributed_pattern: bool,
     pub block_pattern: bool,
     pub protected_block: bool,
+    pub max_consecutive_group: bool,
+    pub max_consecutive_person: bool,
 }
 
 impl ConstraintSet {
@@ -363,6 +371,14 @@ impl ConstraintSet {
                 .any(|c| c.covers(kind)),
             block_pattern: self.block_pattern_adherence.iter().any(|c| c.covers(kind)),
             protected_block: self.protected_block.iter().any(|c| c.covers(kind)),
+            max_consecutive_group: self
+                .max_consecutive_blocks
+                .iter()
+                .any(|c| c.group && c.covers(kind)),
+            max_consecutive_person: self
+                .max_consecutive_blocks
+                .iter()
+                .any(|c| c.person && c.covers(kind)),
         }
     }
 }
@@ -847,6 +863,12 @@ pub struct Problem {
     pub compactness_group_weight: f64,
     /// The Person-axis counterpart of `compactness_group_weight`.
     pub compactness_person_weight: f64,
+    /// Summed weight of every configured `MaxConsecutiveBlocks` instance
+    /// covering the Group axis. Zero when not configured, or when no
+    /// instance selects it.
+    pub max_consecutive_group_weight: f64,
+    /// The Person-axis counterpart of `max_consecutive_group_weight`.
+    pub max_consecutive_person_weight: f64,
     /// Summed weight of every configured `DistributedPatternAdherence`.
     pub distributed_pattern_weight: f64,
     /// Summed weight of every configured `BlockPatternAdherence`.
@@ -1038,6 +1060,7 @@ impl Problem {
             weekly_cells,
             constraints.distributed_pattern_adherence.clone(),
             constraints.block_pattern_adherence.clone(),
+            constraints.max_consecutive_blocks.clone(),
         );
 
         let day_mix_weight: f64 = constraints
@@ -1064,6 +1087,18 @@ impl Problem {
             .sum();
         let compactness_person_weight: f64 = constraints
             .compactness
+            .iter()
+            .filter(|i| i.person)
+            .map(|i| i.weight)
+            .sum();
+        let max_consecutive_group_weight: f64 = constraints
+            .max_consecutive_blocks
+            .iter()
+            .filter(|i| i.group)
+            .map(|i| i.weight)
+            .sum();
+        let max_consecutive_person_weight: f64 = constraints
+            .max_consecutive_blocks
             .iter()
             .filter(|i| i.person)
             .map(|i| i.weight)
@@ -1187,6 +1222,8 @@ impl Problem {
             movement_weight,
             compactness_group_weight,
             compactness_person_weight,
+            max_consecutive_group_weight,
+            max_consecutive_person_weight,
             distributed_pattern_weight,
             block_pattern_weight,
             in_scope,

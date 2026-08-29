@@ -124,6 +124,10 @@ fn single(axis: fn(&mut Enforce), base: Enforce) -> Enforce {
         // list below — nothing has needed a `ProtectedBlock`-attributed
         // rejection count yet.
         protected_block: false,
+        // Same reasoning as Compactness above: no `would_worsen`-style
+        // predicate to probe.
+        max_consecutive_group: false,
+        max_consecutive_person: false,
     };
     axis(&mut e);
     axis(&mut probe);
@@ -140,6 +144,8 @@ fn single(axis: fn(&mut Enforce), base: Enforce) -> Enforce {
         distributed_pattern: e.distributed_pattern && base.distributed_pattern,
         block_pattern: e.block_pattern && base.block_pattern,
         protected_block: e.protected_block && base.protected_block,
+        max_consecutive_group: e.max_consecutive_group && base.max_consecutive_group,
+        max_consecutive_person: e.max_consecutive_person && base.max_consecutive_person,
     }
 }
 

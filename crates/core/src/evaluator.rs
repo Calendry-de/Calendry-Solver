@@ -127,6 +127,10 @@ fn score_one(problem: &Problem, solution: &Solution, state: &SearchState, mv: &M
     // `Objective::compactness_cost` once this candidate is actually chosen.
     let compactness_delta = state.compactness_delta(problem, &candidate, &span);
 
+    // Same ranking-signal contract as `compactness_delta` — the mirror
+    // image, over run-excess instead of gap count.
+    let max_consecutive_delta = state.max_consecutive_delta(problem, &candidate, &span);
+
     // Same ranking-signal contract as `compactness_delta` — see its own
     // comment above — for the Offering-scoped counterpart.
     let scheduling_pattern_delta = state.scheduling_pattern_delta(problem, &candidate, &span);
@@ -160,6 +164,7 @@ fn score_one(problem: &Problem, solution: &Solution, state: &SearchState, mv: &M
             + share_penalty
             + day_mix_penalty
             + compactness_delta
+            + max_consecutive_delta
             + scheduling_pattern_delta,
     )
 }

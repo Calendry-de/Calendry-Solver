@@ -358,6 +358,12 @@ pub struct Objective {
     /// belongs to a day, not to any one placement, so it is read whole off
     /// `Aggregates`' running totals rather than accumulated as a delta.
     pub compactness_cost: f64,
+    /// Blocks charged over a run longer than the configured cap, summed over
+    /// every currently-occupied `(Group-or-Person, day)` cell and already
+    /// multiplied by each axis's configured weight — the mirror image of
+    /// `compactness_cost`, same "belongs to a day, not a placement" reason
+    /// for living outside `soft`.
+    pub max_consecutive_cost: f64,
     /// `DistributedPatternAdherence` and `BlockPatternAdherence` together,
     /// already multiplied by each type's configured weight. Read whole off
     /// `Aggregates`' running totals for the same reason `compactness_cost` is:
@@ -384,6 +390,7 @@ impl Objective {
             + self.soft
             + self.day_mix_cost
             + self.compactness_cost
+            + self.max_consecutive_cost
             + self.scheduling_pattern_cost
     }
 }
@@ -593,6 +600,7 @@ mod tests {
             soft: 7.0 * 4.0,
             day_mix_cost: 0.0,
             compactness_cost: 0.0,
+            max_consecutive_cost: 0.0,
             scheduling_pattern_cost: 0.0,
         };
         let one_unplaced = Objective {
@@ -601,6 +609,7 @@ mod tests {
             soft: 0.0,
             day_mix_cost: 0.0,
             compactness_cost: 0.0,
+            max_consecutive_cost: 0.0,
             scheduling_pattern_cost: 0.0,
         };
         assert!(one_unplaced.total(hard_penalty) > all_soft_bad.total(hard_penalty));
@@ -626,6 +635,7 @@ mod tests {
             soft: 7.0 * 4.0,
             day_mix_cost: day_mix_weight * cells,
             compactness_cost: 0.0,
+            max_consecutive_cost: 0.0,
             scheduling_pattern_cost: 0.0,
         };
         let one_unplaced = Objective {
@@ -634,6 +644,7 @@ mod tests {
             soft: 0.0,
             day_mix_cost: 0.0,
             compactness_cost: 0.0,
+            max_consecutive_cost: 0.0,
             scheduling_pattern_cost: 0.0,
         };
 

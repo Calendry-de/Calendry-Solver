@@ -418,10 +418,6 @@ fn every_staged_p2_type_is_unimplemented_not_invalid() {
             Params::MinimizeLocationChange(pb::MinimizeLocationChange::default()),
         ),
         (
-            "MaxConsecutiveBlocks",
-            Params::MaxConsecutiveBlocks(pb::MaxConsecutiveBlocks::default()),
-        ),
-        (
             "MaxWeeklyTeachingLoad",
             Params::MaxWeeklyTeachingLoad(pb::MaxWeeklyTeachingLoad::default()),
         ),
