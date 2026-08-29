@@ -22,6 +22,7 @@
 //! --bin bench -- small-school`.
 
 pub mod bench;
+pub mod churn;
 pub mod diagnose;
 pub mod generate;
 pub mod params;
