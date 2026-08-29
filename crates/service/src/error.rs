@@ -62,6 +62,8 @@ pub enum ConvertError {
     UnknownPerson { context: String, person: String },
     #[error("{context} references unknown group '{group}'")]
     UnknownGroup { context: String, group: String },
+    #[error("{context} references unknown offering '{offering}'")]
+    UnknownOffering { context: String, offering: String },
     #[error(transparent)]
     GroupCycle(#[from] GroupCycle),
 
@@ -98,6 +100,15 @@ pub enum ConvertError {
         required: u32,
         max: u32,
     },
+
+    // -- offering relations ---------------------------------------------------
+    #[error(
+        "relation '{relation}' names {members} Offering(s); a relation needs at least 2 to mean \
+         anything"
+    )]
+    RelationTooFewMembers { relation: String, members: usize },
+    #[error("relation '{relation}' has no params set")]
+    RelationWithoutParams { relation: String },
 
     // -- constraints ---------------------------------------------------------
     #[error("constraint '{constraint}' has no params set")]

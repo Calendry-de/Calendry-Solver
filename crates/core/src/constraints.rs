@@ -49,6 +49,7 @@ pub enum ConstraintType {
     PersonPreferenceFit,
     GroupSizeFitsRoom,
     MaxConcurrentOnlineSessions,
+    DifferentTimeRelation,
 }
 
 impl ConstraintType {
@@ -67,6 +68,7 @@ impl ConstraintType {
             Self::PersonPreferenceFit => "PersonPreferenceFit",
             Self::GroupSizeFitsRoom => "GroupSizeFitsRoom",
             Self::MaxConcurrentOnlineSessions => "MaxConcurrentOnlineSessions",
+            Self::DifferentTimeRelation => "DifferentTimeRelation",
         }
     }
 }
@@ -107,6 +109,10 @@ struct View<'a> {
     lecturers: &'a [PersonIdx],
     own_groups: &'a [GroupIdx],
     attendees: &'a [PersonIdx],
+    /// `None` for an ad-hoc Session realizing no Offering — never a member
+    /// of any `DifferentTime` relation, so `check_pair`'s relation check has
+    /// nothing to read.
+    different_time_relations: &'a [u32],
     span: Vec<SlotIdx>,
 }
 
@@ -690,6 +696,32 @@ fn check_pair<'p>(
             );
         }
     }
+
+    // 5. `DifferentTime` Offering relations.
+    //
+    // Not kind-scoped — a relation names specific Offerings, so `both()`
+    // (which reads `applies_to_kinds`) does not apply here. Reported once per
+    // relation the pair shares, keyed by the relation's own id rather than a
+    // `ConstraintInstance`'s, since a relation carries no `kinds` to scope by.
+    for &r in x.different_time_relations {
+        if !y.different_time_relations.contains(&r) {
+            continue;
+        }
+        let id = problem.different_time_relation_ids[r as usize].as_str();
+        if !seen.insert((xi, yi, ConstraintType::DifferentTimeRelation, id)) {
+            continue;
+        }
+        out.push(Violation {
+            constraint_id: id.to_string(),
+            constraint_type: ConstraintType::DifferentTimeRelation,
+            session_ids: vec![x.label.clone(), y.label.clone()],
+            offering_ids: Vec::new(),
+            detail: format!(
+                "relation '{id}' (DifferentTime) is violated by '{}' and '{}' at {at}",
+                x.label, y.label
+            ),
+        });
+    }
 }
 
 fn collect_views<'a>(problem: &'a Problem, solution: &Solution) -> Vec<View<'a>> {
@@ -707,6 +739,7 @@ fn collect_views<'a>(problem: &'a Problem, solution: &Solution) -> Vec<View<'a>>
             lecturers: &f.lecturers,
             own_groups: &f.own_groups,
             attendees: &f.attendees,
+            different_time_relations: &f.different_time_relations,
             span,
         });
     }
@@ -725,6 +758,7 @@ fn collect_views<'a>(problem: &'a Problem, solution: &Solution) -> Vec<View<'a>>
             lecturers: &o.lecturers,
             own_groups: &o.own_groups,
             attendees: &o.attendees,
+            different_time_relations: &o.different_time_relations,
             span,
         });
     }

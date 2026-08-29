@@ -126,6 +126,13 @@ pub struct Occupant<'a> {
     /// [`Self::with_additional_rooms`].
     pub additional_rooms: [Option<RoomIdx>; MAX_ADDITIONAL_ROOMS],
     pub enforce: Enforce,
+    /// Dense row indices of the `DifferentTime` relations this Session's
+    /// Offering is a member of — see `Offering::different_time_relations`.
+    /// Always present (unlike `offering`, which only a couple of aggregate
+    /// types need), because relation membership is checked in the same hot
+    /// `mark`/`unmark`/`is_free` path every other occupancy axis goes
+    /// through.
+    pub different_time_relations: &'a [u32],
 }
 
 impl<'a> Occupant<'a> {
@@ -145,6 +152,7 @@ impl<'a> Occupant<'a> {
             protected_block_slots: Some(&o.protected_block_slots),
             additional_rooms: [None; MAX_ADDITIONAL_ROOMS],
             enforce: o.enforce,
+            different_time_relations: &o.different_time_relations,
         }
     }
 
@@ -166,6 +174,7 @@ impl<'a> Occupant<'a> {
             protected_block_slots: None,
             additional_rooms: f.additional_rooms,
             enforce: f.enforce,
+            different_time_relations: &f.different_time_relations,
         }
     }
 
@@ -264,6 +273,12 @@ struct Occupancy {
     /// is cheap and a `bool` guard at every call site would be one more thing
     /// to keep in sync with `is_free`'s own check.
     online: Vec<u32>,
+    /// One row per configured `DifferentTime` relation — see
+    /// `Problem::different_time_relation_ids`. A bit shared by every member
+    /// Offering, exactly like a virtual Room's occupancy row would be shared
+    /// by every Session in it: whichever member marks a slot first, the
+    /// SAME bit blocks every other member from that slot.
+    relation: BitMatrix,
 }
 
 impl Occupancy {
@@ -308,6 +323,7 @@ impl Occupancy {
             attendee: BitMatrix::new(problem.persons.len().max(1), slots),
             group: BitMatrix::new(problem.groups.len().max(1), slots),
             online: vec![0; slots],
+            relation: BitMatrix::new(problem.different_time_relation_ids.len().max(1), slots),
         }
     }
 
@@ -353,6 +369,9 @@ impl Occupancy {
             if online {
                 self.online[c] += 1;
             }
+            for &r in who.different_time_relations {
+                self.relation.set(r as usize, c);
+            }
         }
     }
 
@@ -384,6 +403,9 @@ impl Occupancy {
             if online {
                 debug_assert!(self.online[c] > 0, "unmark must follow a balanced mark");
                 self.online[c] -= 1;
+            }
+            for &r in who.different_time_relations {
+                self.relation.clear(r as usize, c);
             }
         }
     }
@@ -419,6 +441,13 @@ impl Occupancy {
             }
             if let Some(cap) = online_cap
                 && self.online[c] >= cap
+            {
+                return false;
+            }
+            if who
+                .different_time_relations
+                .iter()
+                .any(|&r| self.relation.get(r as usize, c))
             {
                 return false;
             }

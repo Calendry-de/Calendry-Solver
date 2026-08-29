@@ -37,7 +37,8 @@ use calendry_solver_core::preferences::{Preference, PreferenceInstance};
 use calendry_solver_core::problem::{
     CapacityWasteInstance, ConstraintInstance, ConstraintSet, FixedSpec, Immovable,
     MaxConcurrentOnlineInstance, OfferingSpec, PlacementVar, Problem, ProblemSpec,
-    ProtectedBlockInstance, Room, SchedulingPattern, ScopeSpec, Unavailability, classify_immovable,
+    ProtectedBlockInstance, RelationKind, RelationSpec, Room, SchedulingPattern, ScopeSpec,
+    Unavailability, classify_immovable,
 };
 use calendry_solver_core::slots::{SlotTable, WeekKind, WeekSpec};
 use calendry_solver_core::soft::{SoftInstance, SoftParams};
@@ -63,6 +64,7 @@ pub fn convert(input: &pb::SolverInput, scope: &pb::SolveScope) -> Result<Proble
 
     let offerings = build_offerings(input, &rooms, &group_index, &person_index)?;
     let offering_index = index_by(&input.offerings, |o| o.id.clone());
+    let relations = build_relations(input, &offering_index)?;
 
     let indexes = Indexes {
         rooms: Resolver::new(&room_index),
@@ -113,10 +115,53 @@ pub fn convert(input: &pb::SolverInput, scope: &pb::SolveScope) -> Result<Proble
         placements,
         fixed,
         constraints,
+        relations,
         scope: ScopeSpec::Offerings(in_scope),
         movement_weight: lock_policy.movement_weight(),
         ..ProblemSpec::new(slots)
     })?)
+}
+
+// ---------------------------------------------------------------------------
+// Offering relations
+// ---------------------------------------------------------------------------
+
+fn build_relations(
+    input: &pb::SolverInput,
+    offering_index: &HashMap<String, u32>,
+) -> Result<Vec<RelationSpec>, ConvertError> {
+    use pb::offering_relation::Params;
+
+    let offerings = Resolver::new(offering_index);
+    let mut out = Vec::with_capacity(input.offering_relations.len());
+
+    for r in &input.offering_relations {
+        if !r.enabled {
+            continue;
+        }
+
+        if r.offering_ids.len() < 2 {
+            return Err(ConvertError::RelationTooFewMembers {
+                relation: r.id.clone(),
+                members: r.offering_ids.len(),
+            });
+        }
+
+        let members = offerings.require_all(&r.offering_ids, OfferingIdx, |offering| {
+            ConvertError::UnknownOffering { context: format!("relation '{}'", r.id), offering }
+        })?;
+
+        let kind = match &r.params {
+            Some(Params::DifferentTime(_)) => RelationKind::DifferentTime,
+            None => {
+                return Err(ConvertError::RelationWithoutParams { relation: r.id.clone() });
+            }
+        };
+
+        out.push(RelationSpec { id: r.id.clone(), kind, members });
+    }
+
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------

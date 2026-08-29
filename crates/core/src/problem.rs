@@ -189,6 +189,35 @@ impl ConstraintInstance {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Offering relations (ADR-0028)
+// ---------------------------------------------------------------------------
+
+/// A relation's evaluator. Every variant reads the same `members` list;
+/// only what "satisfied" means differs — see each variant's own doc.
+///
+/// Deliberately its own enum, not folded into `ConstraintInstance`/kind
+/// scoping: a relation names specific Offerings, never a category, so
+/// `ConstraintInstance::covers` (kind-scoped) has nothing to say about it.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum RelationKind {
+    /// HARD. No two members may ever share a slot — enforced as occupancy,
+    /// the same shape as `RoomDoubleBooking`, just keyed by relation instead
+    /// of Room. Symmetric: member order is irrelevant.
+    DifferentTime,
+}
+
+/// One configured Offering relation — an ordered set of Offering references
+/// plus a type, per ADR-0028. `members` is ordered because a FEW future
+/// relation types (`Precedence`, `Next Day`) read the order; `DifferentTime`
+/// ignores it.
+#[derive(Clone, Debug)]
+pub struct RelationSpec {
+    pub id: String,
+    pub kind: RelationKind,
+    pub members: Vec<OfferingIdx>,
+}
+
 /// Which constraint types are switched on, and for which kinds.
 ///
 /// Only the types the solver actually implements are represented. Adding a type
@@ -602,6 +631,12 @@ pub struct Offering {
     /// cohort.
     pub subtree_groups: Vec<GroupIdx>,
     pub scheduling_pattern: SchedulingPattern,
+    /// Dense row indices into the problem's `DifferentTime` relations this
+    /// Offering is a member of — empty for every Offering not named in one,
+    /// which is the overwhelming majority. Precomputed the same way
+    /// `veto_slots` is: derived once in `Problem::build`, read every time a
+    /// Session of this Offering is marked, unmarked or probed for a slot.
+    pub different_time_relations: Vec<u32>,
 }
 
 impl Offering {
@@ -677,6 +712,11 @@ pub struct FixedOccupancy {
     /// distinct-slot/idle-week tracking. `Unspecified` — inert — for an
     /// ad-hoc Session realizing no Offering.
     pub scheduling_pattern: SchedulingPattern,
+    /// Resolved from `offering`'s own `different_time_relations` — a locked
+    /// Session of a related Offering still occupies the relation's shared
+    /// slot, exactly like any of its other occupancy axes. Empty for an
+    /// ad-hoc Session realizing no Offering.
+    pub different_time_relations: Vec<u32>,
 }
 
 /// Which Offerings this run is actively placing.
@@ -733,6 +773,9 @@ pub struct ProblemSpec {
     pub placements: Vec<PlacementVar>,
     pub fixed: Vec<FixedSpec>,
     pub constraints: ConstraintSet,
+    /// Rules relating specific Offerings to each other, per ADR-0028 — never
+    /// scoped by kind, so kept independent of `constraints` above.
+    pub relations: Vec<RelationSpec>,
     pub scope: ScopeSpec,
     /// Bias against disturbing a movable out-of-scope placement, under
     /// `LOCK_POLICY_MINIMIZE_MOVEMENT`. Meaningless — and left at its default
@@ -753,6 +796,7 @@ impl ProblemSpec {
             placements: Vec::new(),
             fixed: Vec::new(),
             constraints: ConstraintSet::default(),
+            relations: Vec::new(),
             scope: ScopeSpec::All,
             movement_weight: 0.0,
         }
@@ -997,6 +1041,11 @@ pub struct Problem {
     /// `Room.location`, interned to a dense index parallel to [`Self::rooms`].
     /// See [`Problem::room_location`].
     room_location: Vec<u32>,
+    /// Every configured `DifferentTime` relation's own id, dense, parallel to
+    /// the row index every Offering's and `FixedOccupancy`'s
+    /// `different_time_relations` entry names. Its length is the row count
+    /// the solution module's relation occupancy matrix is sized against.
+    pub different_time_relation_ids: Vec<String>,
 
     /// Whether each Offering is being actively placed by this run, indexed by
     /// [`OfferingIdx`]. Read it through [`Problem::in_scope`].
@@ -1022,6 +1071,7 @@ impl Problem {
             placements,
             fixed,
             constraints,
+            relations,
             scope,
             movement_weight,
         } = spec;
@@ -1134,9 +1184,33 @@ impl Problem {
             mask
         };
 
+        // `DifferentTime` relations, resolved to a dense row index (parallel
+        // to `different_time_relation_ids`) and a per-Offering membership
+        // list — the same "precompute once per Offering, read on every
+        // mark/unmark" shape `veto_mask` above uses. Other `RelationKind`
+        // variants would get their own membership table here; there is only
+        // one today.
+        let mut different_time_relation_ids: Vec<String> = Vec::new();
+        let mut different_time_membership: Vec<Vec<u32>> = vec![Vec::new(); offerings.len()];
+        for r in &relations {
+            match r.kind {
+                RelationKind::DifferentTime => {
+                    let ri = different_time_relation_ids.len() as u32;
+                    different_time_relation_ids.push(r.id.clone());
+                    for &o in &r.members {
+                        if let Some(row) = different_time_membership.get_mut(o.get()) {
+                            row.push(ri);
+                        }
+                    }
+                }
+            }
+        }
+
         let derived_offerings: Vec<Offering> = offerings
             .into_iter()
-            .map(|o| Offering {
+            .enumerate()
+            .map(|(i, o)| Offering {
+                different_time_relations: different_time_membership[i].clone(),
                 soft_profile: soft.profile_for_kind(&o.kind),
                 veto_slots: veto_mask(&o.lecturers),
                 group_veto_slots: group_veto_mask(&o.groups),
@@ -1172,6 +1246,11 @@ impl Problem {
                     .offering
                     .and_then(|o| derived_offerings.get(o.get()))
                     .map_or(SchedulingPattern::Unspecified, |o| o.scheduling_pattern),
+                different_time_relations: f
+                    .offering
+                    .and_then(|o| different_time_membership.get(o.get()))
+                    .cloned()
+                    .unwrap_or_default(),
                 session_id: f.session_id,
                 offering: f.offering,
                 kind: f.kind,
@@ -1450,6 +1529,7 @@ impl Problem {
             room_churn_weight,
             room_consistency_weight,
             room_location,
+            different_time_relation_ids,
             in_scope,
             placement_counts,
             immovable_counts,

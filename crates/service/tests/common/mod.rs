@@ -59,6 +59,7 @@ pub fn base_input() -> pb::SolverInput {
         // Week 0 Monday block 0 — nothing here is past unless a test puts it
         // there deliberately.
         reference_slot: Some(slot(0, 1, 0)),
+        offering_relations: vec![],
     }
 }
 
