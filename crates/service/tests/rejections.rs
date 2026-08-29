@@ -412,10 +412,8 @@ fn lecturer_consistency_is_unimplemented_not_invalid() {
 fn every_staged_p2_type_is_unimplemented_not_invalid() {
     use pb::constraint_config::Params;
 
-    let cases: Vec<(&str, Params)> = vec![
-        ("RoomConsistency", Params::RoomConsistency(pb::RoomConsistency {})),
-        ("MinimizeRoomChurn", Params::MinimizeRoomChurn(pb::MinimizeRoomChurn::default())),
-    ];
+    let cases: Vec<(&str, Params)> =
+        vec![("RoomConsistency", Params::RoomConsistency(pb::RoomConsistency {}))];
 
     for (name, params) in cases {
         let mut input = base_input();

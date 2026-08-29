@@ -273,6 +273,30 @@ impl RoomTurnaroundBufferInstance {
     }
 }
 
+/// One configured `MinimizeRoomChurn` rule. Group-only, like
+/// `MinimizeWeekdayImbalance` and `ExamSpacingSameDay`/`Window` — the "home
+/// room" concept is about a Group's own week, with no Person-axis
+/// counterpart. Distinct from `MinimizeLocationChange`: this counts distinct
+/// ROOMS across a whole WEEK, not distinct LOCATIONS within one day — a
+/// Group could churn five Rooms in the same building without ever crossing
+/// one, and vice versa.
+#[derive(Clone, Debug)]
+pub struct MinimizeRoomChurnInstance {
+    pub id: String,
+    pub kinds: Vec<String>,
+    pub weight: f64,
+    /// A week touching more than this many distinct Rooms is penalized, per
+    /// Room past the cap.
+    pub max_rooms_per_week: u32,
+}
+
+impl MinimizeRoomChurnInstance {
+    #[inline]
+    pub fn covers(&self, kind: &str) -> bool {
+        self.kinds.is_empty() || self.kinds.iter().any(|k| k == kind)
+    }
+}
+
 /// One configured `DistributedPatternAdherence` or `BlockPatternAdherence` —
 /// identical shape, kept as one type since both are just "id, kind scope,
 /// weight" with the actual per-pattern logic living in `Aggregates` instead.
@@ -533,6 +557,29 @@ pub struct Aggregates {
     /// inferring boundaries from the array alone.
     turnaround_violations_total: u32,
     turnaround_rules: Vec<RoomTurnaroundBufferInstance>,
+
+    /// `[group * n_weeks * n_rooms + week * n_rooms + room]` — occurrence
+    /// count of Sessions this Group has in each Room, per week. Mirrors
+    /// `location_group_loc`, with WEEK/ROOM in place of DAY/LOCATION.
+    churn_room: Vec<u32>,
+    /// `[group * n_weeks + week]` — how many DISTINCT Rooms this Group's
+    /// Sessions currently touch that week, maintained incrementally exactly
+    /// like `location_group_distinct`.
+    churn_distinct: Vec<u32>,
+    /// The TIGHTEST (SMALLEST — a cap, like `span_group_threshold`, not a
+    /// minimum-required-value like `turnaround_buffer_blocks`)
+    /// `max_rooms_per_week` among every enabled instance. `u32::MAX` when
+    /// not configured.
+    churn_threshold: u32,
+    /// Running sum of excess-over-threshold distinct Rooms over every
+    /// currently occupied `(Group, week)` cell, maintained as a delta exactly
+    /// like `location_group_excess_total`.
+    churn_excess_total: u32,
+    /// Rooms across the whole tenant — `churn_room`'s and
+    /// `turnaround_room_slot`'s shared row stride. `1` when neither type is
+    /// configured, never `0`.
+    n_rooms: usize,
+    churn_rules: Vec<MinimizeRoomChurnInstance>,
 }
 
 impl Aggregates {
@@ -561,6 +608,7 @@ impl Aggregates {
         n_locations: usize,
         turnaround_rules: Vec<RoomTurnaroundBufferInstance>,
         n_rooms: usize,
+        churn_rules: Vec<MinimizeRoomChurnInstance>,
     ) -> Self {
         let groups = n_groups.max(1);
         let counters = rules
@@ -652,6 +700,13 @@ impl Aggregates {
             .max()
             .unwrap_or(0);
         let rooms = n_rooms.max(1);
+
+        let track_churn = !churn_rules.is_empty();
+        let churn_threshold = churn_rules
+            .iter()
+            .map(|r| r.max_rooms_per_week)
+            .min()
+            .unwrap_or(u32::MAX);
 
         Self {
             online_day: vec![0; groups * n_days.max(1)],
@@ -772,6 +827,12 @@ impl Aggregates {
             turnaround_buffer_blocks,
             turnaround_violations_total: 0,
             turnaround_rules,
+            churn_room: if track_churn { vec![0; groups * weeks * rooms] } else { Vec::new() },
+            churn_distinct: if track_churn { vec![0; groups * weeks] } else { Vec::new() },
+            churn_threshold,
+            churn_excess_total: 0,
+            n_rooms: rooms,
+            churn_rules,
         }
     }
 
@@ -2468,6 +2529,106 @@ impl Aggregates {
         (u32::from(before) + u32::from(after)) as f64 * weight
     }
 
+    // -- room churn --------------------------------------------------------
+
+    pub fn churn_rules(&self) -> &[MinimizeRoomChurnInstance] {
+        &self.churn_rules
+    }
+
+    /// The distinct-Room-excess DELTA `MinimizeRoomChurn` would experience if
+    /// `groups` gained one Session touching `rooms` (already deduplicated by
+    /// the caller) in `week` — mirrors [`Self::group_location_delta`]
+    /// exactly, WEEK/ROOM in place of DAY/LOCATION.
+    pub fn group_churn_delta(&self, groups: &[GroupIdx], week: u32, rooms: &[u32]) -> i64 {
+        if self.churn_room.is_empty() || rooms.is_empty() {
+            return 0;
+        }
+        let mut delta = 0i64;
+        for &g in groups {
+            let cell = g.get() * self.n_weeks + week as usize;
+            let row = cell * self.n_rooms;
+            let newly_touched = rooms
+                .iter()
+                .filter(|&&r| self.churn_room[row + r as usize] == 0)
+                .count() as u32;
+            if newly_touched == 0 {
+                continue;
+            }
+            let before = self.churn_distinct[cell].saturating_sub(self.churn_threshold);
+            let after =
+                (self.churn_distinct[cell] + newly_touched).saturating_sub(self.churn_threshold);
+            delta += i64::from(after) - i64::from(before);
+        }
+        delta
+    }
+
+    /// Mark `rooms` (deduplicated) touched by `groups` in `week`, updating
+    /// `churn_excess_total` by the exact delta — mirrors
+    /// [`Self::add_group_location`].
+    pub fn add_group_churn(&mut self, groups: &[GroupIdx], week: u32, rooms: &[u32]) {
+        if self.churn_room.is_empty() {
+            return;
+        }
+        for &g in groups {
+            let cell = g.get() * self.n_weeks + week as usize;
+            let row = cell * self.n_rooms;
+            for &r in rooms {
+                let idx = row + r as usize;
+                self.churn_room[idx] += 1;
+                if self.churn_room[idx] == 1 {
+                    let before = self.churn_distinct[cell].saturating_sub(self.churn_threshold);
+                    self.churn_distinct[cell] += 1;
+                    let after = self.churn_distinct[cell].saturating_sub(self.churn_threshold);
+                    self.churn_excess_total += after - before;
+                }
+            }
+        }
+    }
+
+    pub fn remove_group_churn(&mut self, groups: &[GroupIdx], week: u32, rooms: &[u32]) {
+        if self.churn_room.is_empty() {
+            return;
+        }
+        for &g in groups {
+            let cell = g.get() * self.n_weeks + week as usize;
+            let row = cell * self.n_rooms;
+            for &r in rooms {
+                let idx = row + r as usize;
+                self.churn_room[idx] = self.churn_room[idx].saturating_sub(1);
+                if self.churn_room[idx] == 0 {
+                    let before = self.churn_distinct[cell].saturating_sub(self.churn_threshold);
+                    self.churn_distinct[cell] = self.churn_distinct[cell].saturating_sub(1);
+                    let after = self.churn_distinct[cell].saturating_sub(self.churn_threshold);
+                    self.churn_excess_total -= before - after;
+                }
+            }
+        }
+    }
+
+    /// What the currently over-cap distinct-Room weeks cost, at the
+    /// configured weight — O(1), read straight off `churn_excess_total`
+    /// rather than rescanned. Mirrors [`Self::location_change_cost`].
+    pub fn churn_cost(&self, weight: f64) -> f64 {
+        self.churn_excess_total as f64 * weight
+    }
+
+    /// Sum of `weight` over every currently over-cap `(Group, week)` cell
+    /// this occupant participates in, for `ruin_worst`'s attribution.
+    /// Mirrors [`Self::max_daily_span_ruin_cost`].
+    pub fn churn_ruin_cost(&self, groups: &[GroupIdx], week: u32, weight: f64) -> f64 {
+        if weight == 0.0 || self.churn_distinct.is_empty() {
+            return 0.0;
+        }
+        let mut cost = 0.0;
+        for &g in groups {
+            let cell = g.get() * self.n_weeks + week as usize;
+            if self.churn_distinct[cell] > self.churn_threshold {
+                cost += weight;
+            }
+        }
+        cost
+    }
+
     // -- scheduling pattern ---------------------------------------------------
 
     pub fn distributed_rules(&self) -> &[PatternAdherenceInstance] {
@@ -2855,6 +3016,7 @@ mod tests {
             1,
             vec![],
             1,
+            vec![],
         );
         let g = [GroupIdx(0)];
 
@@ -2898,6 +3060,7 @@ mod tests {
             1,
             vec![],
             1,
+            vec![],
         );
         let g = [GroupIdx(0)];
 
@@ -2950,6 +3113,7 @@ mod tests {
             1,
             vec![],
             1,
+            vec![],
         );
         load(&mut term);
         assert_eq!(term.share_violations(), 0);
@@ -2979,6 +3143,7 @@ mod tests {
             1,
             vec![],
             1,
+            vec![],
         );
         load(&mut week);
         assert_eq!(week.share_violations(), 1);
@@ -3015,6 +3180,7 @@ mod tests {
             1,
             vec![],
             1,
+            vec![],
         );
         a.apply_share("staff_meeting", &[GroupIdx(0)], 0, true, true);
         assert_eq!(a.share_violations(), 0, "out-of-scope kind must not count");
@@ -3059,6 +3225,7 @@ mod tests {
             1,
             vec![],
             1,
+            vec![],
         );
         let g = [GroupIdx(0)];
         // 2 online of 2 total = 100% > 50%: violated.
@@ -3107,6 +3274,7 @@ mod tests {
             1,
             vec![],
             1,
+            vec![],
         );
         let g = [GroupIdx(0)];
         a.apply_share("lecture", &g, 0, true, true);
@@ -3148,6 +3316,7 @@ mod tests {
             1,
             vec![],
             1,
+            vec![],
         );
         let g = [GroupIdx(0)];
         a.add_day_mode(&g, &[0], true);
@@ -3195,6 +3364,7 @@ mod tests {
             1,
             vec![],
             1,
+            vec![],
         );
         let g = [GroupIdx(0)];
 
@@ -3241,6 +3411,7 @@ mod tests {
             1,
             vec![],
             1,
+            vec![],
         );
         let g = [GroupIdx(0)];
         a.add_group_compactness(&g, 0, &[SlotIdx(0)]);
@@ -3274,6 +3445,7 @@ mod tests {
             1,
             vec![],
             1,
+            vec![],
         );
         let p = [PersonIdx(0)];
 
@@ -3313,6 +3485,7 @@ mod tests {
             1,
             vec![],
             1,
+            vec![],
         );
         a.add_person_compactness(&[PersonIdx(0)], 0, &[SlotIdx(0), SlotIdx(3)]);
         assert_eq!(a.compactness_cost(0.0, 1.0), 0.0, "Person axis was never configured");
@@ -3348,6 +3521,7 @@ mod tests {
             1,
             vec![],
             1,
+            vec![],
         );
         let g = [GroupIdx(0)];
         a.add_group_compactness(&g, 0, &[SlotIdx(0)]);
@@ -3390,6 +3564,7 @@ mod tests {
             1,
             vec![],
             1,
+            vec![],
         );
         let g = [GroupIdx(0)];
         a.add_group_compactness(&g, 0, &[SlotIdx(0)]);
@@ -3439,6 +3614,7 @@ mod tests {
             1,
             vec![],
             1,
+            vec![],
         );
         let o = OfferingIdx(0);
         a.add_distributed(o, 0);
@@ -3473,6 +3649,7 @@ mod tests {
             1,
             vec![],
             1,
+            vec![],
         );
         let o = OfferingIdx(0);
         a.add_distributed(o, 0);
@@ -3510,6 +3687,7 @@ mod tests {
             1,
             vec![],
             1,
+            vec![],
         );
         let o = OfferingIdx(0);
         a.add_distributed(o, 0);
@@ -3547,6 +3725,7 @@ mod tests {
             1,
             vec![],
             1,
+            vec![],
         );
         a.add_distributed(OfferingIdx(0), 0);
         a.add_distributed(OfferingIdx(0), 1);
@@ -3582,6 +3761,7 @@ mod tests {
             1,
             vec![],
             1,
+            vec![],
         );
         let o = OfferingIdx(0);
         a.add_block(o, 0);
@@ -3623,6 +3803,7 @@ mod tests {
             1,
             vec![],
             1,
+            vec![],
         );
         let o = OfferingIdx(0);
         a.add_block(o, 0);
@@ -3662,6 +3843,7 @@ mod tests {
             1,
             vec![],
             1,
+            vec![],
         );
         a.add_distributed(OfferingIdx(0), 0);
         a.add_distributed(OfferingIdx(0), 1);

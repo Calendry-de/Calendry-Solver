@@ -206,6 +206,7 @@ impl<'p> Trial<'p> {
             imbalance_cost: self.state.imbalance_cost(self.problem),
             location_change_cost: self.state.location_change_cost(self.problem),
             room_turnaround_cost: self.state.room_turnaround_cost(self.problem),
+            room_churn_cost: self.state.room_churn_cost(self.problem),
             scheduling_pattern_cost: self.state.scheduling_pattern_cost(self.problem),
         }
     }
@@ -911,6 +912,7 @@ pub fn recompute_objective(problem: &Problem, solution: &Solution) -> Objective 
         imbalance_cost: state.imbalance_cost(problem),
         location_change_cost: state.location_change_cost(problem),
         room_turnaround_cost: state.room_turnaround_cost(problem),
+        room_churn_cost: state.room_churn_cost(problem),
         scheduling_pattern_cost: state.scheduling_pattern_cost(problem),
     }
 }
@@ -1064,6 +1066,7 @@ pub fn objectives_agree(a: Objective, b: Objective) -> bool {
             <= 1e-9 * (1.0 + a.location_change_cost.abs())
         && (a.room_turnaround_cost - b.room_turnaround_cost).abs()
             <= 1e-9 * (1.0 + a.room_turnaround_cost.abs())
+        && (a.room_churn_cost - b.room_churn_cost).abs() <= 1e-9 * (1.0 + a.room_churn_cost.abs())
         && (a.scheduling_pattern_cost - b.scheduling_pattern_cost).abs()
             <= 1e-9 * (1.0 + a.scheduling_pattern_cost.abs())
 }

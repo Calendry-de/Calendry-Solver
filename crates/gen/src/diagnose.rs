@@ -137,6 +137,7 @@ fn single(axis: fn(&mut Enforce), base: Enforce) -> Enforce {
         minimize_location_change_group: false,
         minimize_location_change_person: false,
         room_turnaround: false,
+        minimize_room_churn: false,
     };
     axis(&mut e);
     axis(&mut probe);
@@ -166,6 +167,7 @@ fn single(axis: fn(&mut Enforce), base: Enforce) -> Enforce {
         minimize_location_change_person: e.minimize_location_change_person
             && base.minimize_location_change_person,
         room_turnaround: e.room_turnaround && base.room_turnaround,
+        minimize_room_churn: e.minimize_room_churn && base.minimize_room_churn,
     }
 }
 

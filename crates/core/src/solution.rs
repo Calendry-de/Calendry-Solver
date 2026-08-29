@@ -587,6 +587,21 @@ impl SearchState {
         locations
     }
 
+    /// The distinct EXCLUSIVE Rooms `who` occupies, as raw indices —
+    /// `MinimizeRoomChurn`'s own input. Virtual (non-exclusive) Rooms are
+    /// excluded: "home room" variety is a physical-space concept, the same
+    /// exemption `Occupancy`'s own Room bitset gives them (ADR-0022).
+    fn rooms_of(problem: &Problem, who: &Occupant<'_>) -> Vec<u32> {
+        let mut rooms: Vec<u32> = who
+            .all_rooms()
+            .filter(|r| problem.rooms[r.get()].is_exclusive())
+            .map(|r| r.get() as u32)
+            .collect();
+        rooms.sort_unstable();
+        rooms.dedup();
+        rooms
+    }
+
     /// Whether this Session could occupy `span`.
     ///
     /// Covers the four structural types, `LecturerVeto`/`GroupVeto` (unary
@@ -903,6 +918,20 @@ impl SearchState {
         delta as f64 * problem.room_turnaround_weight
     }
 
+    /// The `MinimizeRoomChurn` cost DELTA of placing `who` at `span` — the
+    /// read-only preview, mirroring [`Self::location_change_delta`] but keyed
+    /// by WEEK and ROOM rather than day and location, and Group-only.
+    pub fn room_churn_delta(&self, problem: &Problem, who: &Occupant<'_>, span: &[SlotIdx]) -> f64 {
+        if span.is_empty() || !who.enforce.minimize_room_churn {
+            return 0.0;
+        }
+        let week = problem.slots.flags(span[0]).week;
+        let rooms = Self::rooms_of(problem, who);
+        self.aggregates
+            .group_churn_delta(who.subtree_groups, week, &rooms) as f64
+            * problem.room_churn_weight
+    }
+
     /// The `MaxWeeklyTeachingLoad` cost DELTA of placing `who` at `span` —
     /// the read-only preview, mirroring [`Self::max_daily_span_delta`].
     /// Keyed by `who.lecturers` and the WEEK `span` falls in, not by day —
@@ -1116,6 +1145,18 @@ impl SearchState {
             }
         }
 
+        if who.enforce.minimize_room_churn {
+            let churn_week = problem.slots.flags(span[0]).week;
+            let rooms = Self::rooms_of(problem, who);
+            if add {
+                self.aggregates
+                    .add_group_churn(who.subtree_groups, churn_week, &rooms);
+            } else {
+                self.aggregates
+                    .remove_group_churn(who.subtree_groups, churn_week, &rooms);
+            }
+        }
+
         // Share counters are keyed per rule and gated by the rule's own kind
         // scope, so they are applied unconditionally here.
         let week = problem.slots.flags(span[0]).week;
@@ -1286,6 +1327,15 @@ impl SearchState {
             );
         }
 
+        if who.enforce.minimize_room_churn {
+            let week = problem.slots.flags(span[0]).week;
+            score += self.aggregates.churn_ruin_cost(
+                who.subtree_groups,
+                week,
+                problem.room_churn_weight,
+            );
+        }
+
         score
     }
 
@@ -1350,6 +1400,15 @@ impl SearchState {
         }
         self.aggregates
             .room_turnaround_cost(problem.room_turnaround_weight)
+    }
+
+    /// What the currently over-cap distinct-Room weeks cost, at the
+    /// configured weight.
+    pub fn room_churn_cost(&self, problem: &Problem) -> f64 {
+        if problem.room_churn_weight == 0.0 {
+            return 0.0;
+        }
+        self.aggregates.churn_cost(problem.room_churn_weight)
     }
 
     /// What the currently over-cap weekly teaching loads cost, at the

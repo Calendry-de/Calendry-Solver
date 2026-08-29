@@ -398,6 +398,12 @@ pub struct Objective {
     /// like every other aggregate cost above; see
     /// [`crate::aggregates::RoomTurnaroundBufferInstance`].
     pub room_turnaround_cost: f64,
+    /// Distinct-Room excess over the configured weekly cap, summed over every
+    /// currently-occupied `(Group, week)` cell and already multiplied by the
+    /// configured weight — the "home room" cap, at WEEK granularity rather
+    /// than the day granularity every other aggregate cost above uses. See
+    /// [`crate::aggregates::MinimizeRoomChurnInstance`].
+    pub room_churn_cost: f64,
     /// `DistributedPatternAdherence` and `BlockPatternAdherence` together,
     /// already multiplied by each type's configured weight. Read whole off
     /// `Aggregates`' running totals for the same reason `compactness_cost` is:
@@ -432,6 +438,7 @@ impl Objective {
             + self.imbalance_cost
             + self.location_change_cost
             + self.room_turnaround_cost
+            + self.room_churn_cost
             + self.scheduling_pattern_cost
     }
 }
@@ -650,6 +657,7 @@ mod tests {
             imbalance_cost: 0.0,
             location_change_cost: 0.0,
             room_turnaround_cost: 0.0,
+            room_churn_cost: 0.0,
             scheduling_pattern_cost: 0.0,
         };
         let one_unplaced = Objective {
@@ -666,6 +674,7 @@ mod tests {
             imbalance_cost: 0.0,
             location_change_cost: 0.0,
             room_turnaround_cost: 0.0,
+            room_churn_cost: 0.0,
             scheduling_pattern_cost: 0.0,
         };
         assert!(one_unplaced.total(hard_penalty) > all_soft_bad.total(hard_penalty));
@@ -699,6 +708,7 @@ mod tests {
             imbalance_cost: 0.0,
             location_change_cost: 0.0,
             room_turnaround_cost: 0.0,
+            room_churn_cost: 0.0,
             scheduling_pattern_cost: 0.0,
         };
         let one_unplaced = Objective {
@@ -715,6 +725,7 @@ mod tests {
             imbalance_cost: 0.0,
             location_change_cost: 0.0,
             room_turnaround_cost: 0.0,
+            room_churn_cost: 0.0,
             scheduling_pattern_cost: 0.0,
         };
 

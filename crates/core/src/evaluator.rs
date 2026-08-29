@@ -164,6 +164,10 @@ fn score_one(problem: &Problem, solution: &Solution, state: &SearchState, mv: &M
     // violations instead of a Group/Person axis.
     let room_turnaround_delta = state.room_turnaround_delta(problem, &candidate, &span);
 
+    // Same ranking-signal contract as `max_weekly_teaching_load_delta` — keyed
+    // by Group and week, over distinct-Room excess instead of a headcount.
+    let room_churn_delta = state.room_churn_delta(problem, &candidate, &span);
+
     // Same ranking-signal contract as `compactness_delta` — see its own
     // comment above — for the Offering-scoped counterpart.
     let scheduling_pattern_delta = state.scheduling_pattern_delta(problem, &candidate, &span);
@@ -205,6 +209,7 @@ fn score_one(problem: &Problem, solution: &Solution, state: &SearchState, mv: &M
             + imbalance_delta
             + location_change_delta
             + room_turnaround_delta
+            + room_churn_delta
             + scheduling_pattern_delta,
     )
 }

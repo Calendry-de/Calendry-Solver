@@ -28,8 +28,8 @@ use std::collections::{HashMap, HashSet};
 use calendry_solver_core::aggregates::{
     CompactnessInstance, DayMixInstance, ExamSpacingSameDayInstance, ExamSpacingWindowInstance,
     MaxConsecutiveInstance, MaxDailySpanInstance, MaxWeeklyTeachingLoadInstance,
-    MinimizeLocationChangeInstance, MinimizeWeekdayImbalanceInstance, PatternAdherenceInstance,
-    RoomTurnaroundBufferInstance, ShareInstance, ShareWindow,
+    MinimizeLocationChangeInstance, MinimizeRoomChurnInstance, MinimizeWeekdayImbalanceInstance,
+    PatternAdherenceInstance, RoomTurnaroundBufferInstance, ShareInstance, ShareWindow,
 };
 use calendry_solver_core::ids::{GroupIdx, OfferingIdx, PersonIdx, RoomIdx, SlotIdx};
 use calendry_solver_core::preferences::{Preference, PreferenceInstance};
@@ -1275,10 +1275,19 @@ fn build_constraints(input: &pb::SolverInput) -> Result<ConstraintSet, ConvertEr
                     constraint_type: "RoomConsistency",
                 });
             }
-            Some(Params::MinimizeRoomChurn(_)) => {
-                return Err(ConvertError::ConstraintTypeUnimplemented {
-                    constraint: c.id.clone(),
-                    constraint_type: "MinimizeRoomChurn",
+            // Built — see `crate::aggregates::MinimizeRoomChurnInstance`.
+            Some(Params::MinimizeRoomChurn(p)) => {
+                if c.weight < 0.0 || c.weight.is_nan() {
+                    return Err(ConvertError::NegativeSoftWeight {
+                        constraint: c.id.clone(),
+                        weight: c.weight,
+                    });
+                }
+                set.minimize_room_churn.push(MinimizeRoomChurnInstance {
+                    id: c.id.clone(),
+                    kinds: c.applies_to_kinds.clone(),
+                    weight: c.weight,
+                    max_rooms_per_week: p.max_rooms_per_week,
                 });
             }
             // Built — see `crate::aggregates::MaxDailySpanInstance`. Same
