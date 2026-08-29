@@ -384,7 +384,7 @@ fn build_offerings(
         let eligible_rooms: Vec<RoomIdx> = rooms
             .iter()
             .enumerate()
-            .filter(|(_, r)| {
+            .filter(|(i, r)| {
                 if !allowed.is_empty() && !allowed.contains(&r.id) {
                     return false;
                 }
@@ -394,7 +394,14 @@ fn build_offerings(
                 if r.capacity < o.min_capacity {
                     return false;
                 }
-                required.iter().all(|f| r.features.contains(f))
+                if !required.iter().all(|f| r.features.contains(f)) {
+                    return false;
+                }
+                // Quantity-aware, additive alongside the presence-only check
+                // above rather than replacing it: `required_room_features` and
+                // `room_feature_requirements` are different wire lists a caller
+                // is not required to keep in sync, so both are honored.
+                room_feature_requirements_met(&input.rooms[*i], r, &o.room_feature_requirements)
             })
             .map(|(i, _)| RoomIdx(i as u32))
             .collect();
@@ -429,6 +436,35 @@ fn build_offerings(
     }
 
     Ok(out)
+}
+
+/// Whether every quantity-aware requirement on an Offering is satisfied by
+/// `wire_room`.
+///
+/// Additive alongside `required_room_features`'s presence-only check, not a
+/// replacement — see the call site. A requirement with no stated
+/// `min_quantity` asks the SAME question `required_room_features` already
+/// does (feature presence), through the new list's syntax rather than a new
+/// mechanism, per the field's own doc comment in `model.proto`; a stated
+/// minimum compares counts against `Room.feature_quantities`, the fix this
+/// exists for. `min_quantity: Some(0)` is a vacuous requirement any Room
+/// satisfies — not special-cased, since it falls out of the comparison.
+fn room_feature_requirements_met(
+    wire_room: &pb::Room,
+    room: &calendry_solver_core::problem::Room,
+    requirements: &[pb::RoomFeatureRequirement],
+) -> bool {
+    requirements.iter().all(|req| {
+        let have = wire_room
+            .feature_quantities
+            .iter()
+            .find(|fq| fq.feature == req.feature)
+            .map_or(0, |fq| fq.quantity);
+        match req.min_quantity {
+            Some(min) => have >= min,
+            None => room.features.contains(&req.feature) || have > 0,
+        }
+    })
 }
 
 // ---------------------------------------------------------------------------
