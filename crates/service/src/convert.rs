@@ -333,6 +333,14 @@ fn build_persons(
                 preferred: p.preferred.as_ref().map(|pref| Preference {
                     days: pref.days.clone(),
                     blocks: pref.blocks.clone(),
+                    // References `Room.feature_tags`' vocabulary by key, not
+                    // by an id — the same tradeoff `Offering.
+                    // required_room_features` already accepts. Not narrowed
+                    // or validated here: an unknown key simply never matches
+                    // any Room's features, the same "stale value is inert"
+                    // reading `MinimizeBlockUsage` and a stale day/block value
+                    // already get.
+                    room_features: pref.preferred_room_features.clone(),
                     weight_multiplier: pref.weight_multiplier,
                 }),
                 // An empty list on an axis means "every value on that axis", which

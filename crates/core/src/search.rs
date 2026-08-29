@@ -214,7 +214,11 @@ impl<'p> Trial<'p> {
         self.solution.set(p, Some(at));
         let o = self.problem.offering_of(p);
         self.soft += self.problem.soft.cost(o.soft_profile, at.start, at.room)
-            + self.problem.preferences.cost(p, at.start)
+            + self.problem.preferences.cost(
+                p,
+                at.start,
+                &self.problem.rooms[at.room.get()].features,
+            )
             + self.problem.movement_cost(p, at.start, at.room);
         self.unplaced -= 1;
         self.journal.push(Change::Placed(p, at));
@@ -230,7 +234,11 @@ impl<'p> Trial<'p> {
         self.solution.set(p, None);
         let o = self.problem.offering_of(p);
         self.soft -= self.problem.soft.cost(o.soft_profile, at.start, at.room)
-            + self.problem.preferences.cost(p, at.start)
+            + self.problem.preferences.cost(
+                p,
+                at.start,
+                &self.problem.rooms[at.room.get()].features,
+            )
             + self.problem.movement_cost(p, at.start, at.room);
         self.unplaced += 1;
         self.journal.push(Change::Removed(p, at));
@@ -644,7 +652,9 @@ fn ruin_worst(
             // asked to avoid — or away from where a minimize-movement policy
             // wants it — is exactly what it should pick up.
             let mut cost = problem.soft.cost(o.soft_profile, pl.start, pl.room)
-                + problem.preferences.cost(p, pl.start)
+                + problem
+                    .preferences
+                    .cost(p, pl.start, &problem.rooms[pl.room.get()].features)
                 + problem.movement_cost(p, pl.start, pl.room);
             if let Some(span) = problem.slots.span(pl.start, o.duration_blocks) {
                 let occupant = Occupant::of_offering(o).with_room(pl.room);
@@ -824,7 +834,9 @@ pub fn recompute_objective(problem: &Problem, solution: &Solution) -> Objective 
             Some(pl) => {
                 let o = problem.offering_of(p);
                 soft += problem.soft.cost(o.soft_profile, pl.start, pl.room)
-                    + problem.preferences.cost(p, pl.start)
+                    + problem
+                        .preferences
+                        .cost(p, pl.start, &problem.rooms[pl.room.get()].features)
                     + problem.movement_cost(p, pl.start, pl.room);
             }
             None => unplaced += 1,
@@ -900,7 +912,10 @@ pub fn soft_breakdown(problem: &Problem, solution: &Solution) -> Vec<SoftCompone
                 }
                 // The UNMET fraction, so a Session whose lecturers got exactly what
                 // they asked for reports nothing rather than reporting a success.
-                let unmet = problem.preferences.unmet(p, pl.start);
+                let unmet =
+                    problem
+                        .preferences
+                        .unmet(p, pl.start, &problem.rooms[pl.room.get()].features);
                 if unmet > 0.0 {
                     count += 1;
                 }

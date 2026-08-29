@@ -90,6 +90,18 @@ pub struct Preference {
     pub days: Vec<u32>,
     /// 0-based within the day.
     pub blocks: Vec<u32>,
+    /// Room-type keys this Person would RATHER teach in, from `Room.
+    /// feature_tags`' vocabulary. Empty means no room-type preference stated —
+    /// the same "empty means nothing" reading `days`/`blocks` already have.
+    ///
+    /// Deliberately NOT folded into the same `axes`/`met` computation those two
+    /// use: a room is not a grid coordinate, so there is nothing to narrow it
+    /// against, and — the load-bearing reason — doing so would change the
+    /// EXISTING divisor for any Person who states both kinds of preference,
+    /// silently reweighting day/block credit that already shipped. It is
+    /// scored as an independent additive term instead; see
+    /// [`PreferenceModel::cost`].
+    pub room_features: Vec<String>,
     /// Bounded per-person override of the tenant's weight. `None` means "use
     /// the tenant weight unmodified", which is a distinct state from `Some(0.0)`
     /// — hence `Option` rather than a plain `f64` defaulting to zero.
@@ -165,7 +177,21 @@ pub struct PreferenceModel {
     /// Summed weight of every configured instance, for the derived hard penalty
     /// and the initial temperature.
     pub total_weight: f64,
+    /// Per-placement room-type preference: which counted lecturers stated
+    /// `preferred_room_features`, and their (already-clamped) multiplier.
+    /// Bounded by the placement's lecturer count — a handful of entries, not
+    /// a table — so unlike `table` this clones its small string lists rather
+    /// than indexing into a shared array. See [`PreferenceModel::cost`] for
+    /// why room preference is scored live instead of precomputed per room.
+    room_wanted: Vec<Vec<(Vec<String>, f64)>>,
 }
+
+/// Every additive term `unmet`/`cost` can carry per placement, for the shared
+/// ceiling. Day/block share ONE `axes` divisor and count as one family; room
+/// is a second, independent family — see `Preference::room_features` for why
+/// it is not folded into the same divisor. A third term would need this
+/// updated alongside it, which is the entire point of naming it once.
+const PREFERENCE_AXIS_FAMILIES: f64 = 2.0;
 
 impl PreferenceModel {
     /// Build the table from each placement's lecturer set.
@@ -212,6 +238,7 @@ impl PreferenceModel {
                 row_width,
                 weight_of: Vec::new(),
                 total_weight,
+                room_wanted: Vec::new(),
             };
         }
 
@@ -224,6 +251,7 @@ impl PreferenceModel {
 
         let mut weight_of = vec![0.0f64; placements.len()];
         let mut table = vec![0.0f32; placements.len() * row_width];
+        let mut room_wanted: Vec<Vec<(Vec<String>, f64)>> = vec![Vec::new(); placements.len()];
 
         for (i, var) in placements.iter().enumerate() {
             let offering = &offerings[var.offering.get()];
@@ -233,6 +261,14 @@ impl PreferenceModel {
                 .map(|inst| inst.weight)
                 .sum();
             weight_of[i] = weight;
+
+            if weight == 0.0 {
+                // Gates BOTH terms: an instance weight of zero means "count
+                // the fit but do not steer", the same reading a zero weight
+                // gives every other soft type, and it is the one input both
+                // the day/block table and room preference share.
+                continue;
+            }
 
             // §4.1: LECTURERS ONLY, deliberately. A Session's attendee set is
             // its lecturers plus every member of every attached Group's
@@ -248,6 +284,26 @@ impl PreferenceModel {
                 .lecturers
                 .iter()
                 .filter_map(|l| narrowed[l.get()].as_ref())
+                .collect();
+
+            // Independent of `counted` above and of whether it ends up empty:
+            // a lecturer stating ONLY a room preference and no usable
+            // day/block axis is invisible to `narrow()` (`axes == 0` there),
+            // so this reads `persons` directly rather than riding on
+            // `narrowed`. Reusing `counted`'s day/block gate here would
+            // silently drop that lecturer's room preference whenever they
+            // said nothing about days or blocks — exactly the "stated
+            // something and did not get it" case this type exists to charge.
+            room_wanted[i] = offering
+                .lecturers
+                .iter()
+                .filter_map(|l| {
+                    let pref = persons[l.get()].preferred.as_ref()?;
+                    if pref.room_features.is_empty() {
+                        return None;
+                    }
+                    Some((pref.room_features.clone(), clamp_multiplier(pref.weight_multiplier)))
+                })
                 .collect();
 
             if counted.is_empty() {
@@ -267,9 +323,9 @@ impl PreferenceModel {
                 // which is why the app's assembly counts placements with no
                 // preference signal: otherwise this is the `lecturer_veto`
                 // shape again, a rule that looks configured and can never fire.
-                continue;
-            }
-            if weight == 0.0 {
+                //
+                // `room_wanted[i]` is UNAFFECTED by this continue — it was
+                // already filled above and stands on its own gate.
                 continue;
             }
 
@@ -307,16 +363,34 @@ impl PreferenceModel {
             }
         }
 
-        Self { instances, table, cell_of_slot, row_width, weight_of, total_weight }
+        Self { instances, table, cell_of_slot, row_width, weight_of, total_weight, room_wanted }
     }
 
-    /// The unmet fraction for `p` starting at `slot`, in
-    /// `0.0..=MAX_WEIGHT_MULTIPLIER`.
+    /// The unmet fraction for `p` starting at `slot`, landing in a Room with
+    /// `room_features`, in `0.0..=PREFERENCE_AXIS_FAMILIES * MAX_WEIGHT_MULTIPLIER`.
     ///
-    /// Keyed on the START slot, like every other soft cost: a two-block Session
-    /// beginning in block 1 is priced on block 1.
+    /// Day/block and room are independent additive terms — see
+    /// [`Preference::room_features`] for why room is not folded into the same
+    /// `axes` divisor day/block share. Keyed on the START slot, like every
+    /// other soft cost: a two-block Session beginning in block 1 is priced on
+    /// block 1.
     #[inline]
-    pub fn unmet(&self, p: PlacementIdx, slot: SlotIdx) -> f64 {
+    pub fn unmet(&self, p: PlacementIdx, slot: SlotIdx, room_features: &[String]) -> f64 {
+        self.day_block_unmet(p, slot) + self.room_unmet(p, room_features)
+    }
+
+    /// What the objective is charged for placing `p` at `slot` in a Room with
+    /// `room_features`.
+    #[inline]
+    pub fn cost(&self, p: PlacementIdx, slot: SlotIdx, room_features: &[String]) -> f64 {
+        if self.table.is_empty() {
+            return 0.0;
+        }
+        self.weight_of[p.get()] * self.unmet(p, slot, room_features)
+    }
+
+    #[inline]
+    fn day_block_unmet(&self, p: PlacementIdx, slot: SlotIdx) -> f64 {
         if self.table.is_empty() {
             return 0.0;
         }
@@ -324,14 +398,34 @@ impl PreferenceModel {
         f64::from(self.table[p.get() * self.row_width + cell])
     }
 
-    /// What the objective is charged for placing `p` at `slot`.
+    /// LIVE, not precomputed: unlike day/block, this does not vary with
+    /// `slot`, so a `(placement, room)` table would only exist to cache a
+    /// lookup as cheap as the comparison itself. `room_wanted[p]` is already
+    /// bounded to a handful of entries — a placement's counted lecturers, not
+    /// every Room in the tenant — so comparing feature lists here costs
+    /// nothing a hot loop would notice.
     #[inline]
-    pub fn cost(&self, p: PlacementIdx, slot: SlotIdx) -> f64 {
-        if self.table.is_empty() {
+    fn room_unmet(&self, p: PlacementIdx, room_features: &[String]) -> f64 {
+        if self.room_wanted.is_empty() {
             return 0.0;
         }
-        let cell = self.cell_of_slot[slot.get()] as usize;
-        self.weight_of[p.get()] * f64::from(self.table[p.get() * self.row_width + cell])
+        let wanted = &self.room_wanted[p.get()];
+        if wanted.is_empty() {
+            return 0.0;
+        }
+        let sum: f64 = wanted
+            .iter()
+            .map(|(features, multiplier)| {
+                // ANY overlap counts as met, mirroring the day/block axes:
+                // neither is a conjunction ("Tuesday mornings only" cannot be
+                // expressed by two arrays), so "any stated room type present"
+                // is the reading consistent with "I like mornings, and I like
+                // Tuesdays" being two separate statements rather than one.
+                let met = features.iter().any(|f| room_features.contains(f));
+                multiplier * if met { 0.0 } else { 1.0 }
+            })
+            .sum();
+        sum / wanted.len() as f64
     }
 
     pub fn is_empty(&self) -> bool {
@@ -342,13 +436,16 @@ impl PreferenceModel {
     /// constraint configuration ALONE.
     ///
     /// That independence from instance data is the property that makes the
-    /// per-person override safe rather than merely bounded: the unmet fraction
-    /// is normalized to `0.0..=1.0` per placement and each lecturer's own term
-    /// is bounded by `MAX_WEIGHT_MULTIPLIER`, so the ceiling does not depend on
-    /// how many lecturers a placement has or how many have an override on file.
-    /// See `Problem::hard_penalty`.
+    /// per-person override safe rather than merely bounded: each additive
+    /// term's unmet fraction is normalized to `0.0..=1.0` per placement and
+    /// each lecturer's own multiplier is bounded by `MAX_WEIGHT_MULTIPLIER`,
+    /// so the ceiling does not depend on how many lecturers a placement has or
+    /// how many have an override on file. `PREFERENCE_AXIS_FAMILIES` scales
+    /// this for room joining day/block as a second independent term — see its
+    /// own doc for why a third term must update it too. See
+    /// `Problem::hard_penalty`.
     pub fn max_cost_per_placement(&self) -> f64 {
-        self.total_weight * MAX_WEIGHT_MULTIPLIER
+        self.total_weight * MAX_WEIGHT_MULTIPLIER * PREFERENCE_AXIS_FAMILIES
     }
 }
 
@@ -430,14 +527,22 @@ fn narrow(pref: Option<&Preference>, slots: &SlotTable, blocks_per_day: usize) -
         days: if any_day { days } else { Vec::new() },
         blocks: if any_block { blocks } else { Vec::new() },
         axes,
-        // Clamped defensively. `f64::clamp` propagates NaN and panics on a NaN
-        // bound, so a non-finite multiplier is replaced outright rather than
-        // clamped — this service accepts possibly-invalid input by design, and
-        // one NaN reaching the table would poison the whole objective.
-        multiplier: match pref.weight_multiplier {
-            Some(m) if m.is_finite() => m.clamp(MIN_WEIGHT_MULTIPLIER, MAX_WEIGHT_MULTIPLIER),
-            Some(_) => 1.0,
-            None => 1.0,
-        },
+        multiplier: clamp_multiplier(pref.weight_multiplier),
     })
+}
+
+/// Clamp a per-person weight override to `MIN_WEIGHT_MULTIPLIER..=
+/// MAX_WEIGHT_MULTIPLIER`, defaulting to `1.0` (tenant weight unmodified).
+///
+/// Shared between the day/block axis and the room axis, which both bound a
+/// lecturer's own contribution the same way. Clamped defensively rather than
+/// via `f64::clamp` directly: that propagates NaN and panics on a NaN bound,
+/// so a non-finite multiplier is replaced outright — this service accepts
+/// possibly-invalid input by design, and one NaN reaching either term would
+/// poison the whole objective.
+fn clamp_multiplier(m: Option<f64>) -> f64 {
+    match m {
+        Some(m) if m.is_finite() => m.clamp(MIN_WEIGHT_MULTIPLIER, MAX_WEIGHT_MULTIPLIER),
+        Some(_) | None => 1.0,
+    }
 }

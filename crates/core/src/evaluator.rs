@@ -127,7 +127,11 @@ fn score_one(problem: &Problem, solution: &Solution, state: &SearchState, mv: &M
             // The movement cost is exact for the same reason: it depends only
             // on this placement's `original` and the candidate, nothing else
             // already placed.
-            + problem.preferences.cost(mv.placement, mv.to.start)
+            + problem.preferences.cost(
+                mv.placement,
+                mv.to.start,
+                &problem.rooms[mv.to.room.get()].features,
+            )
             + problem.movement_cost(mv.placement, mv.to.start, mv.to.room)
             + share_penalty
             + day_mix_penalty,

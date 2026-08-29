@@ -38,7 +38,7 @@ const SATURDAY: SlotIdx = SlotIdx(1);
 const ONLY: PlacementIdx = PlacementIdx(0);
 
 fn cost_at(problem: &Problem, slot: SlotIdx) -> f64 {
-    problem.preferences.cost(ONLY, slot)
+    problem.preferences.cost(ONLY, slot, &[])
 }
 
 // ---------------------------------------------------------------------------
@@ -141,7 +141,7 @@ fn no_counted_lecturer_costs_nothing_from_an_all_zero_row() {
     // Resolved at table-build time, not at read time: the row is zeros rather
     // than the read being conditional, which is what keeps the scoring path a
     // branch-free indexed read.
-    assert_eq!(problem.preferences.unmet(ONLY, MONDAY), 0.0);
+    assert_eq!(problem.preferences.unmet(ONLY, MONDAY, &[]), 0.0);
 }
 
 #[test]
@@ -180,13 +180,13 @@ fn a_disabled_rule_is_inert_even_with_preferences_on_file() {
         Vec::new(),
     );
 
-    assert_eq!(without.preferences.cost(ONLY, MONDAY), 0.0);
-    assert_eq!(without.preferences.cost(ONLY, SATURDAY), 0.0);
+    assert_eq!(without.preferences.cost(ONLY, MONDAY, &[]), 0.0);
+    assert_eq!(without.preferences.cost(ONLY, SATURDAY, &[]), 0.0);
     assert!(without.preferences.is_empty());
 
     // And the objective differs, so the rule is not merely reporting: the
     // enabled run pays for Monday and the disabled one does not.
-    assert!(with.preferences.cost(ONLY, MONDAY) > 0.0);
+    assert!(with.preferences.cost(ONLY, MONDAY, &[]) > 0.0);
 }
 
 // ---------------------------------------------------------------------------
@@ -249,9 +249,9 @@ fn both_axes_earn_credit_independently() {
     let w = PREFERENCE_WEIGHT;
 
     // Monday block 0: day matched, block did not.
-    assert_eq!(problem.preferences.cost(ONLY, SlotIdx(0)), 0.5 * w, "one axis of two");
+    assert_eq!(problem.preferences.cost(ONLY, SlotIdx(0), &[]), 0.5 * w, "one axis of two");
     // Monday block 1: both matched.
-    assert_eq!(problem.preferences.cost(ONLY, SlotIdx(1)), 0.0, "both axes");
+    assert_eq!(problem.preferences.cost(ONLY, SlotIdx(1), &[]), 0.0, "both axes");
 }
 
 // ---------------------------------------------------------------------------
@@ -275,7 +275,7 @@ fn the_multiplier_is_clamped_on_read() {
             testing::preference(&[1], &[], Some(given)),
         )]);
         assert_eq!(
-            problem.preferences.cost(ONLY, SATURDAY),
+            problem.preferences.cost(ONLY, SATURDAY, &[]),
             expected * PREFERENCE_WEIGHT,
             "multiplier {given} should clamp to {expected}"
         );
@@ -293,7 +293,7 @@ fn a_non_finite_multiplier_does_not_poison_the_objective() {
             &[],
             testing::preference(&[1], &[], Some(given)),
         )]);
-        let cost = problem.preferences.cost(ONLY, SATURDAY);
+        let cost = problem.preferences.cost(ONLY, SATURDAY, &[]);
         assert!(cost.is_finite(), "{given} produced {cost}");
         assert_eq!(cost, PREFERENCE_WEIGHT, "should fall back to a 1.0 multiplier");
     }
@@ -316,11 +316,97 @@ fn one_unplaced_session_still_outranks_every_preference_cost() {
     );
 
     // And the ceiling is computable from the configuration alone: adding a
-    // Person with an override on file must not move it.
+    // Person with an override on file must not move it. The `* 2.0` is
+    // day/block and room counted as two independent additive families, each
+    // bounded by `MAX_WEIGHT_MULTIPLIER` on its own — see
+    // `PREFERENCE_AXIS_FAMILIES` in `preferences.rs`.
     assert_eq!(
         problem.preferences.max_cost_per_placement(),
-        PREFERENCE_WEIGHT * MAX_WEIGHT_MULTIPLIER
+        PREFERENCE_WEIGHT * MAX_WEIGHT_MULTIPLIER * 2.0
     );
+}
+
+// ---------------------------------------------------------------------------
+// Room-type preference — the second, independent additive term
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_room_preference_is_met_by_the_room_that_has_the_feature() {
+    // R0 has "lab", R1 does not — the fixture's whole point.
+    let problem = testing::one_lecturer_wanting_a_room_feature(None);
+
+    assert_eq!(
+        problem.preferences.cost(ONLY, MONDAY, &["lab".to_string()]),
+        0.0,
+        "the wanted feature is present: nothing charged"
+    );
+    assert_eq!(
+        problem.preferences.cost(ONLY, MONDAY, &[]),
+        PREFERENCE_WEIGHT,
+        "the wanted feature is absent: the full unmet cost, multiplier 1.0"
+    );
+}
+
+#[test]
+fn a_lecturer_stating_only_a_room_preference_is_still_counted() {
+    // The regression this fixture exists for: `one_lecturer_wanting_a_room_feature`
+    // states NO day or block at all, so `narrow()` returns `None` for this
+    // Person and `counted` (the day/block set) is empty. If room preference
+    // rode on `counted`, this would report 0 in EVERY room — the exact bug
+    // `room_wanted`'s independent gate exists to avoid.
+    let problem = testing::one_lecturer_wanting_a_room_feature(None);
+    assert!(
+        problem.preferences.cost(ONLY, MONDAY, &[]) > 0.0,
+        "a room-only preference must still be charged when unmet, even though \
+         `counted` (day/block) is empty for this lecturer"
+    );
+}
+
+#[test]
+fn day_block_and_room_are_independent_additive_terms() {
+    // One lecturer wanting Monday AND "lab", multiplier 1.0. Four
+    // combinations, and the two axes must not interact: changing the room
+    // must never move the day/block component and vice versa.
+    let problem = testing::assemble(ProblemSpec {
+        rooms: vec![
+            calendry_solver_core::problem::Room {
+                features: vec!["lab".to_string()],
+                ..testing::room("R0")
+            },
+            testing::room("R1"),
+        ],
+        persons: vec![testing::person_with_preference(
+            "wants-monday-lab",
+            &[],
+            calendry_solver_core::preferences::Preference {
+                days: vec![1],
+                blocks: vec![],
+                room_features: vec!["lab".to_string()],
+                weight_multiplier: None,
+            },
+        )],
+        offerings: vec![testing::with_lecturers(
+            testing::offering("S", 1, &[0, 1]),
+            &[0],
+        )],
+        constraints: testing::with_preference(vec![testing::preference_rule(
+            "c-pref",
+            PREFERENCE_WEIGHT,
+        )]),
+        ..ProblemSpec::new(testing::two_day_grid())
+    });
+    let w = PREFERENCE_WEIGHT;
+    let lab = ["lab".to_string()];
+    let no_lab: [String; 0] = [];
+
+    // Monday (day met) + lab (room met): both terms at 0.
+    assert_eq!(problem.preferences.cost(ONLY, MONDAY, &lab), 0.0);
+    // Monday (day met) + no lab (room unmet): only the room term charges.
+    assert_eq!(problem.preferences.cost(ONLY, MONDAY, &no_lab), w, "room term alone");
+    // Saturday (day unmet) + lab (room met): only the day term charges.
+    assert_eq!(problem.preferences.cost(ONLY, SATURDAY, &lab), w, "day term alone");
+    // Saturday (day unmet) + no lab (room unmet): both terms charge, summed.
+    assert_eq!(problem.preferences.cost(ONLY, SATURDAY, &no_lab), 2.0 * w, "both terms");
 }
 
 // ---------------------------------------------------------------------------
@@ -416,8 +502,8 @@ fn the_model_is_inert_without_a_grid_to_price_against() {
     // Degenerate but reachable through `PreferenceModel::build`'s own
     // signature, and the read path must not index into an empty table.
     let model = PreferenceModel::default();
-    assert_eq!(model.cost(ONLY, MONDAY), 0.0);
-    assert_eq!(model.unmet(ONLY, MONDAY), 0.0);
+    assert_eq!(model.cost(ONLY, MONDAY, &[]), 0.0);
+    assert_eq!(model.unmet(ONLY, MONDAY, &[]), 0.0);
     assert!(model.is_empty());
     assert_eq!(model.max_cost_per_placement(), 0.0);
 }

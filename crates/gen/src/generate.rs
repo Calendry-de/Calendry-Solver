@@ -408,7 +408,12 @@ fn build_persons(params: &InstanceParams, rng: &mut Rng) -> Vec<Person> {
                 1 => Some(2.0),
                 _ => None,
             };
-            Some(Preference { days: vec![day], blocks, weight_multiplier: multiplier })
+            Some(Preference {
+                days: vec![day],
+                blocks,
+                room_features: vec![],
+                weight_multiplier: multiplier,
+            })
         } else {
             None
         };

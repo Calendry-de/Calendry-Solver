@@ -99,7 +99,11 @@ fn an_absent_multiplier_stays_absent_rather_than_becoming_zero() {
     // the field alone would catch.
     let problem = converted(&input_with(Some(preference(vec![2], vec![], None)), vec![rule(4.0)]));
     let monday = SlotIdx(0);
-    assert_eq!(problem.preferences.cost(ONLY, monday), 4.0, "Monday is not the stated Tuesday");
+    assert_eq!(
+        problem.preferences.cost(ONLY, monday, &[]),
+        4.0,
+        "Monday is not the stated Tuesday"
+    );
 }
 
 #[test]
@@ -111,7 +115,7 @@ fn no_stated_preference_is_no_preference_not_an_empty_one() {
 
     assert!(problem.persons[0].preferred.is_none());
     for slot in [SlotIdx(0), SlotIdx(5), SlotIdx(11)] {
-        assert_eq!(problem.preferences.cost(ONLY, slot), 0.0, "slot {slot:?}");
+        assert_eq!(problem.preferences.cost(ONLY, slot, &[]), 0.0, "slot {slot:?}");
     }
 }
 
@@ -242,7 +246,7 @@ fn an_out_of_range_multiplier_is_clamped_rather_than_refused() {
 
     let monday = SlotIdx(0);
     assert_eq!(
-        problem.preferences.cost(ONLY, monday),
+        problem.preferences.cost(ONLY, monday, &[]),
         5.0 * preferences::MAX_WEIGHT_MULTIPLIER,
         "50.0 must clamp to the maximum"
     );

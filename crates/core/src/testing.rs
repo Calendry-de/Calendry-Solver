@@ -581,7 +581,23 @@ pub fn break_then_teaching_grid() -> SlotTable {
 /// A stated preference. Empty arrays mean **no preference on that axis**, the
 /// inverse of [`blackout`].
 pub fn preference(days: &[u32], blocks: &[u32], multiplier: Option<f64>) -> Preference {
-    Preference { days: days.to_vec(), blocks: blocks.to_vec(), weight_multiplier: multiplier }
+    Preference {
+        days: days.to_vec(),
+        blocks: blocks.to_vec(),
+        room_features: Vec::new(),
+        weight_multiplier: multiplier,
+    }
+}
+
+/// A stated room-type preference, with no day/block axis — the shape a
+/// lecturer who cares only about the room, not the time, would state.
+pub fn room_preference(features: &[&str], multiplier: Option<f64>) -> Preference {
+    Preference {
+        days: Vec::new(),
+        blocks: Vec::new(),
+        room_features: features.iter().map(ToString::to_string).collect(),
+        weight_multiplier: multiplier,
+    }
 }
 
 pub fn person_with_preference(id: &str, groups: &[u32], pref: Preference) -> Person {
@@ -652,6 +668,30 @@ pub fn no_lecturers_with_preference_enabled() -> Problem {
     })
 }
 
+/// Two rooms, one lecturer stating ONLY a room-type preference — no day or
+/// block axis at all. Room 0 has the wanted feature, Room 1 does not.
+///
+/// The day/block-only shape: this is the case `narrow()` returns `None` for,
+/// which is exactly why room preference cannot ride on `counted` — a
+/// lecturer who said nothing about days or blocks is not absent from the
+/// room axis, they simply never stated one to begin with.
+pub fn one_lecturer_wanting_a_room_feature(multiplier: Option<f64>) -> Problem {
+    assemble(ProblemSpec {
+        rooms: vec![
+            Room { features: vec!["lab".to_string()], ..room("R0") },
+            room("R1"),
+        ],
+        persons: vec![person_with_preference(
+            "wants-lab",
+            &[],
+            room_preference(&["lab"], multiplier),
+        )],
+        offerings: vec![with_lecturers(offering("S", 1, &[0, 1]), &[0])],
+        constraints: with_preference(vec![preference_rule("c-pref", PREFERENCE_WEIGHT)]),
+        ..ProblemSpec::new(two_day_grid())
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Seeded — randomized instances for the drift and determinism tests
 // ---------------------------------------------------------------------------
@@ -686,9 +726,23 @@ fn seeded(seed: u64, preferences: bool) -> Problem {
     let weeks = 1 + rng.below(2); // 1..2
     let slots = SlotTable::build(blocks, &[1, 2, 6], &teaching_weeks(weeks)).unwrap();
 
+    // Fixed, small vocabulary rather than a random string: a room-type
+    // preference matches by KEY, so the drift/room tests need real chances of
+    // both a match and a miss, which a vocabulary of one made of unique
+    // strings could never produce.
+    const ROOM_FEATURE_VOCAB: [&str; 3] = ["lab", "av", "whiteboard"];
+
     let n_rooms = 2 + rng.below(3);
     let room_list: Vec<Room> = (0..n_rooms)
-        .map(|i| room_with(&format!("R{i}"), 1 + (rng.below(9) as u32), rng.below(4) == 0))
+        .map(|i| {
+            let mut r = room_with(&format!("R{i}"), 1 + (rng.below(9) as u32), rng.below(4) == 0);
+            r.features = ROOM_FEATURE_VOCAB
+                .iter()
+                .filter(|_| rng.below(2) == 0)
+                .map(ToString::to_string)
+                .collect();
+            r
+        })
         .collect();
 
     let n_groups = 1 + rng.below(3);
@@ -734,20 +788,43 @@ fn seeded(seed: u64, preferences: bool) -> Problem {
         let mut prng = Rng::new(seed ^ 0x9e37_79b9_7f4a_7c15);
 
         for (i, p) in people.iter_mut().enumerate() {
-            if prng.below(2) == 0 {
+            let wants_day_block = prng.below(2) == 1;
+            // Independent of the day/block draw, deliberately: a person who
+            // stated ONLY a room preference (no day/block at all) is the case
+            // `narrow()` returns `None` for, which is exactly the gap
+            // `room_wanted` exists to not silently drop. If this were gated by
+            // `wants_day_block` too, that lecturer would never appear in this
+            // fixture and the drift test would cover a term it cannot see.
+            let wants_room = prng.below(3) == 0;
+            if !wants_day_block && !wants_room {
                 continue;
             }
+
             // One day the grid teaches on, so the value is not narrowed away;
             // the block axis is stated only sometimes, which is what makes the
             // divisor 1 for some people and 2 for others.
-            let days = vec![[1u32, 2, 6][i % 3]];
-            let blocks = if prng.below(2) == 0 { vec![] } else { vec![prng.below(2) as u32] };
+            let days = if wants_day_block { vec![[1u32, 2, 6][i % 3]] } else { vec![] };
+            let blocks = if !wants_day_block || prng.below(2) == 0 {
+                vec![]
+            } else {
+                vec![prng.below(2) as u32]
+            };
+            let room_features: Vec<String> = if wants_room {
+                ROOM_FEATURE_VOCAB
+                    .iter()
+                    .filter(|_| prng.below(2) == 0)
+                    .map(ToString::to_string)
+                    .collect()
+            } else {
+                vec![]
+            };
             let multiplier = match prng.below(3) {
                 0 => None,
                 1 => Some(0.5),
                 _ => Some(2.0),
             };
-            p.preferred = Some(preference(&days, &blocks, multiplier));
+            p.preferred =
+                Some(Preference { days, blocks, room_features, weight_multiplier: multiplier });
         }
 
         for o in &mut offerings {
