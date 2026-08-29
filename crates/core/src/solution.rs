@@ -880,6 +880,29 @@ impl SearchState {
         delta
     }
 
+    /// The `RoomTurnaroundBuffer` cost DELTA of placing `who` at `span` — the
+    /// read-only preview, summed over every EXCLUSIVE Room `who` occupies
+    /// (see [`Occupant::all_rooms`]): a multi-Room Session needs a buffer in
+    /// each physical Room it uses.
+    pub fn room_turnaround_delta(
+        &self,
+        problem: &Problem,
+        who: &Occupant<'_>,
+        span: &[SlotIdx],
+    ) -> f64 {
+        if span.is_empty() || !who.enforce.room_turnaround {
+            return 0.0;
+        }
+        let day = problem.slots.flags(span[0]).day_index;
+        let mut delta = 0i64;
+        for r in who.all_rooms() {
+            if problem.rooms[r.get()].is_exclusive() {
+                delta += self.aggregates.room_turnaround_delta(r, day, span);
+            }
+        }
+        delta as f64 * problem.room_turnaround_weight
+    }
+
     /// The `MaxWeeklyTeachingLoad` cost DELTA of placing `who` at `span` —
     /// the read-only preview, mirroring [`Self::max_daily_span_delta`].
     /// Keyed by `who.lecturers` and the WEEK `span` falls in, not by day —
@@ -1005,6 +1028,17 @@ impl SearchState {
                 } else {
                     self.aggregates
                         .remove_person_location(who.attendees, day, &locations);
+                }
+            }
+        }
+        if who.enforce.room_turnaround {
+            for r in who.all_rooms() {
+                if problem.rooms[r.get()].is_exclusive() {
+                    if add {
+                        self.aggregates.add_room_turnaround(r, day, span);
+                    } else {
+                        self.aggregates.remove_room_turnaround(r, day, span);
+                    }
                 }
             }
         }
@@ -1172,6 +1206,20 @@ impl SearchState {
             );
         }
 
+        if who.enforce.room_turnaround {
+            let day = problem.slots.flags(span[0]).day_index;
+            for r in who.all_rooms() {
+                if problem.rooms[r.get()].is_exclusive() {
+                    score += self.aggregates.room_turnaround_ruin_cost(
+                        r,
+                        day,
+                        span,
+                        problem.room_turnaround_weight,
+                    );
+                }
+            }
+        }
+
         if let Some(offering) = who.offering {
             use crate::problem::SchedulingPattern;
             if who.enforce.distributed_pattern
@@ -1292,6 +1340,16 @@ impl SearchState {
             problem.location_change_group_weight,
             problem.location_change_person_weight,
         )
+    }
+
+    /// What every currently-violating Room-adjacency boundary costs, at the
+    /// configured weight.
+    pub fn room_turnaround_cost(&self, problem: &Problem) -> f64 {
+        if problem.room_turnaround_weight == 0.0 {
+            return 0.0;
+        }
+        self.aggregates
+            .room_turnaround_cost(problem.room_turnaround_weight)
     }
 
     /// What the currently over-cap weekly teaching loads cost, at the

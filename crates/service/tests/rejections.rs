@@ -415,10 +415,6 @@ fn every_staged_p2_type_is_unimplemented_not_invalid() {
     let cases: Vec<(&str, Params)> = vec![
         ("RoomConsistency", Params::RoomConsistency(pb::RoomConsistency {})),
         ("MinimizeRoomChurn", Params::MinimizeRoomChurn(pb::MinimizeRoomChurn::default())),
-        (
-            "RoomTurnaroundBuffer",
-            Params::RoomTurnaroundBuffer(pb::RoomTurnaroundBuffer::default()),
-        ),
     ];
 
     for (name, params) in cases {

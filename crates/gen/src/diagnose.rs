@@ -136,6 +136,7 @@ fn single(axis: fn(&mut Enforce), base: Enforce) -> Enforce {
         minimize_weekday_imbalance: false,
         minimize_location_change_group: false,
         minimize_location_change_person: false,
+        room_turnaround: false,
     };
     axis(&mut e);
     axis(&mut probe);
@@ -164,6 +165,7 @@ fn single(axis: fn(&mut Enforce), base: Enforce) -> Enforce {
             && base.minimize_location_change_group,
         minimize_location_change_person: e.minimize_location_change_person
             && base.minimize_location_change_person,
+        room_turnaround: e.room_turnaround && base.room_turnaround,
     }
 }
 

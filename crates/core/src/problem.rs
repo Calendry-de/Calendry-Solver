@@ -9,7 +9,8 @@ use crate::aggregates::{
     Aggregates, CompactnessInstance, DayMixInstance, ExamSpacingSameDayInstance,
     ExamSpacingWindowInstance, MaxConsecutiveInstance, MaxDailySpanInstance,
     MaxWeeklyTeachingLoadInstance, MinimizeLocationChangeInstance,
-    MinimizeWeekdayImbalanceInstance, PatternAdherenceInstance, ShareInstance,
+    MinimizeWeekdayImbalanceInstance, PatternAdherenceInstance, RoomTurnaroundBufferInstance,
+    ShareInstance,
 };
 use crate::bitset::BitSet;
 use crate::groups::{GroupClosure, GroupCycle};
@@ -301,6 +302,11 @@ pub struct ConstraintSet {
     /// values — reduces cross-campus walking between back-to-back Sessions.
     /// See [`crate::aggregates::MinimizeLocationChangeInstance`].
     pub minimize_location_change: Vec<MinimizeLocationChangeInstance>,
+    /// SOFT, pairwise like the four structural double-booking types but keyed
+    /// by a configurable BUFFER DISTANCE rather than exact-slot overlap.
+    /// Requires a minimum gap between two bookings of the same Room. See
+    /// [`crate::aggregates::RoomTurnaroundBufferInstance`].
+    pub room_turnaround_buffer: Vec<RoomTurnaroundBufferInstance>,
 }
 
 /// One `ProtectedBlock` instance. The FIRST hard type whose values
@@ -393,6 +399,7 @@ pub struct Enforce {
     pub minimize_weekday_imbalance: bool,
     pub minimize_location_change_group: bool,
     pub minimize_location_change_person: bool,
+    pub room_turnaround: bool,
 }
 
 impl ConstraintSet {
@@ -446,6 +453,7 @@ impl ConstraintSet {
                 .minimize_location_change
                 .iter()
                 .any(|c| c.person && c.covers(kind)),
+            room_turnaround: self.room_turnaround_buffer.iter().any(|c| c.covers(kind)),
         }
     }
 }
@@ -962,6 +970,9 @@ pub struct Problem {
     pub location_change_group_weight: f64,
     /// The Person-axis counterpart of `location_change_group_weight`.
     pub location_change_person_weight: f64,
+    /// Summed weight of every configured `RoomTurnaroundBuffer` instance.
+    /// Zero when not configured.
+    pub room_turnaround_weight: f64,
     /// `Room.location`, interned to a dense index parallel to [`Self::rooms`].
     /// See [`Problem::room_location`].
     room_location: Vec<u32>,
@@ -1176,6 +1187,8 @@ impl Problem {
             slots.active_days().len(),
             constraints.minimize_location_change.clone(),
             n_locations,
+            constraints.room_turnaround_buffer.clone(),
+            rooms.len(),
         );
 
         let day_mix_weight: f64 = constraints
@@ -1260,6 +1273,11 @@ impl Problem {
             .minimize_location_change
             .iter()
             .filter(|i| i.person)
+            .map(|i| i.weight)
+            .sum();
+        let room_turnaround_weight: f64 = constraints
+            .room_turnaround_buffer
+            .iter()
             .map(|i| i.weight)
             .sum();
         let distributed_pattern_weight: f64 = constraints
@@ -1398,6 +1416,7 @@ impl Problem {
             block_pattern_weight,
             location_change_group_weight,
             location_change_person_weight,
+            room_turnaround_weight,
             room_location,
             in_scope,
             placement_counts,

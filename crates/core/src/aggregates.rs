@@ -28,7 +28,7 @@
 //!   exactly how `ExactFrequency` already behaves for unplaced Sessions, rather
 //!   than a new exception.
 
-use crate::ids::{GroupIdx, OfferingIdx, PersonIdx, SlotIdx};
+use crate::ids::{GroupIdx, OfferingIdx, PersonIdx, RoomIdx, SlotIdx};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum ShareWindow {
@@ -246,6 +246,27 @@ pub struct MinimizeLocationChangeInstance {
 }
 
 impl MinimizeLocationChangeInstance {
+    #[inline]
+    pub fn covers(&self, kind: &str) -> bool {
+        self.kinds.is_empty() || self.kinds.iter().any(|k| k == kind)
+    }
+}
+
+/// One configured `RoomTurnaroundBuffer` rule. Room-keyed rather than
+/// Group/Person-keyed — the first aggregate type to be — so it has no
+/// `group`/`person` axis split; it cares which ROOM a Session lands in, not
+/// who attends it.
+#[derive(Clone, Debug)]
+pub struct RoomTurnaroundBufferInstance {
+    pub id: String,
+    /// Empty means all kinds.
+    pub kinds: Vec<String>,
+    pub weight: f64,
+    /// Minimum blocks that must separate two bookings of the same Room.
+    pub buffer_blocks: u32,
+}
+
+impl RoomTurnaroundBufferInstance {
     #[inline]
     pub fn covers(&self, kind: &str) -> bool {
         self.kinds.is_empty() || self.kinds.iter().any(|k| k == kind)
@@ -489,6 +510,29 @@ pub struct Aggregates {
     n_locations: usize,
 
     location_rules: Vec<MinimizeLocationChangeInstance>,
+
+    /// `[room * n_slots + slot]` — per-slot occupancy count for exclusive
+    /// Rooms, mirroring `group_slot`/`run_group_slot`/`span_group_slot` but
+    /// keyed by Room rather than Group/Person. `RoomTurnaroundBuffer`'s own
+    /// array, independent of the structural `RoomDoubleBooking` check
+    /// (`Occupancy.room` in `solution.rs`), so the two remain independently
+    /// switchable — exactly the reason `Compactness` does not reuse
+    /// `group`/`attendee` either.
+    turnaround_room_slot: Vec<u32>,
+    /// The TIGHTEST (LARGEST — a BIGGER buffer is MORE restrictive, the
+    /// opposite direction from every CAP-style threshold above, which is
+    /// tightest at its SMALLEST) `buffer_blocks` among every enabled
+    /// instance. `0` (never triggers) when not configured.
+    turnaround_buffer_blocks: u32,
+    /// Running count of violating Room-adjacency boundaries, maintained as an
+    /// exact delta on add/remove — see [`Self::turnaround_boundary_violations`]
+    /// for why this cannot be a before/after row rescan the way
+    /// `group_gap_total` is: a plain occupancy count cannot tell two
+    /// back-to-back Sessions apart from one long one, so the check must use
+    /// the CANDIDATE'S OWN known span as the reference point instead of
+    /// inferring boundaries from the array alone.
+    turnaround_violations_total: u32,
+    turnaround_rules: Vec<RoomTurnaroundBufferInstance>,
 }
 
 impl Aggregates {
@@ -515,6 +559,8 @@ impl Aggregates {
         active_days_count: usize,
         location_rules: Vec<MinimizeLocationChangeInstance>,
         n_locations: usize,
+        turnaround_rules: Vec<RoomTurnaroundBufferInstance>,
+        n_rooms: usize,
     ) -> Self {
         let groups = n_groups.max(1);
         let counters = rules
@@ -598,6 +644,14 @@ impl Aggregates {
             .min()
             .unwrap_or(u32::MAX);
         let locations = n_locations.max(1);
+
+        let track_turnaround = !turnaround_rules.is_empty();
+        let turnaround_buffer_blocks = turnaround_rules
+            .iter()
+            .map(|r| r.buffer_blocks)
+            .max()
+            .unwrap_or(0);
+        let rooms = n_rooms.max(1);
 
         Self {
             online_day: vec![0; groups * n_days.max(1)],
@@ -710,6 +764,14 @@ impl Aggregates {
             location_person_excess_total: 0,
             n_locations: locations,
             location_rules,
+            turnaround_room_slot: if track_turnaround {
+                vec![0; rooms * slots]
+            } else {
+                Vec::new()
+            },
+            turnaround_buffer_blocks,
+            turnaround_violations_total: 0,
+            turnaround_rules,
         }
     }
 
@@ -2293,6 +2355,119 @@ impl Aggregates {
         cost
     }
 
+    // -- room turnaround buffer ------------------------------------------------
+
+    pub fn turnaround_rules(&self) -> &[RoomTurnaroundBufferInstance] {
+        &self.turnaround_rules
+    }
+
+    /// Whether any OTHER booking of `room` sits within `turnaround_buffer_blocks`
+    /// immediately before `span`'s start or immediately after its end, on the
+    /// same day — `(before, after)`. Always excludes `span` itself: a caller
+    /// probes this BEFORE marking its own bits (`add_room_turnaround`) or
+    /// AFTER clearing them (`remove_room_turnaround`), so the array never
+    /// contains `span`'s own occupancy when this runs.
+    ///
+    /// THIS MUST USE `span`'s OWN KNOWN BOUNDARIES, not a rescan of the row:
+    /// a plain per-slot occupancy count cannot tell two back-to-back Sessions
+    /// apart from one long one — both look like one uninterrupted run — so
+    /// there is no boundary to recover from the array alone. Anchoring on the
+    /// CANDIDATE's own start/end is what makes a zero-gap adjacency (the most
+    /// important case) detectable at all.
+    fn turnaround_boundary_violations(
+        &self,
+        room: RoomIdx,
+        day: u32,
+        span: &[SlotIdx],
+    ) -> (bool, bool) {
+        if self.turnaround_room_slot.is_empty() || self.turnaround_buffer_blocks == 0 {
+            return (false, false);
+        }
+        let row = room.get() * self.n_slots;
+        let (day_start, day_end) = self.day_range(day);
+        let buffer = self.turnaround_buffer_blocks as usize;
+        let start = span[0].get();
+        let end = start + span.len();
+
+        let before_from = start.saturating_sub(buffer).max(day_start);
+        let before =
+            (before_from..start.min(day_end)).any(|c| self.turnaround_room_slot[row + c] > 0);
+
+        let after_to = (end + buffer).min(day_end);
+        let after = (end.max(day_start)..after_to).any(|c| self.turnaround_room_slot[row + c] > 0);
+
+        (before, after)
+    }
+
+    /// The violation-count DELTA `RoomTurnaroundBuffer` would experience if
+    /// `room` gained a booking at `span` — the read-only preview, mirroring
+    /// [`Self::group_span_delta`]. A candidate can create AT MOST one
+    /// violation with its immediate left neighbor and one with its immediate
+    /// right neighbor.
+    pub fn room_turnaround_delta(&self, room: RoomIdx, day: u32, span: &[SlotIdx]) -> i64 {
+        if span.is_empty() {
+            return 0;
+        }
+        let (before, after) = self.turnaround_boundary_violations(room, day, span);
+        i64::from(before) + i64::from(after)
+    }
+
+    /// Mark `span` busy for `room`'s turnaround tracking, updating
+    /// `turnaround_violations_total` by the exact delta. Probes neighbors
+    /// BEFORE marking `span`'s own bits, so the probe never sees itself.
+    pub fn add_room_turnaround(&mut self, room: RoomIdx, day: u32, span: &[SlotIdx]) {
+        if self.turnaround_room_slot.is_empty() || span.is_empty() {
+            return;
+        }
+        let (before, after) = self.turnaround_boundary_violations(room, day, span);
+        self.turnaround_violations_total += u32::from(before) + u32::from(after);
+        let row = room.get() * self.n_slots;
+        for &s in span {
+            self.turnaround_room_slot[row + s.get()] += 1;
+        }
+    }
+
+    /// Clears `span`'s own bits FIRST, then probes — the exact mirror of
+    /// [`Self::add_room_turnaround`], so the probe never sees itself either.
+    pub fn remove_room_turnaround(&mut self, room: RoomIdx, day: u32, span: &[SlotIdx]) {
+        if self.turnaround_room_slot.is_empty() || span.is_empty() {
+            return;
+        }
+        let row = room.get() * self.n_slots;
+        for &s in span {
+            self.turnaround_room_slot[row + s.get()] =
+                self.turnaround_room_slot[row + s.get()].saturating_sub(1);
+        }
+        let (before, after) = self.turnaround_boundary_violations(room, day, span);
+        self.turnaround_violations_total -= u32::from(before) + u32::from(after);
+    }
+
+    /// What every currently-violating Room-adjacency boundary costs, at the
+    /// configured weight — O(1), read straight off
+    /// `turnaround_violations_total` rather than rescanned, for the reason
+    /// that field's own doc gives.
+    pub fn room_turnaround_cost(&self, weight: f64) -> f64 {
+        self.turnaround_violations_total as f64 * weight
+    }
+
+    /// Sum of `weight` over every boundary `room`'s booking at `span`
+    /// currently violates, for `ruin_worst`'s attribution — reuses the same
+    /// probe `add`/`remove` do, since `span`'s own bits being marked or not
+    /// does not affect a check that only reads OUTSIDE `span`.
+    pub fn room_turnaround_ruin_cost(
+        &self,
+        room: RoomIdx,
+        day: u32,
+        span: &[SlotIdx],
+        weight: f64,
+    ) -> f64 {
+        if weight == 0.0 || self.turnaround_room_slot.is_empty() || span.is_empty() {
+            return 0.0;
+        }
+        let (before, after) = self.turnaround_boundary_violations(room, day, span);
+        (u32::from(before) + u32::from(after)) as f64 * weight
+    }
+
     // -- scheduling pattern ---------------------------------------------------
 
     pub fn distributed_rules(&self) -> &[PatternAdherenceInstance] {
@@ -2678,6 +2853,8 @@ mod tests {
             1,
             vec![],
             1,
+            vec![],
+            1,
         );
         let g = [GroupIdx(0)];
 
@@ -2715,6 +2892,8 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
+            1,
             vec![],
             1,
             vec![],
@@ -2769,6 +2948,8 @@ mod tests {
             1,
             vec![],
             1,
+            vec![],
+            1,
         );
         load(&mut term);
         assert_eq!(term.share_violations(), 0);
@@ -2792,6 +2973,8 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
+            1,
             vec![],
             1,
             vec![],
@@ -2826,6 +3009,8 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
+            1,
             vec![],
             1,
             vec![],
@@ -2868,6 +3053,8 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
+            1,
             vec![],
             1,
             vec![],
@@ -2918,6 +3105,8 @@ mod tests {
             1,
             vec![],
             1,
+            vec![],
+            1,
         );
         let g = [GroupIdx(0)];
         a.apply_share("lecture", &g, 0, true, true);
@@ -2953,6 +3142,8 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
+            1,
             vec![],
             1,
             vec![],
@@ -3002,6 +3193,8 @@ mod tests {
             1,
             vec![],
             1,
+            vec![],
+            1,
         );
         let g = [GroupIdx(0)];
 
@@ -3046,6 +3239,8 @@ mod tests {
             1,
             vec![],
             1,
+            vec![],
+            1,
         );
         let g = [GroupIdx(0)];
         a.add_group_compactness(&g, 0, &[SlotIdx(0)]);
@@ -3073,6 +3268,8 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
+            1,
             vec![],
             1,
             vec![],
@@ -3114,6 +3311,8 @@ mod tests {
             1,
             vec![],
             1,
+            vec![],
+            1,
         );
         a.add_person_compactness(&[PersonIdx(0)], 0, &[SlotIdx(0), SlotIdx(3)]);
         assert_eq!(a.compactness_cost(0.0, 1.0), 0.0, "Person axis was never configured");
@@ -3143,6 +3342,8 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
+            1,
             vec![],
             1,
             vec![],
@@ -3183,6 +3384,8 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
+            1,
             vec![],
             1,
             vec![],
@@ -3234,6 +3437,8 @@ mod tests {
             1,
             vec![],
             1,
+            vec![],
+            1,
         );
         let o = OfferingIdx(0);
         a.add_distributed(o, 0);
@@ -3262,6 +3467,8 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
+            1,
             vec![],
             1,
             vec![],
@@ -3301,6 +3508,8 @@ mod tests {
             1,
             vec![],
             1,
+            vec![],
+            1,
         );
         let o = OfferingIdx(0);
         a.add_distributed(o, 0);
@@ -3336,6 +3545,8 @@ mod tests {
             1,
             vec![],
             1,
+            vec![],
+            1,
         );
         a.add_distributed(OfferingIdx(0), 0);
         a.add_distributed(OfferingIdx(0), 1);
@@ -3365,6 +3576,8 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
+            1,
             vec![],
             1,
             vec![],
@@ -3408,6 +3621,8 @@ mod tests {
             1,
             vec![],
             1,
+            vec![],
+            1,
         );
         let o = OfferingIdx(0);
         a.add_block(o, 0);
@@ -3441,6 +3656,8 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
+            1,
             vec![],
             1,
             vec![],

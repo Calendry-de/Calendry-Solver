@@ -29,7 +29,7 @@ use calendry_solver_core::aggregates::{
     CompactnessInstance, DayMixInstance, ExamSpacingSameDayInstance, ExamSpacingWindowInstance,
     MaxConsecutiveInstance, MaxDailySpanInstance, MaxWeeklyTeachingLoadInstance,
     MinimizeLocationChangeInstance, MinimizeWeekdayImbalanceInstance, PatternAdherenceInstance,
-    ShareInstance, ShareWindow,
+    RoomTurnaroundBufferInstance, ShareInstance, ShareWindow,
 };
 use calendry_solver_core::ids::{GroupIdx, OfferingIdx, PersonIdx, RoomIdx, SlotIdx};
 use calendry_solver_core::preferences::{Preference, PreferenceInstance};
@@ -1328,11 +1328,21 @@ fn build_constraints(input: &pb::SolverInput) -> Result<ConstraintSet, ConvertEr
                         weight: c.weight,
                     });
             }
-            Some(Params::RoomTurnaroundBuffer(_)) => {
-                return Err(ConvertError::ConstraintTypeUnimplemented {
-                    constraint: c.id.clone(),
-                    constraint_type: "RoomTurnaroundBuffer",
-                });
+            // Built — see `crate::aggregates::RoomTurnaroundBufferInstance`.
+            Some(Params::RoomTurnaroundBuffer(p)) => {
+                if c.weight < 0.0 || c.weight.is_nan() {
+                    return Err(ConvertError::NegativeSoftWeight {
+                        constraint: c.id.clone(),
+                        weight: c.weight,
+                    });
+                }
+                set.room_turnaround_buffer
+                    .push(RoomTurnaroundBufferInstance {
+                        id: c.id.clone(),
+                        kinds: c.applies_to_kinds.clone(),
+                        weight: c.weight,
+                        buffer_blocks: p.buffer_blocks,
+                    });
             }
             // Built — see `crate::problem::Problem::max_concurrent_online`.
             // `kinds` is intentionally not read: every online Session counts

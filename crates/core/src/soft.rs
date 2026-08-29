@@ -392,6 +392,12 @@ pub struct Objective {
     /// by each axis's configured weight — same "belongs to a day, not a
     /// placement" reason `max_daily_span_cost` lives outside `soft`.
     pub location_change_cost: f64,
+    /// Count of currently-violating Room-adjacency boundaries — two bookings
+    /// of the same Room closer together than the configured buffer — already
+    /// multiplied by the configured weight. Maintained as a running total
+    /// like every other aggregate cost above; see
+    /// [`crate::aggregates::RoomTurnaroundBufferInstance`].
+    pub room_turnaround_cost: f64,
     /// `DistributedPatternAdherence` and `BlockPatternAdherence` together,
     /// already multiplied by each type's configured weight. Read whole off
     /// `Aggregates`' running totals for the same reason `compactness_cost` is:
@@ -425,6 +431,7 @@ impl Objective {
             + self.exam_window_cost
             + self.imbalance_cost
             + self.location_change_cost
+            + self.room_turnaround_cost
             + self.scheduling_pattern_cost
     }
 }
@@ -642,6 +649,7 @@ mod tests {
             exam_window_cost: 0.0,
             imbalance_cost: 0.0,
             location_change_cost: 0.0,
+            room_turnaround_cost: 0.0,
             scheduling_pattern_cost: 0.0,
         };
         let one_unplaced = Objective {
@@ -657,6 +665,7 @@ mod tests {
             exam_window_cost: 0.0,
             imbalance_cost: 0.0,
             location_change_cost: 0.0,
+            room_turnaround_cost: 0.0,
             scheduling_pattern_cost: 0.0,
         };
         assert!(one_unplaced.total(hard_penalty) > all_soft_bad.total(hard_penalty));
@@ -689,6 +698,7 @@ mod tests {
             exam_window_cost: 0.0,
             imbalance_cost: 0.0,
             location_change_cost: 0.0,
+            room_turnaround_cost: 0.0,
             scheduling_pattern_cost: 0.0,
         };
         let one_unplaced = Objective {
@@ -704,6 +714,7 @@ mod tests {
             exam_window_cost: 0.0,
             imbalance_cost: 0.0,
             location_change_cost: 0.0,
+            room_turnaround_cost: 0.0,
             scheduling_pattern_cost: 0.0,
         };
 
