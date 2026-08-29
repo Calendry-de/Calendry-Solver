@@ -199,6 +199,7 @@ impl<'p> Trial<'p> {
             day_mix_cost: self.state.day_mix_cost(self.problem),
             compactness_cost: self.state.compactness_cost(self.problem),
             max_consecutive_cost: self.state.max_consecutive_cost(self.problem),
+            max_daily_span_cost: self.state.max_daily_span_cost(self.problem),
             scheduling_pattern_cost: self.state.scheduling_pattern_cost(self.problem),
         }
     }
@@ -897,6 +898,7 @@ pub fn recompute_objective(problem: &Problem, solution: &Solution) -> Objective 
         day_mix_cost: state.day_mix_cost(problem),
         compactness_cost: state.compactness_cost(problem),
         max_consecutive_cost: state.max_consecutive_cost(problem),
+        max_daily_span_cost: state.max_daily_span_cost(problem),
         scheduling_pattern_cost: state.scheduling_pattern_cost(problem),
     }
 }
@@ -1037,6 +1039,8 @@ pub fn objectives_agree(a: Objective, b: Objective) -> bool {
             <= 1e-9 * (1.0 + a.compactness_cost.abs())
         && (a.max_consecutive_cost - b.max_consecutive_cost).abs()
             <= 1e-9 * (1.0 + a.max_consecutive_cost.abs())
+        && (a.max_daily_span_cost - b.max_daily_span_cost).abs()
+            <= 1e-9 * (1.0 + a.max_daily_span_cost.abs())
         && (a.scheduling_pattern_cost - b.scheduling_pattern_cost).abs()
             <= 1e-9 * (1.0 + a.scheduling_pattern_cost.abs())
 }

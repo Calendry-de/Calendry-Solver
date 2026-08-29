@@ -798,6 +798,7 @@ fn build_constraints(params: &InstanceParams, slots: &SlotTable) -> ConstraintSe
         minimize_capacity_waste: Vec::new(),
         protected_block: Vec::new(),
         max_consecutive_blocks: Vec::new(),
+        max_daily_span: Vec::new(),
         // Weight 5 mirrors the app catalogue's `defaultWeight`, so generated
         // benchmark instances price a mixed day the way a real tenant does.
         online_onsite_same_day: vec![DayMixInstance {

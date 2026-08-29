@@ -128,6 +128,8 @@ fn single(axis: fn(&mut Enforce), base: Enforce) -> Enforce {
         // predicate to probe.
         max_consecutive_group: false,
         max_consecutive_person: false,
+        max_daily_span_group: false,
+        max_daily_span_person: false,
     };
     axis(&mut e);
     axis(&mut probe);
@@ -146,6 +148,8 @@ fn single(axis: fn(&mut Enforce), base: Enforce) -> Enforce {
         protected_block: e.protected_block && base.protected_block,
         max_consecutive_group: e.max_consecutive_group && base.max_consecutive_group,
         max_consecutive_person: e.max_consecutive_person && base.max_consecutive_person,
+        max_daily_span_group: e.max_daily_span_group && base.max_daily_span_group,
+        max_daily_span_person: e.max_daily_span_person && base.max_daily_span_person,
     }
 }
 

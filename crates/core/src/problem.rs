@@ -6,7 +6,7 @@
 //! loop.
 
 use crate::aggregates::{
-    Aggregates, CompactnessInstance, DayMixInstance, MaxConsecutiveInstance,
+    Aggregates, CompactnessInstance, DayMixInstance, MaxConsecutiveInstance, MaxDailySpanInstance,
     PatternAdherenceInstance, ShareInstance,
 };
 use crate::bitset::BitSet;
@@ -265,6 +265,13 @@ pub struct ConstraintSet {
     /// without a break, rather than minimizing the gaps between Sessions.
     /// See [`crate::aggregates::MaxConsecutiveInstance`].
     pub max_consecutive_blocks: Vec<MaxConsecutiveInstance>,
+    /// SOFT, aggregate over a whole day. Caps the elapsed time from a
+    /// Group's or Person's first to last Session of a day — distinct from
+    /// both `compactness` (gaps inside the span) and `max_consecutive_blocks`
+    /// (density): a day can have zero gaps and low density and still run too
+    /// long if the bracketing Sessions are simply far apart. See
+    /// [`crate::aggregates::MaxDailySpanInstance`].
+    pub max_daily_span: Vec<MaxDailySpanInstance>,
 }
 
 /// One `ProtectedBlock` instance. The FIRST hard type whose values
@@ -349,6 +356,8 @@ pub struct Enforce {
     pub protected_block: bool,
     pub max_consecutive_group: bool,
     pub max_consecutive_person: bool,
+    pub max_daily_span_group: bool,
+    pub max_daily_span_person: bool,
 }
 
 impl ConstraintSet {
@@ -377,6 +386,14 @@ impl ConstraintSet {
                 .any(|c| c.group && c.covers(kind)),
             max_consecutive_person: self
                 .max_consecutive_blocks
+                .iter()
+                .any(|c| c.person && c.covers(kind)),
+            max_daily_span_group: self
+                .max_daily_span
+                .iter()
+                .any(|c| c.group && c.covers(kind)),
+            max_daily_span_person: self
+                .max_daily_span
                 .iter()
                 .any(|c| c.person && c.covers(kind)),
         }
@@ -869,6 +886,12 @@ pub struct Problem {
     pub max_consecutive_group_weight: f64,
     /// The Person-axis counterpart of `max_consecutive_group_weight`.
     pub max_consecutive_person_weight: f64,
+    /// Summed weight of every configured `MaxDailySpan` instance covering
+    /// the Group axis. Zero when not configured, or when no instance
+    /// selects it.
+    pub max_daily_span_group_weight: f64,
+    /// The Person-axis counterpart of `max_daily_span_group_weight`.
+    pub max_daily_span_person_weight: f64,
     /// Summed weight of every configured `DistributedPatternAdherence`.
     pub distributed_pattern_weight: f64,
     /// Summed weight of every configured `BlockPatternAdherence`.
@@ -1061,6 +1084,7 @@ impl Problem {
             constraints.distributed_pattern_adherence.clone(),
             constraints.block_pattern_adherence.clone(),
             constraints.max_consecutive_blocks.clone(),
+            constraints.max_daily_span.clone(),
         );
 
         let day_mix_weight: f64 = constraints
@@ -1099,6 +1123,18 @@ impl Problem {
             .sum();
         let max_consecutive_person_weight: f64 = constraints
             .max_consecutive_blocks
+            .iter()
+            .filter(|i| i.person)
+            .map(|i| i.weight)
+            .sum();
+        let max_daily_span_group_weight: f64 = constraints
+            .max_daily_span
+            .iter()
+            .filter(|i| i.group)
+            .map(|i| i.weight)
+            .sum();
+        let max_daily_span_person_weight: f64 = constraints
+            .max_daily_span
             .iter()
             .filter(|i| i.person)
             .map(|i| i.weight)
@@ -1224,6 +1260,8 @@ impl Problem {
             compactness_person_weight,
             max_consecutive_group_weight,
             max_consecutive_person_weight,
+            max_daily_span_group_weight,
+            max_daily_span_person_weight,
             distributed_pattern_weight,
             block_pattern_weight,
             in_scope,

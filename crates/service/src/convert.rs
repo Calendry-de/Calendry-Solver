@@ -26,8 +26,8 @@
 use std::collections::{HashMap, HashSet};
 
 use calendry_solver_core::aggregates::{
-    CompactnessInstance, DayMixInstance, MaxConsecutiveInstance, PatternAdherenceInstance,
-    ShareInstance, ShareWindow,
+    CompactnessInstance, DayMixInstance, MaxConsecutiveInstance, MaxDailySpanInstance,
+    PatternAdherenceInstance, ShareInstance, ShareWindow,
 };
 use calendry_solver_core::ids::{GroupIdx, OfferingIdx, PersonIdx, RoomIdx, SlotIdx};
 use calendry_solver_core::preferences::{Preference, PreferenceInstance};
@@ -1217,10 +1217,35 @@ fn build_constraints(input: &pb::SolverInput) -> Result<ConstraintSet, ConvertEr
                     constraint_type: "MinimizeRoomChurn",
                 });
             }
-            Some(Params::MaxDailySpan(_)) => {
-                return Err(ConvertError::ConstraintTypeUnimplemented {
-                    constraint: c.id.clone(),
-                    constraint_type: "MaxDailySpan",
+            // Built — see `crate::aggregates::MaxDailySpanInstance`. Same
+            // `CompactnessScope` parsing as `Compactness`/`MaxConsecutiveBlocks`
+            // above.
+            Some(Params::MaxDailySpan(p)) => {
+                if c.weight < 0.0 || c.weight.is_nan() {
+                    return Err(ConvertError::NegativeSoftWeight {
+                        constraint: c.id.clone(),
+                        weight: c.weight,
+                    });
+                }
+                let (mut group, mut person) = (false, false);
+                for &s in &p.scope {
+                    match pb::CompactnessScope::try_from(s) {
+                        Ok(pb::CompactnessScope::Group) => group = true,
+                        Ok(pb::CompactnessScope::Person) => person = true,
+                        _ => {}
+                    }
+                }
+                if p.scope.is_empty() {
+                    group = true;
+                    person = true;
+                }
+                set.max_daily_span.push(MaxDailySpanInstance {
+                    id: c.id.clone(),
+                    kinds: c.applies_to_kinds.clone(),
+                    weight: c.weight,
+                    group,
+                    person,
+                    max_span_blocks: p.max_span_blocks,
                 });
             }
             Some(Params::MinimizeWeekdayImbalance(_)) => {

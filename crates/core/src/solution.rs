@@ -735,6 +735,35 @@ impl SearchState {
         delta
     }
 
+    /// The `MaxDailySpan` cost DELTA of placing `who` at `span` — mirrors
+    /// [`Self::max_consecutive_delta`] exactly, span-excess instead of
+    /// run-excess.
+    pub fn max_daily_span_delta(
+        &self,
+        problem: &Problem,
+        who: &Occupant<'_>,
+        span: &[SlotIdx],
+    ) -> f64 {
+        if span.is_empty()
+            || (!who.enforce.max_daily_span_group && !who.enforce.max_daily_span_person)
+        {
+            return 0.0;
+        }
+        let day = problem.slots.flags(span[0]).day_index;
+        let mut delta = 0.0;
+        if who.enforce.max_daily_span_group {
+            delta += self
+                .aggregates
+                .group_span_delta(who.subtree_groups, day, span) as f64
+                * problem.max_daily_span_group_weight;
+        }
+        if who.enforce.max_daily_span_person {
+            delta += self.aggregates.person_span_delta(who.attendees, day, span) as f64
+                * problem.max_daily_span_person_weight;
+        }
+        delta
+    }
+
     pub fn mark(&mut self, problem: &Problem, who: &Occupant<'_>, span: &[SlotIdx]) {
         self.occupancy.mark(problem, who, span);
         self.apply_aggregates(problem, who, span, true);
@@ -794,6 +823,22 @@ impl SearchState {
                 self.aggregates.add_person_run(who.attendees, day, span);
             } else {
                 self.aggregates.remove_person_run(who.attendees, day, span);
+            }
+        }
+        if who.enforce.max_daily_span_group {
+            if add {
+                self.aggregates
+                    .add_group_span(who.subtree_groups, day, span);
+            } else {
+                self.aggregates
+                    .remove_group_span(who.subtree_groups, day, span);
+            }
+        }
+        if who.enforce.max_daily_span_person {
+            if add {
+                self.aggregates.add_person_span(who.attendees, day, span);
+            } else {
+                self.aggregates.remove_person_span(who.attendees, day, span);
             }
         }
 
@@ -899,6 +944,17 @@ impl SearchState {
             );
         }
 
+        if who.enforce.max_daily_span_group || who.enforce.max_daily_span_person {
+            let day = problem.slots.flags(span[0]).day_index;
+            score += self.aggregates.max_daily_span_ruin_cost(
+                who.subtree_groups,
+                who.attendees,
+                day,
+                problem.max_daily_span_group_weight,
+                problem.max_daily_span_person_weight,
+            );
+        }
+
         if let Some(offering) = who.offering {
             use crate::problem::SchedulingPattern;
             if who.enforce.distributed_pattern
@@ -964,6 +1020,19 @@ impl SearchState {
         self.aggregates.max_consecutive_cost(
             problem.max_consecutive_group_weight,
             problem.max_consecutive_person_weight,
+        )
+    }
+
+    /// What the currently over-cap daily spans cost, at the configured
+    /// weight(s). Mirrors [`Self::max_consecutive_cost`].
+    pub fn max_daily_span_cost(&self, problem: &Problem) -> f64 {
+        if problem.max_daily_span_group_weight == 0.0 && problem.max_daily_span_person_weight == 0.0
+        {
+            return 0.0;
+        }
+        self.aggregates.max_daily_span_cost(
+            problem.max_daily_span_group_weight,
+            problem.max_daily_span_person_weight,
         )
     }
 

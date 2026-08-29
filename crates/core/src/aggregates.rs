@@ -135,6 +135,27 @@ impl MaxConsecutiveInstance {
     }
 }
 
+/// One configured `MaxDailySpan` rule — same `group`/`person` axis split as
+/// `CompactnessInstance`/`MaxConsecutiveInstance`, plus the elapsed-time cap
+/// neither of those has an equivalent of.
+#[derive(Clone, Debug)]
+pub struct MaxDailySpanInstance {
+    pub id: String,
+    /// Empty means all kinds.
+    pub kinds: Vec<String>,
+    pub weight: f64,
+    pub group: bool,
+    pub person: bool,
+    pub max_span_blocks: u32,
+}
+
+impl MaxDailySpanInstance {
+    #[inline]
+    pub fn covers(&self, kind: &str) -> bool {
+        self.kinds.is_empty() || self.kinds.iter().any(|k| k == kind)
+    }
+}
+
 /// One configured `DistributedPatternAdherence` or `BlockPatternAdherence` —
 /// identical shape, kept as one type since both are just "id, kind scope,
 /// weight" with the actual per-pattern logic living in `Aggregates` instead.
@@ -275,6 +296,23 @@ pub struct Aggregates {
     run_person_excess_total: u32,
 
     max_consecutive_rules: Vec<MaxConsecutiveInstance>,
+
+    /// `[group * n_slots + slot]` — the `MaxDailySpan` counterpart of
+    /// `group_slot`/`run_group_slot`: same shape again, read by
+    /// `span_excess_u32` (elapsed blocks from first to last occupied,
+    /// past the cap) instead of `gap_u32`/`run_excess_u32`. Its own array
+    /// for the same independent-switch reason those two have theirs.
+    span_group_slot: Vec<u32>,
+    span_person_slot: Vec<u8>,
+    /// The TIGHTEST `max_span_blocks` among every enabled instance covering
+    /// each axis, same convention `run_group_threshold`/`run_person_threshold`
+    /// use. `u32::MAX` when nothing configures that axis.
+    span_group_threshold: u32,
+    span_person_threshold: u32,
+    span_group_excess_total: u32,
+    span_person_excess_total: u32,
+
+    max_daily_span_rules: Vec<MaxDailySpanInstance>,
 }
 
 impl Aggregates {
@@ -293,6 +331,7 @@ impl Aggregates {
         distributed_rules: Vec<PatternAdherenceInstance>,
         block_rules: Vec<PatternAdherenceInstance>,
         max_consecutive_rules: Vec<MaxConsecutiveInstance>,
+        max_daily_span_rules: Vec<MaxDailySpanInstance>,
     ) -> Self {
         let groups = n_groups.max(1);
         let counters = rules
@@ -325,6 +364,21 @@ impl Aggregates {
             .iter()
             .filter(|r| r.person)
             .map(|r| r.max_consecutive)
+            .min()
+            .unwrap_or(u32::MAX);
+
+        let track_span_group = max_daily_span_rules.iter().any(|r| r.group);
+        let track_span_person = max_daily_span_rules.iter().any(|r| r.person);
+        let span_group_threshold = max_daily_span_rules
+            .iter()
+            .filter(|r| r.group)
+            .map(|r| r.max_span_blocks)
+            .min()
+            .unwrap_or(u32::MAX);
+        let span_person_threshold = max_daily_span_rules
+            .iter()
+            .filter(|r| r.person)
+            .map(|r| r.max_span_blocks)
             .min()
             .unwrap_or(u32::MAX);
 
@@ -373,6 +427,17 @@ impl Aggregates {
             run_group_excess_total: 0,
             run_person_excess_total: 0,
             max_consecutive_rules,
+            span_group_slot: if track_span_group { vec![0; groups * slots] } else { Vec::new() },
+            span_person_slot: if track_span_person {
+                vec![0; n_persons.max(1) * slots]
+            } else {
+                Vec::new()
+            },
+            span_group_threshold,
+            span_person_threshold,
+            span_group_excess_total: 0,
+            span_person_excess_total: 0,
+            max_daily_span_rules,
         }
     }
 
@@ -1016,6 +1081,291 @@ impl Aggregates {
         cost
     }
 
+    // -- max daily span --------------------------------------------------------
+
+    pub fn max_daily_span_rules(&self) -> &[MaxDailySpanInstance] {
+        &self.max_daily_span_rules
+    }
+
+    /// Blocks charged over the elapsed span from first to last occupied
+    /// block of one day, past `threshold` — the simpler cousin of
+    /// `run_excess_u32`: a day has exactly one span (unlike possibly several
+    /// runs), so there is nothing to sum over multiple stretches.
+    #[inline]
+    fn span_excess_u32(day_cells: &[u32], threshold: u32) -> u32 {
+        let mut first = None;
+        let mut last = 0usize;
+        for (i, &c) in day_cells.iter().enumerate() {
+            if c > 0 {
+                first.get_or_insert(i);
+                last = i;
+            }
+        }
+        match first {
+            Some(f) => ((last - f + 1) as u32).saturating_sub(threshold),
+            None => 0,
+        }
+    }
+
+    /// See [`Self::span_excess_u32`]; the `u8` counterpart.
+    #[inline]
+    fn span_excess_u8(day_cells: &[u8], threshold: u32) -> u32 {
+        let mut first = None;
+        let mut last = 0usize;
+        for (i, &c) in day_cells.iter().enumerate() {
+            if c > 0 {
+                first.get_or_insert(i);
+                last = i;
+            }
+        }
+        match first {
+            Some(f) => ((last - f + 1) as u32).saturating_sub(threshold),
+            None => 0,
+        }
+    }
+
+    /// `span_excess_u32`, but with `span` treated as already occupied —
+    /// WITHOUT mutating or allocating, mirroring [`Self::gap_u32_with`].
+    #[inline]
+    fn span_excess_u32_with(
+        day_cells: &[u32],
+        start: usize,
+        span: &[SlotIdx],
+        threshold: u32,
+    ) -> u32 {
+        let mut first = None;
+        let mut last = 0usize;
+        for (i, &c) in day_cells.iter().enumerate() {
+            if c > 0 || span.iter().any(|s| s.get() == start + i) {
+                first.get_or_insert(i);
+                last = i;
+            }
+        }
+        match first {
+            Some(f) => ((last - f + 1) as u32).saturating_sub(threshold),
+            None => 0,
+        }
+    }
+
+    /// See [`Self::span_excess_u32_with`]; the `u8` counterpart.
+    #[inline]
+    fn span_excess_u8_with(
+        day_cells: &[u8],
+        start: usize,
+        span: &[SlotIdx],
+        threshold: u32,
+    ) -> u32 {
+        let mut first = None;
+        let mut last = 0usize;
+        for (i, &c) in day_cells.iter().enumerate() {
+            if c > 0 || span.iter().any(|s| s.get() == start + i) {
+                first.get_or_insert(i);
+                last = i;
+            }
+        }
+        match first {
+            Some(f) => ((last - f + 1) as u32).saturating_sub(threshold),
+            None => 0,
+        }
+    }
+
+    /// The span-excess DELTA `MaxDailySpan` would experience if `groups`
+    /// gained occupancy at `span` — the read-only preview, mirroring
+    /// [`Self::group_run_delta`].
+    pub fn group_span_delta(&self, groups: &[GroupIdx], day: u32, span: &[SlotIdx]) -> i64 {
+        if self.span_group_slot.is_empty() || span.is_empty() {
+            return 0;
+        }
+        let (start, end) = self.day_range(day);
+        let mut delta = 0i64;
+        for &g in groups {
+            let row = g.get() * self.n_slots;
+            let before = Self::span_excess_u32(
+                &self.span_group_slot[row + start..row + end],
+                self.span_group_threshold,
+            );
+            let after = Self::span_excess_u32_with(
+                &self.span_group_slot[row + start..row + end],
+                start,
+                span,
+                self.span_group_threshold,
+            );
+            delta += i64::from(after) - i64::from(before);
+        }
+        delta
+    }
+
+    /// See [`Self::group_span_delta`]; the Person counterpart.
+    pub fn person_span_delta(&self, persons: &[PersonIdx], day: u32, span: &[SlotIdx]) -> i64 {
+        if self.span_person_slot.is_empty() || span.is_empty() {
+            return 0;
+        }
+        let (start, end) = self.day_range(day);
+        let mut delta = 0i64;
+        for &p in persons {
+            let row = p.get() * self.n_slots;
+            let before = Self::span_excess_u8(
+                &self.span_person_slot[row + start..row + end],
+                self.span_person_threshold,
+            );
+            let after = Self::span_excess_u8_with(
+                &self.span_person_slot[row + start..row + end],
+                start,
+                span,
+                self.span_person_threshold,
+            );
+            delta += i64::from(after) - i64::from(before);
+        }
+        delta
+    }
+
+    pub fn add_group_span(&mut self, groups: &[GroupIdx], day: u32, span: &[SlotIdx]) {
+        if self.span_group_slot.is_empty() || span.is_empty() {
+            return;
+        }
+        let (start, end) = self.day_range(day);
+        for &g in groups {
+            let row = g.get() * self.n_slots;
+            let before = Self::span_excess_u32(
+                &self.span_group_slot[row + start..row + end],
+                self.span_group_threshold,
+            );
+            for &s in span {
+                self.span_group_slot[row + s.get()] += 1;
+            }
+            let after = Self::span_excess_u32(
+                &self.span_group_slot[row + start..row + end],
+                self.span_group_threshold,
+            );
+            self.span_group_excess_total = (i64::from(self.span_group_excess_total)
+                + i64::from(after)
+                - i64::from(before)) as u32;
+        }
+    }
+
+    pub fn remove_group_span(&mut self, groups: &[GroupIdx], day: u32, span: &[SlotIdx]) {
+        if self.span_group_slot.is_empty() || span.is_empty() {
+            return;
+        }
+        let (start, end) = self.day_range(day);
+        for &g in groups {
+            let row = g.get() * self.n_slots;
+            let before = Self::span_excess_u32(
+                &self.span_group_slot[row + start..row + end],
+                self.span_group_threshold,
+            );
+            for &s in span {
+                self.span_group_slot[row + s.get()] =
+                    self.span_group_slot[row + s.get()].saturating_sub(1);
+            }
+            let after = Self::span_excess_u32(
+                &self.span_group_slot[row + start..row + end],
+                self.span_group_threshold,
+            );
+            self.span_group_excess_total = (i64::from(self.span_group_excess_total)
+                + i64::from(after)
+                - i64::from(before)) as u32;
+        }
+    }
+
+    pub fn add_person_span(&mut self, persons: &[PersonIdx], day: u32, span: &[SlotIdx]) {
+        if self.span_person_slot.is_empty() || span.is_empty() {
+            return;
+        }
+        let (start, end) = self.day_range(day);
+        for &p in persons {
+            let row = p.get() * self.n_slots;
+            let before = Self::span_excess_u8(
+                &self.span_person_slot[row + start..row + end],
+                self.span_person_threshold,
+            );
+            for &s in span {
+                let c = row + s.get();
+                self.span_person_slot[c] = self.span_person_slot[c].saturating_add(1);
+            }
+            let after = Self::span_excess_u8(
+                &self.span_person_slot[row + start..row + end],
+                self.span_person_threshold,
+            );
+            self.span_person_excess_total = (i64::from(self.span_person_excess_total)
+                + i64::from(after)
+                - i64::from(before)) as u32;
+        }
+    }
+
+    pub fn remove_person_span(&mut self, persons: &[PersonIdx], day: u32, span: &[SlotIdx]) {
+        if self.span_person_slot.is_empty() || span.is_empty() {
+            return;
+        }
+        let (start, end) = self.day_range(day);
+        for &p in persons {
+            let row = p.get() * self.n_slots;
+            let before = Self::span_excess_u8(
+                &self.span_person_slot[row + start..row + end],
+                self.span_person_threshold,
+            );
+            for &s in span {
+                let c = row + s.get();
+                self.span_person_slot[c] = self.span_person_slot[c].saturating_sub(1);
+            }
+            let after = Self::span_excess_u8(
+                &self.span_person_slot[row + start..row + end],
+                self.span_person_threshold,
+            );
+            self.span_person_excess_total = (i64::from(self.span_person_excess_total)
+                + i64::from(after)
+                - i64::from(before)) as u32;
+        }
+    }
+
+    /// What the currently over-cap daily spans cost, at the configured
+    /// weight(s). Mirrors [`Self::max_consecutive_cost`].
+    pub fn max_daily_span_cost(&self, group_weight: f64, person_weight: f64) -> f64 {
+        self.span_group_excess_total as f64 * group_weight
+            + self.span_person_excess_total as f64 * person_weight
+    }
+
+    /// Sum of `weight` over every currently over-cap `(entity, day)` cell
+    /// this occupant participates in, for `ruin_worst`'s attribution.
+    /// Mirrors [`Self::max_consecutive_ruin_cost`].
+    pub fn max_daily_span_ruin_cost(
+        &self,
+        groups: &[GroupIdx],
+        persons: &[PersonIdx],
+        day: u32,
+        group_weight: f64,
+        person_weight: f64,
+    ) -> f64 {
+        let mut cost = 0.0;
+        if group_weight != 0.0 && !self.span_group_slot.is_empty() {
+            let (start, end) = self.day_range(day);
+            for &g in groups {
+                let row = g.get() * self.n_slots;
+                if Self::span_excess_u32(
+                    &self.span_group_slot[row + start..row + end],
+                    self.span_group_threshold,
+                ) > 0
+                {
+                    cost += group_weight;
+                }
+            }
+        }
+        if person_weight != 0.0 && !self.span_person_slot.is_empty() {
+            let (start, end) = self.day_range(day);
+            for &p in persons {
+                let row = p.get() * self.n_slots;
+                if Self::span_excess_u8(
+                    &self.span_person_slot[row + start..row + end],
+                    self.span_person_threshold,
+                ) > 0
+                {
+                    cost += person_weight;
+                }
+            }
+        }
+        cost
+    }
+
     // -- scheduling pattern ---------------------------------------------------
 
     pub fn distributed_rules(&self) -> &[PatternAdherenceInstance] {
@@ -1379,7 +1729,8 @@ mod tests {
 
     #[test]
     fn day_mix_blocks_only_the_opposite_mode() {
-        let mut a = Aggregates::new(2, 3, 1, vec![], 0, 0, 1, vec![], 0, 0, vec![], vec![], vec![]);
+        let mut a =
+            Aggregates::new(2, 3, 1, vec![], 0, 0, 1, vec![], 0, 0, vec![], vec![], vec![], vec![]);
         let g = [GroupIdx(0)];
 
         assert!(a.day_mix_allows(&g, &[0], true), "empty day accepts anything");
@@ -1409,6 +1760,7 @@ mod tests {
             vec![],
             0,
             0,
+            vec![],
             vec![],
             vec![],
             vec![],
@@ -1454,6 +1806,7 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
         );
         load(&mut term);
         assert_eq!(term.share_violations(), 0);
@@ -1470,6 +1823,7 @@ mod tests {
             vec![],
             0,
             0,
+            vec![],
             vec![],
             vec![],
             vec![],
@@ -1499,6 +1853,7 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
         );
         a.apply_share("staff_meeting", &[GroupIdx(0)], 0, true, true);
         assert_eq!(a.share_violations(), 0, "out-of-scope kind must not count");
@@ -1519,8 +1874,22 @@ mod tests {
             max_ratio: 0.5,
             window: ShareWindow::PerTerm,
         };
-        let mut a =
-            Aggregates::new(1, 1, 1, vec![scoped], 0, 0, 1, vec![], 0, 0, vec![], vec![], vec![]);
+        let mut a = Aggregates::new(
+            1,
+            1,
+            1,
+            vec![scoped],
+            0,
+            0,
+            1,
+            vec![],
+            0,
+            0,
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+        );
         let g = [GroupIdx(0)];
         // 2 online of 2 total = 100% > 50%: violated.
         a.apply_share("lecture", &g, 0, true, true);
@@ -1558,6 +1927,7 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
         );
         let g = [GroupIdx(0)];
         a.apply_share("lecture", &g, 0, true, true);
@@ -1575,7 +1945,8 @@ mod tests {
     /// cell are charged — the asymmetry above does not apply here.
     #[test]
     fn day_mix_violation_cost_charges_both_modes_in_a_mixed_cell() {
-        let mut a = Aggregates::new(1, 2, 1, vec![], 0, 0, 1, vec![], 0, 0, vec![], vec![], vec![]);
+        let mut a =
+            Aggregates::new(1, 2, 1, vec![], 0, 0, 1, vec![], 0, 0, vec![], vec![], vec![], vec![]);
         let g = [GroupIdx(0)];
         a.add_day_mode(&g, &[0], true);
         assert_eq!(a.day_mix_violation_cost(&g, &[0], 10.0), 0.0, "one mode alone is not mixed");
@@ -1609,6 +1980,7 @@ mod tests {
             vec![compactness_rule(true, false)],
             0,
             0,
+            vec![],
             vec![],
             vec![],
             vec![],
@@ -1648,6 +2020,7 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
         );
         let g = [GroupIdx(0)];
         a.add_group_compactness(&g, 0, &[SlotIdx(0)]);
@@ -1668,6 +2041,7 @@ mod tests {
             vec![compactness_rule(false, true)],
             0,
             0,
+            vec![],
             vec![],
             vec![],
             vec![],
@@ -1700,6 +2074,7 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
         );
         a.add_person_compactness(&[PersonIdx(0)], 0, &[SlotIdx(0), SlotIdx(3)]);
         assert_eq!(a.compactness_cost(0.0, 1.0), 0.0, "Person axis was never configured");
@@ -1722,6 +2097,7 @@ mod tests {
             vec![compactness_rule(true, false)],
             0,
             0,
+            vec![],
             vec![],
             vec![],
             vec![],
@@ -1754,6 +2130,7 @@ mod tests {
             vec![compactness_rule(true, false)],
             0,
             0,
+            vec![],
             vec![],
             vec![],
             vec![],
@@ -1796,6 +2173,7 @@ mod tests {
             vec![pattern_rule()],
             vec![],
             vec![],
+            vec![],
         );
         let o = OfferingIdx(0);
         a.add_distributed(o, 0);
@@ -1818,6 +2196,7 @@ mod tests {
             1,
             2,
             vec![pattern_rule()],
+            vec![],
             vec![],
             vec![],
         );
@@ -1847,6 +2226,7 @@ mod tests {
             vec![pattern_rule()],
             vec![],
             vec![],
+            vec![],
         );
         let o = OfferingIdx(0);
         a.add_distributed(o, 0);
@@ -1874,6 +2254,7 @@ mod tests {
             vec![pattern_rule()],
             vec![],
             vec![],
+            vec![],
         );
         a.add_distributed(OfferingIdx(0), 0);
         a.add_distributed(OfferingIdx(0), 1);
@@ -1898,6 +2279,7 @@ mod tests {
             1,
             vec![],
             vec![pattern_rule()],
+            vec![],
             vec![],
         );
         let o = OfferingIdx(0);
@@ -1930,6 +2312,7 @@ mod tests {
             vec![],
             vec![pattern_rule()],
             vec![],
+            vec![],
         );
         let o = OfferingIdx(0);
         a.add_block(o, 0);
@@ -1958,6 +2341,7 @@ mod tests {
             2,
             vec![],
             vec![pattern_rule()],
+            vec![],
             vec![],
         );
         a.add_distributed(OfferingIdx(0), 0);
