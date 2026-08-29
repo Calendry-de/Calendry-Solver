@@ -120,6 +120,19 @@ fn score_one(problem: &Problem, solution: &Solution, state: &SearchState, mv: &M
         0.0
     };
 
+    // Same ranking-signal contract as `day_mix_penalty`, one per exam
+    // spacing type.
+    let exam_same_day_penalty = if state.would_worsen_exam_same_day(problem, &candidate, &span) {
+        problem.exam_same_day_weight
+    } else {
+        0.0
+    };
+    let exam_window_penalty = if state.would_worsen_exam_window(problem, &candidate, &span) {
+        problem.exam_window_weight
+    } else {
+        0.0
+    };
+
     // Compactness is soft, like day-mix, and its delta CAN be negative — a
     // candidate that fills a gap between two existing Sessions is rewarded,
     // not merely charged nothing. `compactness_delta` is a ranking signal, not
@@ -171,6 +184,8 @@ fn score_one(problem: &Problem, solution: &Solution, state: &SearchState, mv: &M
             + problem.capacity_waste_cost(offering, capacity)
             + share_penalty
             + day_mix_penalty
+            + exam_same_day_penalty
+            + exam_window_penalty
             + compactness_delta
             + max_consecutive_delta
             + max_daily_span_delta

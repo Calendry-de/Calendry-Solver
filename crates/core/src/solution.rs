@@ -675,6 +675,59 @@ impl SearchState {
         self.aggregates.day_mix_violations() as f64 * problem.day_mix_weight
     }
 
+    /// Would placing this Session here put a second exam-kind Session of
+    /// `who`'s Groups on this day? Mirrors [`Self::would_worsen_day_mix`].
+    pub fn would_worsen_exam_same_day(
+        &self,
+        problem: &Problem,
+        who: &Occupant<'_>,
+        span: &[SlotIdx],
+    ) -> bool {
+        if !who.enforce.exam_spacing_same_day || who.subtree_groups.is_empty() || span.is_empty() {
+            return false;
+        }
+        let days = Self::days_of(problem, span);
+        !self
+            .aggregates
+            .exam_same_day_allows(who.subtree_groups, &days)
+    }
+
+    /// What the currently same-day exam clashes cost, at the configured
+    /// weight. Mirrors [`Self::day_mix_cost`].
+    pub fn exam_same_day_cost(&self, problem: &Problem) -> f64 {
+        if problem.exam_same_day_weight == 0.0 {
+            return 0.0;
+        }
+        self.aggregates.exam_same_day_violations() as f64 * problem.exam_same_day_weight
+    }
+
+    /// Would placing this Session here put an exam-kind Session of `who`'s
+    /// Groups within the configured window of another? Mirrors
+    /// [`Self::would_worsen_exam_same_day`].
+    pub fn would_worsen_exam_window(
+        &self,
+        problem: &Problem,
+        who: &Occupant<'_>,
+        span: &[SlotIdx],
+    ) -> bool {
+        if !who.enforce.exam_spacing_window || who.subtree_groups.is_empty() || span.is_empty() {
+            return false;
+        }
+        let days = Self::days_of(problem, span);
+        !self
+            .aggregates
+            .exam_window_allows(who.subtree_groups, &days)
+    }
+
+    /// What the currently clustered exam windows cost, at the configured
+    /// weight. Mirrors [`Self::exam_same_day_cost`].
+    pub fn exam_window_cost(&self, problem: &Problem) -> f64 {
+        if problem.exam_window_weight == 0.0 {
+            return 0.0;
+        }
+        self.aggregates.exam_window_violations() as f64 * problem.exam_window_weight
+    }
+
     /// The compactness cost DELTA of placing `who` at `span` — a ranking
     /// signal for choosing between repair candidates, not filed as an exact
     /// per-placement charge in `Objective::soft`: like `day_mix_penalty`, it
@@ -915,6 +968,26 @@ impl SearchState {
             }
         }
 
+        if who.enforce.exam_spacing_same_day {
+            let days = Self::days_of(problem, span);
+            if add {
+                self.aggregates.add_exam_same_day(who.subtree_groups, &days);
+            } else {
+                self.aggregates
+                    .remove_exam_same_day(who.subtree_groups, &days);
+            }
+        }
+
+        if who.enforce.exam_spacing_window {
+            let days = Self::days_of(problem, span);
+            if add {
+                self.aggregates.add_exam_window(who.subtree_groups, &days);
+            } else {
+                self.aggregates
+                    .remove_exam_window(who.subtree_groups, &days);
+            }
+        }
+
         // Share counters are keyed per rule and gated by the rule's own kind
         // scope, so they are applied unconditionally here.
         let week = problem.slots.flags(span[0]).week;
@@ -1029,6 +1102,24 @@ impl SearchState {
                 who.subtree_groups,
                 &days,
                 problem.day_mix_weight,
+            );
+        }
+
+        if who.enforce.exam_spacing_same_day {
+            let days = Self::days_of(problem, span);
+            score += self.aggregates.exam_same_day_violation_cost(
+                who.subtree_groups,
+                &days,
+                problem.exam_same_day_weight,
+            );
+        }
+
+        if who.enforce.exam_spacing_window {
+            let days = Self::days_of(problem, span);
+            score += self.aggregates.exam_window_violation_cost(
+                who.subtree_groups,
+                &days,
+                problem.exam_window_weight,
             );
         }
 

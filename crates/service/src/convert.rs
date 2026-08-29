@@ -26,8 +26,9 @@
 use std::collections::{HashMap, HashSet};
 
 use calendry_solver_core::aggregates::{
-    CompactnessInstance, DayMixInstance, MaxConsecutiveInstance, MaxDailySpanInstance,
-    MaxWeeklyTeachingLoadInstance, PatternAdherenceInstance, ShareInstance, ShareWindow,
+    CompactnessInstance, DayMixInstance, ExamSpacingSameDayInstance, ExamSpacingWindowInstance,
+    MaxConsecutiveInstance, MaxDailySpanInstance, MaxWeeklyTeachingLoadInstance,
+    PatternAdherenceInstance, ShareInstance, ShareWindow,
 };
 use calendry_solver_core::ids::{GroupIdx, OfferingIdx, PersonIdx, RoomIdx, SlotIdx};
 use calendry_solver_core::preferences::{Preference, PreferenceInstance};
@@ -1189,16 +1190,35 @@ fn build_constraints(input: &pb::SolverInput) -> Result<ConstraintSet, ConvertEr
                         max_per_week: p.max_per_week,
                     });
             }
+            // Built — see `crate::aggregates::ExamSpacingSameDayInstance`.
+            // Which Sessions count as exam-kind is `applies_to_kinds`
+            // (`instance.kinds` here), not a field on this message.
             Some(Params::ExamSpacingSameDay(_)) => {
-                return Err(ConvertError::ConstraintTypeUnimplemented {
-                    constraint: c.id.clone(),
-                    constraint_type: "ExamSpacingSameDay",
+                if c.weight < 0.0 || c.weight.is_nan() {
+                    return Err(ConvertError::NegativeSoftWeight {
+                        constraint: c.id.clone(),
+                        weight: c.weight,
+                    });
+                }
+                set.exam_spacing_same_day.push(ExamSpacingSameDayInstance {
+                    id: c.id.clone(),
+                    kinds: c.applies_to_kinds.clone(),
+                    weight: c.weight,
                 });
             }
-            Some(Params::ExamSpacingWindow(_)) => {
-                return Err(ConvertError::ConstraintTypeUnimplemented {
-                    constraint: c.id.clone(),
-                    constraint_type: "ExamSpacingWindow",
+            // Built — see `crate::aggregates::ExamSpacingWindowInstance`.
+            Some(Params::ExamSpacingWindow(p)) => {
+                if c.weight < 0.0 || c.weight.is_nan() {
+                    return Err(ConvertError::NegativeSoftWeight {
+                        constraint: c.id.clone(),
+                        weight: c.weight,
+                    });
+                }
+                set.exam_spacing_window.push(ExamSpacingWindowInstance {
+                    id: c.id.clone(),
+                    kinds: c.applies_to_kinds.clone(),
+                    weight: c.weight,
+                    min_days_between: p.min_days_between,
                 });
             }
             // Built — see `crate::problem::Offering::protected_block_slots`.

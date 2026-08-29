@@ -6,7 +6,8 @@
 //! loop.
 
 use crate::aggregates::{
-    Aggregates, CompactnessInstance, DayMixInstance, MaxConsecutiveInstance, MaxDailySpanInstance,
+    Aggregates, CompactnessInstance, DayMixInstance, ExamSpacingSameDayInstance,
+    ExamSpacingWindowInstance, MaxConsecutiveInstance, MaxDailySpanInstance,
     MaxWeeklyTeachingLoadInstance, PatternAdherenceInstance, ShareInstance,
 };
 use crate::bitset::BitSet;
@@ -276,6 +277,15 @@ pub struct ConstraintSet {
     /// lecturer teaches in one week. See
     /// [`crate::aggregates::MaxWeeklyTeachingLoadInstance`].
     pub max_weekly_teaching_load: Vec<MaxWeeklyTeachingLoadInstance>,
+    /// SOFT, aggregate over a day. A Group should not sit two or more
+    /// exam-kind Sessions on the same day. See
+    /// [`crate::aggregates::ExamSpacingSameDayInstance`].
+    pub exam_spacing_same_day: Vec<ExamSpacingSameDayInstance>,
+    /// SOFT, aggregate over a day. The generalized sibling of
+    /// `exam_spacing_same_day`: a minimum day count between any two
+    /// exam-kind Sessions of one Group. See
+    /// [`crate::aggregates::ExamSpacingWindowInstance`].
+    pub exam_spacing_window: Vec<ExamSpacingWindowInstance>,
 }
 
 /// One `ProtectedBlock` instance. The FIRST hard type whose values
@@ -363,6 +373,8 @@ pub struct Enforce {
     pub max_daily_span_group: bool,
     pub max_daily_span_person: bool,
     pub max_weekly_teaching_load: bool,
+    pub exam_spacing_same_day: bool,
+    pub exam_spacing_window: bool,
 }
 
 impl ConstraintSet {
@@ -402,6 +414,8 @@ impl ConstraintSet {
                 .iter()
                 .any(|c| c.person && c.covers(kind)),
             max_weekly_teaching_load: self.max_weekly_teaching_load.iter().any(|c| c.covers(kind)),
+            exam_spacing_same_day: self.exam_spacing_same_day.iter().any(|c| c.covers(kind)),
+            exam_spacing_window: self.exam_spacing_window.iter().any(|c| c.covers(kind)),
         }
     }
 }
@@ -901,6 +915,10 @@ pub struct Problem {
     /// Summed weight of every configured `MaxWeeklyTeachingLoad` instance.
     /// Zero when not configured. Lecturer-only, no axis split.
     pub max_weekly_teaching_load_weight: f64,
+    /// Summed weight of every configured `ExamSpacingSameDay` instance.
+    pub exam_same_day_weight: f64,
+    /// Summed weight of every configured `ExamSpacingWindow` instance.
+    pub exam_window_weight: f64,
     /// Summed weight of every configured `DistributedPatternAdherence`.
     pub distributed_pattern_weight: f64,
     /// Summed weight of every configured `BlockPatternAdherence`.
@@ -1095,6 +1113,8 @@ impl Problem {
             constraints.max_consecutive_blocks.clone(),
             constraints.max_daily_span.clone(),
             constraints.max_weekly_teaching_load.clone(),
+            constraints.exam_spacing_same_day.clone(),
+            constraints.exam_spacing_window.clone(),
         );
 
         let day_mix_weight: f64 = constraints
@@ -1151,6 +1171,16 @@ impl Problem {
             .sum();
         let max_weekly_teaching_load_weight: f64 = constraints
             .max_weekly_teaching_load
+            .iter()
+            .map(|i| i.weight)
+            .sum();
+        let exam_same_day_weight: f64 = constraints
+            .exam_spacing_same_day
+            .iter()
+            .map(|i| i.weight)
+            .sum();
+        let exam_window_weight: f64 = constraints
+            .exam_spacing_window
             .iter()
             .map(|i| i.weight)
             .sum();
@@ -1223,6 +1253,11 @@ impl Problem {
             + day_mix_weight * aggregate_template.day_mix_cell_count() as f64
             + movement_weight * placements.len() as f64
             + capacity_waste_weight * placements.len() as f64
+            // Read off `(group, day)` cell counts, exactly like day_mix_weight
+            // above: neither is bounded by placements, since one placement can
+            // touch several cells at once.
+            + exam_same_day_weight * aggregate_template.exam_same_day_cell_count() as f64
+            + exam_window_weight * aggregate_template.exam_window_cell_count() as f64
             + 1.0;
 
         let n = derived_offerings.len();
@@ -1278,6 +1313,8 @@ impl Problem {
             max_daily_span_group_weight,
             max_daily_span_person_weight,
             max_weekly_teaching_load_weight,
+            exam_same_day_weight,
+            exam_window_weight,
             distributed_pattern_weight,
             block_pattern_weight,
             in_scope,

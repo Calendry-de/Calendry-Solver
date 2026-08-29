@@ -177,6 +177,41 @@ impl MaxWeeklyTeachingLoadInstance {
     }
 }
 
+/// One configured `ExamSpacingSameDay` rule. Which Sessions count as
+/// "exam-kind" is `kinds` (`ConstraintConfig.applies_to_kinds`) — not a
+/// separate field here, the same mechanism every kind-scoped type uses.
+#[derive(Clone, Debug)]
+pub struct ExamSpacingSameDayInstance {
+    pub id: String,
+    pub kinds: Vec<String>,
+    pub weight: f64,
+}
+
+impl ExamSpacingSameDayInstance {
+    #[inline]
+    pub fn covers(&self, kind: &str) -> bool {
+        self.kinds.is_empty() || self.kinds.iter().any(|k| k == kind)
+    }
+}
+
+/// One configured `ExamSpacingWindow` rule — the generalized sibling of
+/// `ExamSpacingSameDayInstance` for a tenant that wants more than one clear
+/// day between exams.
+#[derive(Clone, Debug)]
+pub struct ExamSpacingWindowInstance {
+    pub id: String,
+    pub kinds: Vec<String>,
+    pub weight: f64,
+    pub min_days_between: u32,
+}
+
+impl ExamSpacingWindowInstance {
+    #[inline]
+    pub fn covers(&self, kind: &str) -> bool {
+        self.kinds.is_empty() || self.kinds.iter().any(|k| k == kind)
+    }
+}
+
 /// One configured `DistributedPatternAdherence` or `BlockPatternAdherence` —
 /// identical shape, kept as one type since both are just "id, kind scope,
 /// weight" with the actual per-pattern logic living in `Aggregates` instead.
@@ -351,6 +386,24 @@ pub struct Aggregates {
     teaching_load_excess_total: u32,
 
     teaching_load_rules: Vec<MaxWeeklyTeachingLoadInstance>,
+
+    /// `[group * n_days + day]` — the `ExamSpacingSameDay` counterpart of
+    /// `online_day`/`onsite_day`: how many exam-kind Sessions (per
+    /// `applies_to_kinds`) that Group currently has on that day. Violated
+    /// (2+) is read off fresh each time, like `day_mix_violations` — safe at
+    /// the same O(groups x days) scale that type already accepts.
+    exam_same_day: Vec<u32>,
+    exam_same_day_rules: Vec<ExamSpacingSameDayInstance>,
+
+    /// `[group * n_days + day]` — the `ExamSpacingWindow` counterpart, one
+    /// more array because the two types are independently switchable and
+    /// independently kind-scoped.
+    exam_window: Vec<u32>,
+    /// The TIGHTEST `min_days_between` among every enabled instance, same
+    /// "whichever binds hardest" convention as the other thresholds here.
+    /// `u32::MAX` when not configured.
+    exam_window_threshold: u32,
+    exam_window_rules: Vec<ExamSpacingWindowInstance>,
 }
 
 impl Aggregates {
@@ -371,6 +424,8 @@ impl Aggregates {
         max_consecutive_rules: Vec<MaxConsecutiveInstance>,
         max_daily_span_rules: Vec<MaxDailySpanInstance>,
         teaching_load_rules: Vec<MaxWeeklyTeachingLoadInstance>,
+        exam_same_day_rules: Vec<ExamSpacingSameDayInstance>,
+        exam_window_rules: Vec<ExamSpacingWindowInstance>,
     ) -> Self {
         let groups = n_groups.max(1);
         let counters = rules
@@ -428,6 +483,14 @@ impl Aggregates {
         let tightest_load_rule = teaching_load_rules.iter().min_by_key(|r| r.max_per_week);
         let teaching_load_threshold = tightest_load_rule.map_or(u32::MAX, |r| r.max_per_week);
         let teaching_load_count_blocks = tightest_load_rule.is_some_and(|r| r.count_blocks);
+
+        let track_exam_same_day = !exam_same_day_rules.is_empty();
+        let track_exam_window = !exam_window_rules.is_empty();
+        let exam_window_threshold = exam_window_rules
+            .iter()
+            .map(|r| r.min_days_between)
+            .min()
+            .unwrap_or(u32::MAX);
 
         Self {
             online_day: vec![0; groups * n_days.max(1)],
@@ -494,6 +557,19 @@ impl Aggregates {
             teaching_load_count_blocks,
             teaching_load_excess_total: 0,
             teaching_load_rules,
+            exam_same_day: if track_exam_same_day {
+                vec![0; groups * n_days.max(1)]
+            } else {
+                Vec::new()
+            },
+            exam_same_day_rules,
+            exam_window: if track_exam_window {
+                vec![0; groups * n_days.max(1)]
+            } else {
+                Vec::new()
+            },
+            exam_window_threshold,
+            exam_window_rules,
         }
     }
 
@@ -1547,6 +1623,188 @@ impl Aggregates {
         cost
     }
 
+    // -- exam spacing (same day) ------------------------------------------------
+
+    pub fn exam_same_day_rules(&self) -> &[ExamSpacingSameDayInstance] {
+        &self.exam_same_day_rules
+    }
+
+    pub fn add_exam_same_day(&mut self, groups: &[GroupIdx], days: &[u32]) {
+        if self.exam_same_day.is_empty() {
+            return;
+        }
+        for &g in groups {
+            for &d in days {
+                let c = self.day_cell(g, d);
+                self.exam_same_day[c] += 1;
+            }
+        }
+    }
+
+    pub fn remove_exam_same_day(&mut self, groups: &[GroupIdx], days: &[u32]) {
+        if self.exam_same_day.is_empty() {
+            return;
+        }
+        for &g in groups {
+            for &d in days {
+                let c = self.day_cell(g, d);
+                self.exam_same_day[c] = self.exam_same_day[c].saturating_sub(1);
+            }
+        }
+    }
+
+    /// Would adding an exam-kind Session for `groups` on `days` create or
+    /// worsen a same-day clash? Mirrors [`Self::day_mix_allows`].
+    pub fn exam_same_day_allows(&self, groups: &[GroupIdx], days: &[u32]) -> bool {
+        for &g in groups {
+            for &d in days {
+                if self.exam_same_day[self.day_cell(g, d)] > 0 {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    /// How many `(group, day)` cells currently hold 2+ exam-kind Sessions.
+    /// Read fresh off the counters, like `day_mix_violations` — the number
+    /// the objective charges for.
+    pub fn exam_same_day_violations(&self) -> u32 {
+        self.exam_same_day.iter().filter(|&&c| c >= 2).count() as u32
+    }
+
+    /// Total `(group, day)` cells — the bound `Problem::hard_penalty` needs,
+    /// mirroring `day_mix_cell_count`.
+    pub fn exam_same_day_cell_count(&self) -> usize {
+        self.exam_same_day.len()
+    }
+
+    /// Sum of `weight` over every currently-clashing `(group, day)` cell this
+    /// occupant sits in, for `ruin_worst`'s attribution. Mirrors
+    /// `day_mix_violation_cost`.
+    pub fn exam_same_day_violation_cost(
+        &self,
+        groups: &[GroupIdx],
+        days: &[u32],
+        weight: f64,
+    ) -> f64 {
+        if weight == 0.0 || self.exam_same_day.is_empty() {
+            return 0.0;
+        }
+        let mut cost = 0.0;
+        for &g in groups {
+            for &d in days {
+                if self.exam_same_day[self.day_cell(g, d)] >= 2 {
+                    cost += weight;
+                }
+            }
+        }
+        cost
+    }
+
+    // -- exam spacing (window) --------------------------------------------------
+
+    pub fn exam_window_rules(&self) -> &[ExamSpacingWindowInstance] {
+        &self.exam_window_rules
+    }
+
+    /// Every exam-kind Session within `exam_window_threshold` days of `day`
+    /// (inclusive both ends, `day` itself included) for one Group — a
+    /// distance-`< threshold` pair exists exactly when this sum exceeds 1.
+    /// Cheap: `threshold` is a handful of days, so the window is a small,
+    /// fixed-size scan, not proportional to the whole term.
+    #[inline]
+    fn exam_window_sum(&self, group: GroupIdx, day: u32) -> u32 {
+        let threshold = self.exam_window_threshold;
+        if self.n_days == 0 {
+            return 0;
+        }
+        let lo = day.saturating_sub(threshold.saturating_sub(1));
+        let hi = (day + threshold.saturating_sub(1)).min(self.n_days as u32 - 1);
+        let row = group.get() * self.n_days;
+        (lo..=hi).map(|d| self.exam_window[row + d as usize]).sum()
+    }
+
+    pub fn add_exam_window(&mut self, groups: &[GroupIdx], days: &[u32]) {
+        if self.exam_window.is_empty() {
+            return;
+        }
+        for &g in groups {
+            for &d in days {
+                let c = self.day_cell(g, d);
+                self.exam_window[c] += 1;
+            }
+        }
+    }
+
+    pub fn remove_exam_window(&mut self, groups: &[GroupIdx], days: &[u32]) {
+        if self.exam_window.is_empty() {
+            return;
+        }
+        for &g in groups {
+            for &d in days {
+                let c = self.day_cell(g, d);
+                self.exam_window[c] = self.exam_window[c].saturating_sub(1);
+            }
+        }
+    }
+
+    /// Would adding an exam-kind Session for `groups` on `days` land within
+    /// the window of an existing one? Mirrors [`Self::exam_same_day_allows`].
+    pub fn exam_window_allows(&self, groups: &[GroupIdx], days: &[u32]) -> bool {
+        for &g in groups {
+            for &d in days {
+                if self.exam_window_sum(g, d) > 0 {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    /// How many `(group, day)` cells hold an exam-kind Session that has
+    /// another one somewhere in its window. Read fresh, like
+    /// `exam_same_day_violations`.
+    pub fn exam_window_violations(&self) -> u32 {
+        if self.exam_window.is_empty() {
+            return 0;
+        }
+        (0..self.exam_window.len())
+            .filter(|&c| {
+                let g = GroupIdx((c / self.n_days) as u32);
+                let d = (c % self.n_days) as u32;
+                self.exam_window[c] > 0 && self.exam_window_sum(g, d) > 1
+            })
+            .count() as u32
+    }
+
+    /// Total `(group, day)` cells, mirroring `exam_same_day_cell_count`.
+    pub fn exam_window_cell_count(&self) -> usize {
+        self.exam_window.len()
+    }
+
+    /// Sum of `weight` over every currently-clustered `(group, day)` cell
+    /// this occupant sits in, for `ruin_worst`'s attribution.
+    pub fn exam_window_violation_cost(
+        &self,
+        groups: &[GroupIdx],
+        days: &[u32],
+        weight: f64,
+    ) -> f64 {
+        if weight == 0.0 || self.exam_window.is_empty() {
+            return 0.0;
+        }
+        let mut cost = 0.0;
+        for &g in groups {
+            for &d in days {
+                if self.exam_window_sum(g, d) > 1 {
+                    cost += weight;
+                }
+            }
+        }
+        cost
+    }
+
     // -- scheduling pattern ---------------------------------------------------
 
     pub fn distributed_rules(&self) -> &[PatternAdherenceInstance] {
@@ -1926,6 +2184,8 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
+            vec![],
         );
         let g = [GroupIdx(0)];
 
@@ -1956,6 +2216,8 @@ mod tests {
             vec![],
             0,
             0,
+            vec![],
+            vec![],
             vec![],
             vec![],
             vec![],
@@ -2005,6 +2267,8 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
+            vec![],
         );
         load(&mut term);
         assert_eq!(term.share_violations(), 0);
@@ -2021,6 +2285,8 @@ mod tests {
             vec![],
             0,
             0,
+            vec![],
+            vec![],
             vec![],
             vec![],
             vec![],
@@ -2049,6 +2315,8 @@ mod tests {
             vec![],
             0,
             0,
+            vec![],
+            vec![],
             vec![],
             vec![],
             vec![],
@@ -2085,6 +2353,8 @@ mod tests {
             vec![],
             0,
             0,
+            vec![],
+            vec![],
             vec![],
             vec![],
             vec![],
@@ -2130,6 +2400,8 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
+            vec![],
         );
         let g = [GroupIdx(0)];
         a.apply_share("lecture", &g, 0, true, true);
@@ -2158,6 +2430,8 @@ mod tests {
             vec![],
             0,
             0,
+            vec![],
+            vec![],
             vec![],
             vec![],
             vec![],
@@ -2202,6 +2476,8 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
+            vec![],
         );
         let g = [GroupIdx(0)];
 
@@ -2240,6 +2516,8 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
+            vec![],
         );
         let g = [GroupIdx(0)];
         a.add_group_compactness(&g, 0, &[SlotIdx(0)]);
@@ -2260,6 +2538,8 @@ mod tests {
             vec![compactness_rule(false, true)],
             0,
             0,
+            vec![],
+            vec![],
             vec![],
             vec![],
             vec![],
@@ -2296,6 +2576,8 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
+            vec![],
         );
         a.add_person_compactness(&[PersonIdx(0)], 0, &[SlotIdx(0), SlotIdx(3)]);
         assert_eq!(a.compactness_cost(0.0, 1.0), 0.0, "Person axis was never configured");
@@ -2318,6 +2600,8 @@ mod tests {
             vec![compactness_rule(true, false)],
             0,
             0,
+            vec![],
+            vec![],
             vec![],
             vec![],
             vec![],
@@ -2352,6 +2636,8 @@ mod tests {
             vec![compactness_rule(true, false)],
             0,
             0,
+            vec![],
+            vec![],
             vec![],
             vec![],
             vec![],
@@ -2398,6 +2684,8 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
+            vec![],
         );
         let o = OfferingIdx(0);
         a.add_distributed(o, 0);
@@ -2420,6 +2708,8 @@ mod tests {
             1,
             2,
             vec![pattern_rule()],
+            vec![],
+            vec![],
             vec![],
             vec![],
             vec![],
@@ -2453,6 +2743,8 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
+            vec![],
         );
         let o = OfferingIdx(0);
         a.add_distributed(o, 0);
@@ -2482,6 +2774,8 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
+            vec![],
         );
         a.add_distributed(OfferingIdx(0), 0);
         a.add_distributed(OfferingIdx(0), 1);
@@ -2506,6 +2800,8 @@ mod tests {
             1,
             vec![],
             vec![pattern_rule()],
+            vec![],
+            vec![],
             vec![],
             vec![],
             vec![],
@@ -2542,6 +2838,8 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
+            vec![],
         );
         let o = OfferingIdx(0);
         a.add_block(o, 0);
@@ -2570,6 +2868,8 @@ mod tests {
             2,
             vec![],
             vec![pattern_rule()],
+            vec![],
+            vec![],
             vec![],
             vec![],
             vec![],

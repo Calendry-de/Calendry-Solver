@@ -374,6 +374,13 @@ pub struct Objective {
     /// by the configured weight. Same "belongs to a week, not a placement"
     /// reason for living outside `soft` the other aggregate costs have.
     pub max_weekly_teaching_load_cost: f64,
+    /// How many `(group, day)` cells currently hold 2+ exam-kind Sessions,
+    /// already multiplied by the configured weight. Read off the counters
+    /// like `day_mix_cost` — a same-day clash belongs to the day, not to
+    /// either Session individually.
+    pub exam_same_day_cost: f64,
+    /// The `ExamSpacingWindow` counterpart of `exam_same_day_cost`.
+    pub exam_window_cost: f64,
     /// `DistributedPatternAdherence` and `BlockPatternAdherence` together,
     /// already multiplied by each type's configured weight. Read whole off
     /// `Aggregates`' running totals for the same reason `compactness_cost` is:
@@ -403,6 +410,8 @@ impl Objective {
             + self.max_consecutive_cost
             + self.max_daily_span_cost
             + self.max_weekly_teaching_load_cost
+            + self.exam_same_day_cost
+            + self.exam_window_cost
             + self.scheduling_pattern_cost
     }
 }
@@ -615,6 +624,8 @@ mod tests {
             max_consecutive_cost: 0.0,
             max_daily_span_cost: 0.0,
             max_weekly_teaching_load_cost: 0.0,
+            exam_same_day_cost: 0.0,
+            exam_window_cost: 0.0,
             scheduling_pattern_cost: 0.0,
         };
         let one_unplaced = Objective {
@@ -626,6 +637,8 @@ mod tests {
             max_consecutive_cost: 0.0,
             max_daily_span_cost: 0.0,
             max_weekly_teaching_load_cost: 0.0,
+            exam_same_day_cost: 0.0,
+            exam_window_cost: 0.0,
             scheduling_pattern_cost: 0.0,
         };
         assert!(one_unplaced.total(hard_penalty) > all_soft_bad.total(hard_penalty));
@@ -654,6 +667,8 @@ mod tests {
             max_consecutive_cost: 0.0,
             max_daily_span_cost: 0.0,
             max_weekly_teaching_load_cost: 0.0,
+            exam_same_day_cost: 0.0,
+            exam_window_cost: 0.0,
             scheduling_pattern_cost: 0.0,
         };
         let one_unplaced = Objective {
@@ -665,6 +680,8 @@ mod tests {
             max_consecutive_cost: 0.0,
             max_daily_span_cost: 0.0,
             max_weekly_teaching_load_cost: 0.0,
+            exam_same_day_cost: 0.0,
+            exam_window_cost: 0.0,
             scheduling_pattern_cost: 0.0,
         };
 

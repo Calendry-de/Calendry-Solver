@@ -235,6 +235,8 @@ pub fn all_constraints() -> ConstraintSet {
         max_consecutive_blocks: Vec::new(),
         max_daily_span: Vec::new(),
         max_weekly_teaching_load: Vec::new(),
+        exam_spacing_same_day: Vec::new(),
+        exam_spacing_window: Vec::new(),
         // Weight 5 mirrors the app catalogue's `defaultWeight` for this type,
         // so a fixture's day-mix cost reads the same as a real tenant's.
         online_onsite_same_day: day_mix("c-mix", 5.0),

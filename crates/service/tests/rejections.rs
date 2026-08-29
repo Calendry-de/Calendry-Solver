@@ -417,8 +417,6 @@ fn every_staged_p2_type_is_unimplemented_not_invalid() {
             "MinimizeLocationChange",
             Params::MinimizeLocationChange(pb::MinimizeLocationChange::default()),
         ),
-        ("ExamSpacingSameDay", Params::ExamSpacingSameDay(pb::ExamSpacingSameDay {})),
-        ("ExamSpacingWindow", Params::ExamSpacingWindow(pb::ExamSpacingWindow::default())),
         ("RoomConsistency", Params::RoomConsistency(pb::RoomConsistency {})),
         ("MinimizeRoomChurn", Params::MinimizeRoomChurn(pb::MinimizeRoomChurn::default())),
         (
