@@ -368,8 +368,13 @@ impl InstanceParams {
         self.core_demand_blocks() + self.elective_demand_blocks()
     }
 
+    /// A virtual Room is not an exclusive resource (solver ADR-0022): any
+    /// number of online Sessions share it, so it contributes no scarcity for
+    /// this prediction to describe. Divides by PHYSICAL rooms only —
+    /// `self.rooms()` (physical + virtual) is right for generating the
+    /// instance's actual Room count, wrong for this ratio.
     pub fn predicted_room_tightness(&self) -> f64 {
-        self.demand_blocks() / (self.rooms() * self.slots()) as f64
+        self.demand_blocks() / (self.physical_rooms as u64 * self.slots()) as f64
     }
 
     /// The busiest group row, in closed form.
