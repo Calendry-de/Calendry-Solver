@@ -7,7 +7,7 @@
 //! same convention as `LecturerVeto`/`GroupVeto`.
 
 use calendry_solver_core::constraints::{ConstraintType, evaluate_hard};
-use calendry_solver_core::problem::{ConstraintInstance, ConstraintSet, ProblemSpec};
+use calendry_solver_core::problem::{ConstraintInstance, ConstraintSet, ProblemSpec, Room};
 use calendry_solver_core::testing::{self, group_with_size};
 
 mod common;
@@ -81,6 +81,30 @@ fn disabled_leaves_an_oversized_group_unreported() {
             .iter()
             .any(|v| v.constraint_type == ConstraintType::GroupSizeFitsRoom),
         "the tenant never enabled this check: {violations:?}"
+    );
+}
+
+#[test]
+fn a_zero_capacity_room_is_unbounded_not_fits_nobody() {
+    // `Room.capacity == 0` means UNBOUNDED (issue #62), not "seats nobody" —
+    // a Room saved with nothing recorded must never itself become the
+    // reason a Group is reported oversized.
+    let spec = ProblemSpec {
+        rooms: vec![Room { capacity: 0, ..testing::room("R0") }],
+        groups: vec![group_with_size("G", None, 1000)],
+        offerings: vec![testing::with_groups(testing::offering("O", 1, &[0]), &[0])],
+        constraints: enabled(),
+        ..ProblemSpec::new(testing::grid(1, 1))
+    };
+    let problem = testing::assemble(spec);
+    let outcome = run(&problem);
+
+    let violations = evaluate_hard(&problem, &outcome.solution);
+    assert!(
+        !violations
+            .iter()
+            .any(|v| v.constraint_type == ConstraintType::GroupSizeFitsRoom),
+        "an unbounded Room can never be reported over capacity: {violations:?}"
     );
 }
 

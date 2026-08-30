@@ -550,7 +550,9 @@ fn build_offerings(
             let eligible: Vec<RoomIdx> = rooms
                 .iter()
                 .enumerate()
-                .filter(|(i, r)| individually_eligible(*i, r) && r.capacity >= o.min_capacity)
+                .filter(|(i, r)| {
+                    individually_eligible(*i, r) && room_fits(r.capacity, o.min_capacity)
+                })
                 .map(|(i, _)| RoomIdx(i as u32))
                 .collect();
             (eligible, vec![])
@@ -604,9 +606,29 @@ const MAX_ROOMS_PER_SESSION: u32 = 1 + MAX_ADDITIONAL_ROOMS as u32;
 /// paying an unbounded conversion cost for a pathological Room pool.
 const MAX_ROOM_COMBINATIONS: usize = 2000;
 
+/// Whether a Room of `capacity` seats meets `min_capacity` — `true`
+/// unconditionally when `capacity == 0`, which means UNBOUNDED, not "fits
+/// nobody" (issue #62): the app's column defaults to 0, so before this
+/// reading every Room saved without a measured capacity was silently
+/// ineligible for every Offering that asked for any. An online Room has no
+/// seating to run out of; a physical Room with nothing recorded is one
+/// nobody has measured — neither is "fits nobody".
+#[inline]
+fn room_fits(capacity: u32, min_capacity: u32) -> bool {
+    capacity == 0 || capacity >= min_capacity
+}
+
 /// Every combination of `k` distinct Rooms from `pool` whose SUMMED capacity
 /// meets `min_capacity`, in the shape [`calendry_solver_core::problem::Offering::room_choice`]
 /// wants: `(primary, additional)`. Capped at [`MAX_ROOM_COMBINATIONS`].
+///
+/// A `0`-capacity (UNBOUNDED) Room anywhere in the combination makes the
+/// whole combination unbounded too, regardless of the other Rooms' capacities
+/// — summing raw capacities would instead treat it as contributing zero
+/// seats, which is backwards for a Room meaning "no limit". No sentinel
+/// value stands in for "unbounded" here (an earlier candidate, `u32::MAX`,
+/// would overflow this SUM on a second such Room); `0` stays `0` and is
+/// special-cased at the comparison instead.
 fn room_combinations(
     pool: &[RoomIdx],
     rooms: &[Room],
@@ -633,8 +655,9 @@ fn room_combinations_go(
         return;
     }
     if current.len() == k {
+        let unbounded = current.iter().any(|r| rooms[r.get()].capacity == 0);
         let total_capacity: u32 = current.iter().map(|r| rooms[r.get()].capacity).sum();
-        if total_capacity >= min_capacity {
+        if unbounded || total_capacity >= min_capacity {
             let mut additional = [None; MAX_ADDITIONAL_ROOMS];
             for (slot, &r) in additional.iter_mut().zip(&current[1..]) {
                 *slot = Some(r);

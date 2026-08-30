@@ -245,6 +245,12 @@ pub fn group_size_fits_room(problem: &Problem, solution: &Solution, out: &mut Ve
             if !instance.covers(&o.kind) {
                 continue;
             }
+            // `capacity == 0` means UNBOUNDED, not "fits nobody" (issue #62)
+            // — a Room with nothing recorded can never be reported over
+            // capacity, and this is the one other place besides eligibility
+            // that reads `Room.capacity` as a real seat count rather than as
+            // a bare presence check.
+            let unbounded = pl.all_rooms().any(|r| problem.rooms[r.get()].capacity == 0);
             let capacity: u32 = pl
                 .all_rooms()
                 .map(|r| problem.rooms[r.get()].capacity)
@@ -254,7 +260,7 @@ pub fn group_size_fits_room(problem: &Problem, solution: &Solution, out: &mut Ve
                 .iter()
                 .map(|g| problem.groups[g.get()].size)
                 .sum();
-            if attending > capacity {
+            if !unbounded && attending > capacity {
                 out.push(Violation {
                     constraint_id: instance.id.clone(),
                     constraint_type: ConstraintType::GroupSizeFitsRoom,
