@@ -91,17 +91,13 @@ about for a tracked-gap entry.
   "the exam period", are still app-side / unbuilt).
 
 * **`Compactness`** is built — see the solver repo's CLAUDE.md.
-  **`LecturerConsistency`** (`oneof params` entry 30) still refuses with
-  `ConvertError::ConstraintTypeUnimplemented` → gRPC `UNIMPLEMENTED` if
-  enabled — tested in `crates/service/tests/rejections.rs` — rather than
-  silently doing nothing, which a bare `bool` flag (see `MinimizeExamWeek`
-  above) cannot do but a whole message can. Its prerequisite is no longer
-  missing: genuine lecturer-pool selection is now built (issue #61,
-  `crates/core/src/preferences.rs`'s `cost_for` — see "Lecturer-pool
-  selection is unimplemented" for what changed). `LecturerConsistency`
-  itself — "Lecturer consistency across an Offering's Sessions" — is
-  separate solver work this did not do; only the catalogue slot and the
-  refusal are staged, and its evaluator and shape decisions remain open.
+  **`LecturerConsistency`** (`oneof params` entry 30) is now built too: its
+  prerequisite, genuine lecturer-pool selection, landed first (issue #61,
+  `crates/core/src/preferences.rs`'s `cost_for`), and the type itself —
+  "Lecturer consistency across an Offering's Sessions" — is a distinct-count
+  aggregate over an Offering's whole placed set, `crate::aggregates::
+  LecturerConsistencyInstance`. Only ever priced for a genuine pool Offering;
+  a fixed assignment's distinct lecturer count never changes.
 
 * **`Preference.preferred_room_features`**. Rides the existing
   `person_preference_fit` tenant-level switch, per

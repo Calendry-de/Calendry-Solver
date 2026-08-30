@@ -817,6 +817,9 @@ fn build_constraints(params: &InstanceParams, slots: &SlotTable) -> ConstraintSe
         room_turnaround_buffer: Vec::new(),
         minimize_room_churn: Vec::new(),
         room_consistency: Vec::new(),
+        // OFF for the same reason: the generator never gives an Offering a
+        // genuine lecturer pool, so this rule could never fire either.
+        lecturer_consistency: Vec::new(),
         // Weight 5 mirrors the app catalogue's `defaultWeight`, so generated
         // benchmark instances price a mixed day the way a real tenant does.
         online_onsite_same_day: vec![DayMixInstance {

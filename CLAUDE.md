@@ -232,6 +232,18 @@ every member Offering in `Occupancy`'s relation matrix, checked in
 `mark`/`unmark`/`is_free`, plus an independent `constraints::check_pair`
 check for the same ADR-0014 reason every other structural type has one.
 
+**`LecturerConsistency` is built.** Once its prerequisite (lecturer-pool
+selection) landed, the remaining gap was one evaluator: a distinct-lecturer
+count over an entire Offering's placed Sessions, priced against
+`Offering::lecturer_required_count()` — `max(0, distinct_lecturers -
+required)`, the same shape `RoomConsistency` uses for the Room axis but
+keyed by lecturer identity, in `Aggregates::lecturer_rows` (a small
+per-Offering histogram, not a dense `offering * person` matrix, since only a
+genuine pool Offering can ever have a nonzero row). A fixed assignment's
+distinct count never changes, so this type can never fire for the
+overwhelming majority of Offerings. The manual per-Session override the
+tracking card also named is app-side and still unbuilt.
+
 Deliberately not built:
 
 * **A GPU move-evaluation backend.** The seam exists and has two adapters; the
@@ -241,10 +253,6 @@ Deliberately not built:
   "N hours between" family are each a new relation-type evaluator on top of
   the now-built mechanism, not mechanism work. `MeetTogether` additionally
   needs a change to Room occupancy semantics the others do not.
-* **`LecturerConsistency`.** Its prerequisite (lecturer-pool selection) is no
-  longer missing, but the type itself — keeping a lecturer consistent across
-  an Offering's Sessions — is separate solver work; only the catalogue slot
-  and the `ConstraintTypeUnimplemented` refusal are staged.
 
 Outside this repo: the Nuxt integration session, including the one part of the
 schema pipeline never exercised end to end. See

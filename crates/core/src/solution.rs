@@ -1050,6 +1050,35 @@ impl SearchState {
             * problem.room_consistency_weight
     }
 
+    /// The `LecturerConsistency` cost DELTA of placing `who` at `span` — the
+    /// read-only preview, mirroring [`Self::room_consistency_delta`] but over
+    /// `who.all_lecturers()` instead of a single Room, and inert for any
+    /// Offering without a genuine lecturer pool.
+    pub fn lecturer_consistency_delta(
+        &self,
+        problem: &Problem,
+        who: &Occupant<'_>,
+        span: &[SlotIdx],
+    ) -> f64 {
+        if span.is_empty() || !who.enforce.lecturer_consistency {
+            return 0.0;
+        }
+        let Some(offering) = who.offering else {
+            return 0.0;
+        };
+        let o = &problem.offerings[offering.get()];
+        if !o.has_lecturer_pool() {
+            return 0.0;
+        }
+        let lecturers: Vec<PersonIdx> = who.all_lecturers().collect();
+        self.aggregates.lecturer_consistency_delta(
+            offering,
+            &lecturers,
+            o.lecturer_required_count(),
+        ) as f64
+            * problem.lecturer_consistency_weight
+    }
+
     /// The `MaxWeeklyTeachingLoad` cost DELTA of placing `who` at `span` —
     /// the read-only preview, mirroring [`Self::max_daily_span_delta`].
     /// Keyed by `who.all_lecturers()` and the WEEK `span` falls in, not by
@@ -1223,6 +1252,20 @@ impl SearchState {
                     self.aggregates.add_room_consistency(offering, room);
                 } else {
                     self.aggregates.remove_room_consistency(offering, room);
+                }
+            }
+            if who.enforce.lecturer_consistency {
+                let o = &problem.offerings[offering.get()];
+                if o.has_lecturer_pool() {
+                    let lecturers: Vec<PersonIdx> = who.all_lecturers().collect();
+                    let required = o.lecturer_required_count();
+                    if add {
+                        self.aggregates
+                            .add_lecturer_consistency(offering, &lecturers, required);
+                    } else {
+                        self.aggregates
+                            .remove_lecturer_consistency(offering, &lecturers, required);
+                    }
                 }
             }
         }
@@ -1407,6 +1450,16 @@ impl SearchState {
                     .aggregates
                     .consistency_ruin_cost(offering, problem.room_consistency_weight);
             }
+            if who.enforce.lecturer_consistency {
+                let o = &problem.offerings[offering.get()];
+                if o.has_lecturer_pool() {
+                    score += self.aggregates.lecturer_consistency_ruin_cost(
+                        offering,
+                        o.lecturer_required_count(),
+                        problem.lecturer_consistency_weight,
+                    );
+                }
+            }
         }
 
         if who.subtree_groups.is_empty() {
@@ -1551,6 +1604,16 @@ impl SearchState {
         }
         self.aggregates
             .consistency_cost(problem.room_consistency_weight)
+    }
+
+    /// What every currently-inconsistent pool Offering's lecturer choice
+    /// costs, at the configured weight.
+    pub fn lecturer_consistency_cost(&self, problem: &Problem) -> f64 {
+        if problem.lecturer_consistency_weight == 0.0 {
+            return 0.0;
+        }
+        self.aggregates
+            .lecturer_consistency_cost(problem.lecturer_consistency_weight)
     }
 
     /// What the currently over-cap weekly teaching loads cost, at the

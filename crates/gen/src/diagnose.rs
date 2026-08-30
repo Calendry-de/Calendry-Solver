@@ -139,6 +139,7 @@ fn single(axis: fn(&mut Enforce), base: Enforce) -> Enforce {
         room_turnaround: false,
         minimize_room_churn: false,
         room_consistency: false,
+        lecturer_consistency: false,
     };
     axis(&mut e);
     axis(&mut probe);
@@ -170,6 +171,7 @@ fn single(axis: fn(&mut Enforce), base: Enforce) -> Enforce {
         room_turnaround: e.room_turnaround && base.room_turnaround,
         minimize_room_churn: e.minimize_room_churn && base.minimize_room_churn,
         room_consistency: e.room_consistency && base.room_consistency,
+        lecturer_consistency: e.lecturer_consistency && base.lecturer_consistency,
     }
 }
 

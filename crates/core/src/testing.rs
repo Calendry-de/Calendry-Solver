@@ -286,6 +286,7 @@ pub fn all_constraints() -> ConstraintSet {
         room_turnaround_buffer: Vec::new(),
         minimize_room_churn: Vec::new(),
         room_consistency: Vec::new(),
+        lecturer_consistency: Vec::new(),
         // Weight 5 mirrors the app catalogue's `defaultWeight` for this type,
         // so a fixture's day-mix cost reads the same as a real tenant's.
         online_onsite_same_day: day_mix("c-mix", 5.0),

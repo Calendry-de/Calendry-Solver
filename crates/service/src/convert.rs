@@ -27,10 +27,10 @@ use std::collections::{HashMap, HashSet};
 
 use calendry_solver_core::aggregates::{
     CompactnessInstance, DayMixInstance, ExamSpacingSameDayInstance, ExamSpacingWindowInstance,
-    MaxConsecutiveInstance, MaxDailySpanInstance, MaxWeeklyTeachingLoadInstance,
-    MinimizeLocationChangeInstance, MinimizeRoomChurnInstance, MinimizeWeekdayImbalanceInstance,
-    PatternAdherenceInstance, RoomConsistencyInstance, RoomTurnaroundBufferInstance, ShareInstance,
-    ShareWindow,
+    LecturerConsistencyInstance, MaxConsecutiveInstance, MaxDailySpanInstance,
+    MaxWeeklyTeachingLoadInstance, MinimizeLocationChangeInstance, MinimizeRoomChurnInstance,
+    MinimizeWeekdayImbalanceInstance, PatternAdherenceInstance, RoomConsistencyInstance,
+    RoomTurnaroundBufferInstance, ShareInstance, ShareWindow,
 };
 use calendry_solver_core::ids::{GroupIdx, OfferingIdx, PersonIdx, RoomIdx, SlotIdx};
 use calendry_solver_core::preferences::{Preference, PreferenceInstance};
@@ -1215,10 +1215,21 @@ fn build_constraints(input: &pb::SolverInput) -> Result<ConstraintSet, ConvertEr
                     person,
                 });
             }
+            // Built — see `crate::aggregates::LecturerConsistencyInstance`.
+            // Empty message: no params beyond id/kinds/weight, mirroring
+            // `RoomConsistency`. Only ever priced for a genuine lecturer-pool
+            // Offering; a fixed assignment's distinct count never changes.
             Some(Params::LecturerConsistency(_)) => {
-                return Err(ConvertError::ConstraintTypeUnimplemented {
-                    constraint: c.id.clone(),
-                    constraint_type: "LecturerConsistency",
+                if c.weight < 0.0 || c.weight.is_nan() {
+                    return Err(ConvertError::NegativeSoftWeight {
+                        constraint: c.id.clone(),
+                        weight: c.weight,
+                    });
+                }
+                set.lecturer_consistency.push(LecturerConsistencyInstance {
+                    id: c.id.clone(),
+                    kinds: c.applies_to_kinds.clone(),
+                    weight: c.weight,
                 });
             }
             /*
@@ -1258,11 +1269,7 @@ fn build_constraints(input: &pb::SolverInput) -> Result<ConstraintSet, ConvertEr
 
             // -- P2 batch, staged together for one version bump --
             //
-            // Each refused as UNIMPLEMENTED until its own tracking issue lands
-            // an evaluator, same discipline `LecturerConsistency` above uses:
-            // a tenant configuring one of these gets a clear refusal, never a
-            // silently inert setting.
-            // Built — see `crate::problem::Problem::capacity_waste_cost`.
+            // All built — see `crate::problem::Problem::capacity_waste_cost`.
             Some(Params::MinimizeCapacityWaste(p)) => {
                 if c.weight < 0.0 || c.weight.is_nan() {
                     return Err(ConvertError::NegativeSoftWeight {

@@ -301,10 +301,9 @@ impl MinimizeRoomChurnInstance {
 /// id/kinds/weight: an Offering's "usual" Room is the MODAL one among its
 /// own currently-placed Sessions, priced per Session that differs from it.
 /// Keyed by OFFERING rather than Group or Person — an aggregate over the
-/// WHOLE TERM, unbounded by day or week, the same new shape
-/// `LecturerConsistency` is staged for but has no prerequisite blocker: Room
-/// assignment is not gated behind an unimplemented pool-selection feature
-/// the way lecturer choice is.
+/// WHOLE TERM, unbounded by day or week, the same shape `LecturerConsistency`
+/// uses for the lecturer axis. Room assignment never needed a prerequisite
+/// the way lecturer choice did: it is not gated behind pool selection.
 #[derive(Clone, Debug)]
 pub struct RoomConsistencyInstance {
     pub id: String,
@@ -313,6 +312,29 @@ pub struct RoomConsistencyInstance {
 }
 
 impl RoomConsistencyInstance {
+    #[inline]
+    pub fn covers(&self, kind: &str) -> bool {
+        self.kinds.is_empty() || self.kinds.iter().any(|k| k == kind)
+    }
+}
+
+/// One configured `LecturerConsistency` rule. No parameters beyond the usual
+/// id/kinds/weight — mirrors `RoomConsistencyInstance`, but the quantity
+/// priced is distinct LECTURER identities used across an Offering's Sessions
+/// rather than modal-Room misses:
+/// `max(0, distinct_lecturers - required_lecturer_count)`. Only Offerings
+/// with a genuine lecturer pool
+/// (`Offering::has_lecturer_pool`) can ever contribute — a fixed assignment's
+/// lecturer set never changes, so its distinct count is always exactly
+/// `required_lecturer_count` and this rule can never fire for it.
+#[derive(Clone, Debug)]
+pub struct LecturerConsistencyInstance {
+    pub id: String,
+    pub kinds: Vec<String>,
+    pub weight: f64,
+}
+
+impl LecturerConsistencyInstance {
     #[inline]
     pub fn covers(&self, kind: &str) -> bool {
         self.kinds.is_empty() || self.kinds.iter().any(|k| k == kind)
@@ -617,6 +639,24 @@ pub struct Aggregates {
     /// already accepts a rescan over.
     consistency_excess_total: u32,
     consistency_rules: Vec<RoomConsistencyInstance>,
+
+    /// Row per Offering: `(PersonIdx, occurrence count)` pairs for every
+    /// lecturer this Offering's currently-placed Sessions have ever used —
+    /// `LecturerConsistency`'s own histogram. Only allocated (and only ever
+    /// written to, at the call site) for Offerings with a genuine lecturer
+    /// pool, so a fixed assignment costs this tracking nothing. A small,
+    /// linearly-scanned row rather than a dense `offering * person` matrix
+    /// like `consistency_room` uses for Rooms: bounded by the Offering's own
+    /// candidate pool size, the same O(|chosen lecturers|)-not-O(|all
+    /// persons|) trade-off `PreferenceModel::cost_for` already makes for a
+    /// pool Offering (ADR-0026, "Lecturer-pool selection landed").
+    lecturer_rows: Vec<Vec<(PersonIdx, u32)>>,
+    /// Running sum, over every tracked Offering, of
+    /// `max(0, distinct_lecturers - required_lecturer_count)` — maintained as
+    /// an exact delta on every mutation, mirroring `consistency_excess_total`
+    /// but keyed by lecturer identity rather than by a modal Room.
+    lecturer_excess_total: u32,
+    lecturer_consistency_rules: Vec<LecturerConsistencyInstance>,
 }
 
 impl Aggregates {
@@ -647,6 +687,7 @@ impl Aggregates {
         n_rooms: usize,
         churn_rules: Vec<MinimizeRoomChurnInstance>,
         consistency_rules: Vec<RoomConsistencyInstance>,
+        lecturer_consistency_rules: Vec<LecturerConsistencyInstance>,
     ) -> Self {
         let groups = n_groups.max(1);
         let counters = rules
@@ -747,6 +788,7 @@ impl Aggregates {
             .unwrap_or(u32::MAX);
 
         let track_consistency = !consistency_rules.is_empty();
+        let track_lecturer_consistency = !lecturer_consistency_rules.is_empty();
 
         Self {
             online_day: vec![0; groups * n_days.max(1)],
@@ -880,6 +922,13 @@ impl Aggregates {
             },
             consistency_excess_total: 0,
             consistency_rules,
+            lecturer_rows: if track_lecturer_consistency {
+                vec![Vec::new(); offerings]
+            } else {
+                Vec::new()
+            },
+            lecturer_excess_total: 0,
+            lecturer_consistency_rules,
         }
     }
 
@@ -2780,6 +2829,123 @@ impl Aggregates {
         }
     }
 
+    // -- lecturer consistency -------------------------------------------------
+
+    pub fn lecturer_consistency_rules(&self) -> &[LecturerConsistencyInstance] {
+        &self.lecturer_consistency_rules
+    }
+
+    /// Distinct lecturers currently used past `required` — `0` for a row with
+    /// nothing placed yet, or one that has never used more than `required`
+    /// distinct identities.
+    #[inline]
+    fn lecturer_excess(row: &[(PersonIdx, u32)], required: u32) -> u32 {
+        let distinct = row.iter().filter(|&&(_, count)| count > 0).count() as u32;
+        distinct.saturating_sub(required)
+    }
+
+    /// The excess DELTA `LecturerConsistency` would experience if this
+    /// Offering's placement gained `lecturers` — a read-only preview, ranking
+    /// signal only like [`Self::room_consistency_delta`], not an exact charge:
+    /// unlike that method this can add SEVERAL lecturers at once (a Session
+    /// may need more than one), so the preview has to reason about the whole
+    /// candidate set together rather than one Room. No allocation, no
+    /// mutation: a lecturer counts as newly distinct only if it is neither
+    /// already used (with a nonzero count) nor repeated earlier in this same
+    /// candidate slice.
+    pub fn lecturer_consistency_delta(
+        &self,
+        offering: OfferingIdx,
+        lecturers: &[PersonIdx],
+        required: u32,
+    ) -> i64 {
+        if self.lecturer_rows.is_empty() || lecturers.is_empty() {
+            return 0;
+        }
+        let row = &self.lecturer_rows[offering.get()];
+        let before = Self::lecturer_excess(row, required);
+        let distinct_before = row.iter().filter(|&&(_, count)| count > 0).count() as u32;
+        let mut new_distinct = 0u32;
+        for (i, &p) in lecturers.iter().enumerate() {
+            let already_used = row.iter().any(|&(id, count)| id == p && count > 0);
+            let seen_earlier_in_batch = lecturers[..i].contains(&p);
+            if !already_used && !seen_earlier_in_batch {
+                new_distinct += 1;
+            }
+        }
+        let after = (distinct_before + new_distinct).saturating_sub(required);
+        i64::from(after) - i64::from(before)
+    }
+
+    /// Mark `lecturers` as this Offering's Session, updating
+    /// `lecturer_excess_total` by the exact delta. A no-op for an Offering
+    /// with no row (not a genuine lecturer pool, or the type not configured).
+    pub fn add_lecturer_consistency(
+        &mut self,
+        offering: OfferingIdx,
+        lecturers: &[PersonIdx],
+        required: u32,
+    ) {
+        if self.lecturer_rows.is_empty() || lecturers.is_empty() {
+            return;
+        }
+        let row = &mut self.lecturer_rows[offering.get()];
+        let before = Self::lecturer_excess(row, required);
+        for &p in lecturers {
+            if let Some(entry) = row.iter_mut().find(|(id, _)| *id == p) {
+                entry.1 += 1;
+            } else {
+                row.push((p, 1));
+            }
+        }
+        let after = Self::lecturer_excess(row, required);
+        self.lecturer_excess_total =
+            (i64::from(self.lecturer_excess_total) + i64::from(after) - i64::from(before)) as u32;
+    }
+
+    pub fn remove_lecturer_consistency(
+        &mut self,
+        offering: OfferingIdx,
+        lecturers: &[PersonIdx],
+        required: u32,
+    ) {
+        if self.lecturer_rows.is_empty() || lecturers.is_empty() {
+            return;
+        }
+        let row = &mut self.lecturer_rows[offering.get()];
+        let before = Self::lecturer_excess(row, required);
+        for &p in lecturers {
+            if let Some(entry) = row.iter_mut().find(|(id, _)| *id == p) {
+                entry.1 = entry.1.saturating_sub(1);
+            }
+        }
+        let after = Self::lecturer_excess(row, required);
+        self.lecturer_excess_total =
+            (i64::from(self.lecturer_excess_total) + i64::from(after) - i64::from(before)) as u32;
+    }
+
+    /// What every currently-inconsistent Offering costs, at the configured
+    /// weight — O(1), read straight off `lecturer_excess_total`.
+    pub fn lecturer_consistency_cost(&self, weight: f64) -> f64 {
+        self.lecturer_excess_total as f64 * weight
+    }
+
+    /// Flat charge for any occupant of an Offering that currently has ANY
+    /// lecturer excess — the same attribution convention
+    /// `consistency_ruin_cost` uses.
+    pub fn lecturer_consistency_ruin_cost(
+        &self,
+        offering: OfferingIdx,
+        required: u32,
+        weight: f64,
+    ) -> f64 {
+        if weight == 0.0 || self.lecturer_rows.is_empty() {
+            return 0.0;
+        }
+        let row = &self.lecturer_rows[offering.get()];
+        if Self::lecturer_excess(row, required) > 0 { weight } else { 0.0 }
+    }
+
     // -- scheduling pattern ---------------------------------------------------
 
     pub fn distributed_rules(&self) -> &[PatternAdherenceInstance] {
@@ -3169,6 +3335,7 @@ mod tests {
             1,
             vec![],
             vec![],
+            vec![], // lecturer_consistency_rules
         );
         let g = [GroupIdx(0)];
 
@@ -3214,6 +3381,7 @@ mod tests {
             1,
             vec![],
             vec![],
+            vec![], // lecturer_consistency_rules
         );
         let g = [GroupIdx(0)];
 
@@ -3268,6 +3436,7 @@ mod tests {
             1,
             vec![],
             vec![],
+            vec![], // lecturer_consistency_rules
         );
         load(&mut term);
         assert_eq!(term.share_violations(), 0);
@@ -3299,6 +3468,7 @@ mod tests {
             1,
             vec![],
             vec![],
+            vec![], // lecturer_consistency_rules
         );
         load(&mut week);
         assert_eq!(week.share_violations(), 1);
@@ -3337,6 +3507,7 @@ mod tests {
             1,
             vec![],
             vec![],
+            vec![], // lecturer_consistency_rules
         );
         a.apply_share("staff_meeting", &[GroupIdx(0)], 0, true, true);
         assert_eq!(a.share_violations(), 0, "out-of-scope kind must not count");
@@ -3383,6 +3554,7 @@ mod tests {
             1,
             vec![],
             vec![],
+            vec![], // lecturer_consistency_rules
         );
         let g = [GroupIdx(0)];
         // 2 online of 2 total = 100% > 50%: violated.
@@ -3433,6 +3605,7 @@ mod tests {
             1,
             vec![],
             vec![],
+            vec![], // lecturer_consistency_rules
         );
         let g = [GroupIdx(0)];
         a.apply_share("lecture", &g, 0, true, true);
@@ -3476,6 +3649,7 @@ mod tests {
             1,
             vec![],
             vec![],
+            vec![], // lecturer_consistency_rules
         );
         let g = [GroupIdx(0)];
         a.add_day_mode(&g, &[0], true);
@@ -3525,6 +3699,7 @@ mod tests {
             1,
             vec![],
             vec![],
+            vec![], // lecturer_consistency_rules
         );
         let g = [GroupIdx(0)];
 
@@ -3573,6 +3748,7 @@ mod tests {
             1,
             vec![],
             vec![],
+            vec![], // lecturer_consistency_rules
         );
         let g = [GroupIdx(0)];
         a.add_group_compactness(&g, 0, &[SlotIdx(0)]);
@@ -3608,6 +3784,7 @@ mod tests {
             1,
             vec![],
             vec![],
+            vec![], // lecturer_consistency_rules
         );
         let p = [PersonIdx(0)];
 
@@ -3649,6 +3826,7 @@ mod tests {
             1,
             vec![],
             vec![],
+            vec![], // lecturer_consistency_rules
         );
         a.add_person_compactness(&[PersonIdx(0)], 0, &[SlotIdx(0), SlotIdx(3)]);
         assert_eq!(a.compactness_cost(0.0, 1.0), 0.0, "Person axis was never configured");
@@ -3686,6 +3864,7 @@ mod tests {
             1,
             vec![],
             vec![],
+            vec![], // lecturer_consistency_rules
         );
         let g = [GroupIdx(0)];
         a.add_group_compactness(&g, 0, &[SlotIdx(0)]);
@@ -3730,6 +3909,7 @@ mod tests {
             1,
             vec![],
             vec![],
+            vec![], // lecturer_consistency_rules
         );
         let g = [GroupIdx(0)];
         a.add_group_compactness(&g, 0, &[SlotIdx(0)]);
@@ -3781,6 +3961,7 @@ mod tests {
             1,
             vec![],
             vec![],
+            vec![], // lecturer_consistency_rules
         );
         let o = OfferingIdx(0);
         a.add_distributed(o, 0);
@@ -3817,6 +3998,7 @@ mod tests {
             1,
             vec![],
             vec![],
+            vec![], // lecturer_consistency_rules
         );
         let o = OfferingIdx(0);
         a.add_distributed(o, 0);
@@ -3856,6 +4038,7 @@ mod tests {
             1,
             vec![],
             vec![],
+            vec![], // lecturer_consistency_rules
         );
         let o = OfferingIdx(0);
         a.add_distributed(o, 0);
@@ -3895,6 +4078,7 @@ mod tests {
             1,
             vec![],
             vec![],
+            vec![], // lecturer_consistency_rules
         );
         a.add_distributed(OfferingIdx(0), 0);
         a.add_distributed(OfferingIdx(0), 1);
@@ -3932,6 +4116,7 @@ mod tests {
             1,
             vec![],
             vec![],
+            vec![], // lecturer_consistency_rules
         );
         let o = OfferingIdx(0);
         a.add_block(o, 0);
@@ -3975,6 +4160,7 @@ mod tests {
             1,
             vec![],
             vec![],
+            vec![], // lecturer_consistency_rules
         );
         let o = OfferingIdx(0);
         a.add_block(o, 0);
@@ -4016,6 +4202,7 @@ mod tests {
             1,
             vec![],
             vec![],
+            vec![], // lecturer_consistency_rules
         );
         a.add_distributed(OfferingIdx(0), 0);
         a.add_distributed(OfferingIdx(0), 1);

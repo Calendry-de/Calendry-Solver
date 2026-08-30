@@ -208,6 +208,7 @@ impl<'p> Trial<'p> {
             room_turnaround_cost: self.state.room_turnaround_cost(self.problem),
             room_churn_cost: self.state.room_churn_cost(self.problem),
             room_consistency_cost: self.state.room_consistency_cost(self.problem),
+            lecturer_consistency_cost: self.state.lecturer_consistency_cost(self.problem),
             scheduling_pattern_cost: self.state.scheduling_pattern_cost(self.problem),
         }
     }
@@ -939,6 +940,7 @@ pub fn recompute_objective(problem: &Problem, solution: &Solution) -> Objective 
         room_turnaround_cost: state.room_turnaround_cost(problem),
         room_churn_cost: state.room_churn_cost(problem),
         room_consistency_cost: state.room_consistency_cost(problem),
+        lecturer_consistency_cost: state.lecturer_consistency_cost(problem),
         scheduling_pattern_cost: state.scheduling_pattern_cost(problem),
     }
 }
@@ -1095,6 +1097,8 @@ pub fn objectives_agree(a: Objective, b: Objective) -> bool {
         && (a.room_churn_cost - b.room_churn_cost).abs() <= 1e-9 * (1.0 + a.room_churn_cost.abs())
         && (a.room_consistency_cost - b.room_consistency_cost).abs()
             <= 1e-9 * (1.0 + a.room_consistency_cost.abs())
+        && (a.lecturer_consistency_cost - b.lecturer_consistency_cost).abs()
+            <= 1e-9 * (1.0 + a.lecturer_consistency_cost.abs())
         && (a.scheduling_pattern_cost - b.scheduling_pattern_cost).abs()
             <= 1e-9 * (1.0 + a.scheduling_pattern_cost.abs())
 }

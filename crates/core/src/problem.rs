@@ -7,10 +7,10 @@
 
 use crate::aggregates::{
     Aggregates, CompactnessInstance, DayMixInstance, ExamSpacingSameDayInstance,
-    ExamSpacingWindowInstance, MaxConsecutiveInstance, MaxDailySpanInstance,
-    MaxWeeklyTeachingLoadInstance, MinimizeLocationChangeInstance, MinimizeRoomChurnInstance,
-    MinimizeWeekdayImbalanceInstance, PatternAdherenceInstance, RoomConsistencyInstance,
-    RoomTurnaroundBufferInstance, ShareInstance,
+    ExamSpacingWindowInstance, LecturerConsistencyInstance, MaxConsecutiveInstance,
+    MaxDailySpanInstance, MaxWeeklyTeachingLoadInstance, MinimizeLocationChangeInstance,
+    MinimizeRoomChurnInstance, MinimizeWeekdayImbalanceInstance, PatternAdherenceInstance,
+    RoomConsistencyInstance, RoomTurnaroundBufferInstance, ShareInstance,
 };
 use crate::bitset::BitSet;
 use crate::groups::{GroupClosure, GroupCycle};
@@ -344,9 +344,16 @@ pub struct ConstraintSet {
     pub minimize_room_churn: Vec<MinimizeRoomChurnInstance>,
     /// SOFT, aggregate over an entire Offering's Sessions across the WHOLE
     /// TERM — keyed by Offering rather than Group, unbounded by day or
-    /// window, the same new shape `LecturerConsistency` is staged for. See
-    /// [`crate::aggregates::RoomConsistencyInstance`].
+    /// window, the same shape `lecturer_consistency` uses for the lecturer
+    /// axis. See [`crate::aggregates::RoomConsistencyInstance`].
     pub room_consistency: Vec<RoomConsistencyInstance>,
+    /// SOFT, the lecturer-axis counterpart of `room_consistency`: once a
+    /// lecturer holds one Session of a recurring Offering, they should hold
+    /// the rest of it too. Only ever priced for an Offering with a genuine
+    /// lecturer pool (`Offering::has_lecturer_pool`) — a fixed assignment's
+    /// distinct lecturer count never changes. See
+    /// [`crate::aggregates::LecturerConsistencyInstance`].
+    pub lecturer_consistency: Vec<LecturerConsistencyInstance>,
 }
 
 /// One `ProtectedBlock` instance. The FIRST hard type whose values
@@ -442,6 +449,7 @@ pub struct Enforce {
     pub room_turnaround: bool,
     pub minimize_room_churn: bool,
     pub room_consistency: bool,
+    pub lecturer_consistency: bool,
 }
 
 impl ConstraintSet {
@@ -498,6 +506,7 @@ impl ConstraintSet {
             room_turnaround: self.room_turnaround_buffer.iter().any(|c| c.covers(kind)),
             minimize_room_churn: self.minimize_room_churn.iter().any(|c| c.covers(kind)),
             room_consistency: self.room_consistency.iter().any(|c| c.covers(kind)),
+            lecturer_consistency: self.lecturer_consistency.iter().any(|c| c.covers(kind)),
         }
     }
 }
@@ -754,6 +763,19 @@ impl Offering {
         } else {
             lecturers == [None; MAX_LECTURERS]
         }
+    }
+
+    /// How many lecturers a genuine pool combination fills — for
+    /// `LecturerConsistency`, which prices a pool Offering's distinct-lecturer
+    /// count against this. Only meaningful when [`Self::has_lecturer_pool`]:
+    /// every combination has the same number of `Some` entries, so the first
+    /// one answers it. Callers must check `has_lecturer_pool` themselves —
+    /// this returns `0` rather than panicking for a fixed assignment, which
+    /// is never a value `LecturerConsistency` reads.
+    pub fn lecturer_required_count(&self) -> u32 {
+        self.eligible_lecturer_combinations
+            .first()
+            .map_or(0, |combo| combo.iter().filter(|l| l.is_some()).count() as u32)
     }
 }
 
@@ -1106,6 +1128,9 @@ pub struct Problem {
     /// Summed weight of every configured `RoomConsistency` instance. Zero
     /// when not configured.
     pub room_consistency_weight: f64,
+    /// Summed weight of every configured `LecturerConsistency` instance. Zero
+    /// when not configured.
+    pub lecturer_consistency_weight: f64,
     /// `Room.location`, interned to a dense index parallel to [`Self::rooms`].
     /// See [`Problem::room_location`].
     room_location: Vec<u32>,
@@ -1360,6 +1385,7 @@ impl Problem {
             rooms.len(),
             constraints.minimize_room_churn.clone(),
             constraints.room_consistency.clone(),
+            constraints.lecturer_consistency.clone(),
         );
 
         let day_mix_weight: f64 = constraints
@@ -1458,6 +1484,11 @@ impl Problem {
             .sum();
         let room_consistency_weight: f64 =
             constraints.room_consistency.iter().map(|i| i.weight).sum();
+        let lecturer_consistency_weight: f64 = constraints
+            .lecturer_consistency
+            .iter()
+            .map(|i| i.weight)
+            .sum();
         let distributed_pattern_weight: f64 = constraints
             .distributed_pattern_adherence
             .iter()
@@ -1597,6 +1628,7 @@ impl Problem {
             room_turnaround_weight,
             room_churn_weight,
             room_consistency_weight,
+            lecturer_consistency_weight,
             room_location,
             different_time_relation_ids,
             in_scope,

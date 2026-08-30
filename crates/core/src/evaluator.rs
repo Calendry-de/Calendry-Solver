@@ -176,6 +176,11 @@ fn score_one(problem: &Problem, solution: &Solution, state: &SearchState, mv: &M
     // Offering with no day/week axis, over modal-Room excess.
     let room_consistency_delta = state.room_consistency_delta(problem, &candidate, &span);
 
+    // Same ranking-signal contract as `room_consistency_delta` — over
+    // distinct-lecturer excess instead of modal-Room excess, inert for any
+    // Offering without a genuine lecturer pool.
+    let lecturer_consistency_delta = state.lecturer_consistency_delta(problem, &candidate, &span);
+
     // Same ranking-signal contract as `compactness_delta` — see its own
     // comment above — for the Offering-scoped counterpart.
     let scheduling_pattern_delta = state.scheduling_pattern_delta(problem, &candidate, &span);
@@ -215,6 +220,7 @@ fn score_one(problem: &Problem, solution: &Solution, state: &SearchState, mv: &M
             + room_turnaround_delta
             + room_churn_delta
             + room_consistency_delta
+            + lecturer_consistency_delta
             + scheduling_pattern_delta,
     )
 }

@@ -201,3 +201,41 @@ before-the-search shape and was not fixed alongside it — a pool Offering
 combined with `LecturerVeto` is refused at conversion
 (`ConvertError::LecturerVetoUnsupportedWithPool`) rather than silently
 producing an always-empty mask that can never block anything.
+
+## `LecturerConsistency` landed — the type this ADR kept naming is now built
+
+With the prerequisite in place, the type itself — "once a lecturer holds one
+Session of a recurring Offering, they should hold the rest" — turned out to
+be the fourth new shape this catalogue has needed: an aggregate over an
+entire Offering's Sessions across the WHOLE TERM, exactly the shape
+`RoomConsistency` already used for the Room axis, but keyed by lecturer
+identity: `max(0, distinct_lecturers_used - required_lecturer_count)`,
+priced SOFT at the configured weight (`crate::aggregates::
+LecturerConsistencyInstance`, `Aggregates::add_lecturer_consistency`/
+`lecturer_consistency_cost`).
+
+**It reuses `RoomConsistency`'s shape, but not its storage.** `RoomConsistency`
+dense-indexes `offering × n_rooms`, because every Offering can use any Room in
+the tenant. A lecturer-consistency row cannot do the same over `n_persons`:
+only a genuine pool Offering (`Offering::has_lecturer_pool`) can ever have a
+nonzero row — a fixed assignment's lecturer set never changes, so its distinct
+count is always exactly `required_lecturer_count` — and a pool Offering's
+candidates are a small, already-enumerated subset
+(`Offering::eligible_lecturer_combinations`), not the whole tenant. So each
+row is a small `Vec<(PersonIdx, count)>`, linearly scanned rather than
+densely indexed, sized by the Offering's own candidate pool. This is the
+identical trade-off "Lecturer-pool selection landed" above already made for
+`PreferenceModel::cost_for`: O(|chosen lecturers|), not O(|all persons|), in
+exchange for a set that can change — the same reasoning, applied to a second
+table this time.
+
+`Offering::lecturer_required_count()` supplies the `required` half of the
+formula by reading the first entry of `eligible_lecturer_combinations` (every
+combination has the same `Some`-count, so the first one answers it) —
+one small method rather than a new field, since the value was already fully
+determined by data the Offering already carried.
+
+The wire needed no new field: `LecturerConsistency` (`oneof params` entry 30)
+had shipped empty since it was staged, on the same "id/kinds/weight and
+nothing else" shape `RoomConsistency` uses, so only the solver-side refusal
+(`ConvertError::ConstraintTypeUnimplemented`) needed to come out.

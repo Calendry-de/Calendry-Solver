@@ -447,26 +447,6 @@ fn a_negative_compactness_weight_is_refused() {
 }
 
 #[test]
-fn lecturer_consistency_is_unimplemented_not_invalid() {
-    let mut input = base_input();
-    input.constraints.push(enabled(
-        "c-consistent",
-        pb::constraint_config::Params::LecturerConsistency(pb::LecturerConsistency {}),
-    ));
-
-    let e = reject(&input, &scope(&[]));
-    assert!(
-        matches!(
-            &e,
-            ConvertError::ConstraintTypeUnimplemented { constraint, constraint_type }
-                if constraint == "c-consistent" && *constraint_type == "LecturerConsistency"
-        ),
-        "{e}"
-    );
-    assert_eq!(code_of(&e), Code::Unimplemented);
-}
-
-#[test]
 fn a_disabled_constraint_with_no_params_is_ignored() {
     // Only *enabled* constraints are read, so an unfinished row in the tenant's
     // config is not a reason to reject the whole snapshot.
@@ -622,9 +602,11 @@ fn every_refusal_maps_to_invalid_argument_or_unimplemented_and_nothing_else() {
             constraint: "c".into(),
             roles: vec!["Student".into()],
         },
+        // `LecturerConsistency` is now built; this exercises the variant's
+        // own `Display`/status-code shape rather than a live refusal.
         ConvertError::ConstraintTypeUnimplemented {
             constraint: "c".into(),
-            constraint_type: "LecturerConsistency",
+            constraint_type: "SomeFutureType",
         },
     ];
 

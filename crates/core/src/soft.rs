@@ -409,6 +409,12 @@ pub struct Objective {
     /// the running total like every other aggregate cost above. See
     /// [`crate::aggregates::RoomConsistencyInstance`].
     pub room_consistency_cost: f64,
+    /// Distinct-lecturer excess over `required_lecturer_count`, summed over
+    /// every pool Offering and already multiplied by the configured weight —
+    /// the lecturer-axis counterpart of `room_consistency_cost`. Always `0.0`
+    /// for an Offering without a genuine lecturer pool. See
+    /// [`crate::aggregates::LecturerConsistencyInstance`].
+    pub lecturer_consistency_cost: f64,
     /// `DistributedPatternAdherence` and `BlockPatternAdherence` together,
     /// already multiplied by each type's configured weight. Read whole off
     /// `Aggregates`' running totals for the same reason `compactness_cost` is:
@@ -445,6 +451,7 @@ impl Objective {
             + self.room_turnaround_cost
             + self.room_churn_cost
             + self.room_consistency_cost
+            + self.lecturer_consistency_cost
             + self.scheduling_pattern_cost
     }
 }
@@ -665,6 +672,7 @@ mod tests {
             room_turnaround_cost: 0.0,
             room_churn_cost: 0.0,
             room_consistency_cost: 0.0,
+            lecturer_consistency_cost: 0.0,
             scheduling_pattern_cost: 0.0,
         };
         let one_unplaced = Objective {
@@ -683,6 +691,7 @@ mod tests {
             room_turnaround_cost: 0.0,
             room_churn_cost: 0.0,
             room_consistency_cost: 0.0,
+            lecturer_consistency_cost: 0.0,
             scheduling_pattern_cost: 0.0,
         };
         assert!(one_unplaced.total(hard_penalty) > all_soft_bad.total(hard_penalty));
@@ -718,6 +727,7 @@ mod tests {
             room_turnaround_cost: 0.0,
             room_churn_cost: 0.0,
             room_consistency_cost: 0.0,
+            lecturer_consistency_cost: 0.0,
             scheduling_pattern_cost: 0.0,
         };
         let one_unplaced = Objective {
@@ -736,6 +746,7 @@ mod tests {
             room_turnaround_cost: 0.0,
             room_churn_cost: 0.0,
             room_consistency_cost: 0.0,
+            lecturer_consistency_cost: 0.0,
             scheduling_pattern_cost: 0.0,
         };
 
