@@ -181,6 +181,13 @@ fn score_one(problem: &Problem, solution: &Solution, state: &SearchState, mv: &M
     // Offering with no day/week axis, over modal-Room excess.
     let room_consistency_delta = state.room_consistency_delta(problem, &candidate, &span);
 
+    // Same ranking-signal contract as `room_consistency_delta`/
+    // `max_daily_session_count_delta` — the (offering, day) cluster:
+    // count, longest-run and split-run excess, keyed by Offering.
+    let offering_daily_count_delta = state.offering_daily_count_delta(problem, &candidate, &span);
+    let offering_run_delta = state.offering_run_delta(problem, &candidate, &span);
+    let offering_split_delta = state.offering_split_delta(problem, &candidate, &span);
+
     // Same ranking-signal contract as `room_consistency_delta` — over
     // distinct-lecturer excess instead of modal-Room excess, inert for any
     // Offering without a genuine lecturer pool.
@@ -223,6 +230,9 @@ fn score_one(problem: &Problem, solution: &Solution, state: &SearchState, mv: &M
             + room_churn_delta
             + room_consistency_delta
             + lecturer_consistency_delta
+            + offering_daily_count_delta
+            + offering_run_delta
+            + offering_split_delta
             + scheduling_pattern_delta,
     )
 }

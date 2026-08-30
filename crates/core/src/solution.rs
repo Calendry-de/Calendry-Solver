@@ -1109,6 +1109,64 @@ impl SearchState {
             * problem.lecturer_consistency_weight
     }
 
+    /// The `MaxOfferingSessionsPerDay` cost DELTA of placing `who` at
+    /// `span` — mirrors [`Self::max_daily_session_count_delta`], singular
+    /// Offering rather than a Group/Person slice.
+    pub fn offering_daily_count_delta(
+        &self,
+        problem: &Problem,
+        who: &Occupant<'_>,
+        span: &[SlotIdx],
+    ) -> f64 {
+        if span.is_empty() || !who.enforce.max_offering_sessions_per_day {
+            return 0.0;
+        }
+        let Some(offering) = who.offering else {
+            return 0.0;
+        };
+        let day = problem.slots.flags(span[0]).day_index;
+        self.aggregates.offering_daily_count_delta(offering, day) as f64
+            * problem.max_offering_sessions_per_day_weight
+    }
+
+    /// The `MaxConsecutiveOfferingBlocks` cost DELTA of placing `who` at
+    /// `span` — mirrors [`Self::max_daily_span_delta`], `offering_run_delta`
+    /// instead of the Group/Person span.
+    pub fn offering_run_delta(
+        &self,
+        problem: &Problem,
+        who: &Occupant<'_>,
+        span: &[SlotIdx],
+    ) -> f64 {
+        if span.is_empty() || !who.enforce.max_consecutive_offering_blocks {
+            return 0.0;
+        }
+        let Some(offering) = who.offering else {
+            return 0.0;
+        };
+        let day = problem.slots.flags(span[0]).day_index;
+        self.aggregates.offering_run_delta(offering, day, span) as f64
+            * problem.max_consecutive_offering_blocks_weight
+    }
+
+    /// The `MinimizeOfferingDaySplit` cost DELTA of placing `who` at `span`.
+    pub fn offering_split_delta(
+        &self,
+        problem: &Problem,
+        who: &Occupant<'_>,
+        span: &[SlotIdx],
+    ) -> f64 {
+        if span.is_empty() || !who.enforce.minimize_offering_day_split {
+            return 0.0;
+        }
+        let Some(offering) = who.offering else {
+            return 0.0;
+        };
+        let day = problem.slots.flags(span[0]).day_index;
+        self.aggregates.offering_split_delta(offering, day, span) as f64
+            * problem.minimize_offering_day_split_weight
+    }
+
     /// The `MaxWeeklyTeachingLoad` cost DELTA of placing `who` at `span` —
     /// the read-only preview, mirroring [`Self::max_daily_span_delta`].
     /// Keyed by `who.all_lecturers()` and the WEEK `span` falls in, not by
@@ -1315,6 +1373,27 @@ impl SearchState {
                     }
                 }
             }
+            if who.enforce.max_offering_sessions_per_day {
+                if add {
+                    self.aggregates.add_offering_daily_count(offering, day);
+                } else {
+                    self.aggregates.remove_offering_daily_count(offering, day);
+                }
+            }
+            if who.enforce.max_consecutive_offering_blocks {
+                if add {
+                    self.aggregates.add_offering_run(offering, day, span);
+                } else {
+                    self.aggregates.remove_offering_run(offering, day, span);
+                }
+            }
+            if who.enforce.minimize_offering_day_split {
+                if add {
+                    self.aggregates.add_offering_split(offering, day, span);
+                } else {
+                    self.aggregates.remove_offering_split(offering, day, span);
+                }
+            }
         }
 
         if who.subtree_groups.is_empty() {
@@ -1518,6 +1597,30 @@ impl SearchState {
                     );
                 }
             }
+            if who.enforce.max_offering_sessions_per_day {
+                let day = problem.slots.flags(span[0]).day_index;
+                score += self.aggregates.offering_daily_count_ruin_cost(
+                    offering,
+                    day,
+                    problem.max_offering_sessions_per_day_weight,
+                );
+            }
+            if who.enforce.max_consecutive_offering_blocks {
+                let day = problem.slots.flags(span[0]).day_index;
+                score += self.aggregates.offering_run_ruin_cost(
+                    offering,
+                    day,
+                    problem.max_consecutive_offering_blocks_weight,
+                );
+            }
+            if who.enforce.minimize_offering_day_split {
+                let day = problem.slots.flags(span[0]).day_index;
+                score += self.aggregates.offering_split_ruin_cost(
+                    offering,
+                    day,
+                    problem.minimize_offering_day_split_weight,
+                );
+            }
         }
 
         if who.subtree_groups.is_empty() {
@@ -1686,6 +1789,36 @@ impl SearchState {
         }
         self.aggregates
             .lecturer_consistency_cost(problem.lecturer_consistency_weight)
+    }
+
+    /// What every currently over-cap `(Offering, day)` Session count costs,
+    /// at the configured weight.
+    pub fn offering_daily_count_cost(&self, problem: &Problem) -> f64 {
+        if problem.max_offering_sessions_per_day_weight == 0.0 {
+            return 0.0;
+        }
+        self.aggregates
+            .offering_daily_count_cost(problem.max_offering_sessions_per_day_weight)
+    }
+
+    /// What every currently over-cap `(Offering, day)` consecutive run
+    /// costs, at the configured weight.
+    pub fn offering_run_cost(&self, problem: &Problem) -> f64 {
+        if problem.max_consecutive_offering_blocks_weight == 0.0 {
+            return 0.0;
+        }
+        self.aggregates
+            .offering_run_cost(problem.max_consecutive_offering_blocks_weight)
+    }
+
+    /// What every currently-split `(Offering, day)` costs, at the configured
+    /// weight.
+    pub fn offering_split_cost(&self, problem: &Problem) -> f64 {
+        if problem.minimize_offering_day_split_weight == 0.0 {
+            return 0.0;
+        }
+        self.aggregates
+            .offering_split_cost(problem.minimize_offering_day_split_weight)
     }
 
     /// What the currently over-cap weekly teaching loads cost, at the

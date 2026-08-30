@@ -210,6 +210,9 @@ impl<'p> Trial<'p> {
             room_churn_cost: self.state.room_churn_cost(self.problem),
             room_consistency_cost: self.state.room_consistency_cost(self.problem),
             lecturer_consistency_cost: self.state.lecturer_consistency_cost(self.problem),
+            offering_daily_count_cost: self.state.offering_daily_count_cost(self.problem),
+            offering_run_cost: self.state.offering_run_cost(self.problem),
+            offering_split_cost: self.state.offering_split_cost(self.problem),
             scheduling_pattern_cost: self.state.scheduling_pattern_cost(self.problem),
         }
     }
@@ -931,6 +934,9 @@ pub fn recompute_objective(problem: &Problem, solution: &Solution) -> Objective 
         room_churn_cost: state.room_churn_cost(problem),
         room_consistency_cost: state.room_consistency_cost(problem),
         lecturer_consistency_cost: state.lecturer_consistency_cost(problem),
+        offering_daily_count_cost: state.offering_daily_count_cost(problem),
+        offering_run_cost: state.offering_run_cost(problem),
+        offering_split_cost: state.offering_split_cost(problem),
         scheduling_pattern_cost: state.scheduling_pattern_cost(problem),
     }
 }
@@ -1091,6 +1097,12 @@ pub fn objectives_agree(a: Objective, b: Objective) -> bool {
             <= 1e-9 * (1.0 + a.room_consistency_cost.abs())
         && (a.lecturer_consistency_cost - b.lecturer_consistency_cost).abs()
             <= 1e-9 * (1.0 + a.lecturer_consistency_cost.abs())
+        && (a.offering_daily_count_cost - b.offering_daily_count_cost).abs()
+            <= 1e-9 * (1.0 + a.offering_daily_count_cost.abs())
+        && (a.offering_run_cost - b.offering_run_cost).abs()
+            <= 1e-9 * (1.0 + a.offering_run_cost.abs())
+        && (a.offering_split_cost - b.offering_split_cost).abs()
+            <= 1e-9 * (1.0 + a.offering_split_cost.abs())
         && (a.scheduling_pattern_cost - b.scheduling_pattern_cost).abs()
             <= 1e-9 * (1.0 + a.scheduling_pattern_cost.abs())
 }

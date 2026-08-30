@@ -132,6 +132,9 @@ fn single(axis: fn(&mut Enforce), base: Enforce) -> Enforce {
         max_daily_span_person: false,
         max_daily_session_count_group: false,
         max_daily_session_count_person: false,
+        max_consecutive_offering_blocks: false,
+        max_offering_sessions_per_day: false,
+        minimize_offering_day_split: false,
         max_weekly_teaching_load: false,
         exam_spacing_same_day: false,
         exam_spacing_window: false,
@@ -166,6 +169,12 @@ fn single(axis: fn(&mut Enforce), base: Enforce) -> Enforce {
             && base.max_daily_session_count_group,
         max_daily_session_count_person: e.max_daily_session_count_person
             && base.max_daily_session_count_person,
+        max_consecutive_offering_blocks: e.max_consecutive_offering_blocks
+            && base.max_consecutive_offering_blocks,
+        max_offering_sessions_per_day: e.max_offering_sessions_per_day
+            && base.max_offering_sessions_per_day,
+        minimize_offering_day_split: e.minimize_offering_day_split
+            && base.minimize_offering_day_split,
         max_weekly_teaching_load: e.max_weekly_teaching_load && base.max_weekly_teaching_load,
         exam_spacing_same_day: e.exam_spacing_same_day && base.exam_spacing_same_day,
         exam_spacing_window: e.exam_spacing_window && base.exam_spacing_window,

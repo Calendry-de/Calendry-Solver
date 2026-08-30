@@ -342,6 +342,80 @@ impl RoomConsistencyInstance {
     }
 }
 
+/// Three rules sharing one cell, `(offering, day)`, each reducing its row of
+/// occupied blocks a different way — issues #34/#35/#29 named the same cell
+/// and asked for it to be built once. Storage stays SEPARATE per type rather
+/// than literally shared, matching the existing convention for the Group/
+/// Person cell (`group_slot`/`run_group_slot`/`span_group_slot` are three
+/// arrays of identical shape, not one): each type must cost nothing when its
+/// own rule list is empty, and a shared array would defeat that for two
+/// types whenever only the third is configured. What IS shared is the
+/// algorithm — `run_excess_u32` (already generic) prices the consecutive-run
+/// case unchanged, and `run_count_u32` is the one genuinely new reduction.
+///
+/// SOFT, priced once the cap is exceeded, the same ADR-0025 reasoning as
+/// `MaxDailySessionCount`/`MaxWeeklyTeachingLoad`.
+/// One configured `MaxConsecutiveOfferingBlocks` rule — the Offering-keyed
+/// sibling of `MaxConsecutiveInstance` (Group/Person axis): caps how many
+/// blocks of ONE Offering may run back to back in a day, distinguishing an
+/// intentional multi-block Session (`Offering.duration_blocks`, one
+/// placement) from several separate Sessions of the same Offering landing
+/// consecutively by accident.
+#[derive(Clone, Debug)]
+pub struct MaxConsecutiveOfferingBlocksInstance {
+    pub id: String,
+    pub kinds: Vec<String>,
+    pub weight: f64,
+    pub max_consecutive: u32,
+}
+
+impl MaxConsecutiveOfferingBlocksInstance {
+    #[inline]
+    pub fn covers(&self, kind: &str) -> bool {
+        self.kinds.is_empty() || self.kinds.iter().any(|k| k == kind)
+    }
+}
+
+/// One configured `MaxOfferingSessionsPerDay` rule — caps a raw Session
+/// COUNT of one Offering on one day, so "Maths, 4x a week" means four
+/// different days unless a tenant says otherwise. The Offering-keyed
+/// sibling of `MaxDailySessionCountInstance` (Group/Person axis).
+#[derive(Clone, Debug)]
+pub struct MaxOfferingSessionsPerDayInstance {
+    pub id: String,
+    pub kinds: Vec<String>,
+    pub weight: f64,
+    pub max_per_day: u32,
+}
+
+impl MaxOfferingSessionsPerDayInstance {
+    #[inline]
+    pub fn covers(&self, kind: &str) -> bool {
+        self.kinds.is_empty() || self.kinds.iter().any(|k| k == kind)
+    }
+}
+
+/// One configured `MinimizeOfferingDaySplit` rule. Prices the number of
+/// non-contiguous runs of one Offering's Sessions within a day, minus one —
+/// zero for a single contiguous run (including a lone Session), growing with
+/// each additional separated run. NOT the same question `Compactness` asks:
+/// a day packed solid with `English -> Maths -> History -> English` has ZERO
+/// gaps (Compactness is silent) and still splits English across two runs
+/// (this fires).
+#[derive(Clone, Debug)]
+pub struct MinimizeOfferingDaySplitInstance {
+    pub id: String,
+    pub kinds: Vec<String>,
+    pub weight: f64,
+}
+
+impl MinimizeOfferingDaySplitInstance {
+    #[inline]
+    pub fn covers(&self, kind: &str) -> bool {
+        self.kinds.is_empty() || self.kinds.iter().any(|k| k == kind)
+    }
+}
+
 /// One configured `LecturerConsistency` rule. No parameters beyond the usual
 /// id/kinds/weight — mirrors `RoomConsistencyInstance`, but the quantity
 /// priced is distinct LECTURER identities used across an Offering's Sessions
@@ -540,6 +614,34 @@ pub struct Aggregates {
 
     daily_count_rules: Vec<MaxDailySessionCountInstance>,
 
+    /// `[offering * n_days + day]` — how many Sessions of this Offering
+    /// currently sit on this day, across the whole term. The Offering-keyed
+    /// counterpart of `daily_count_group`/`daily_count_person`; a separate
+    /// array rather than a shared one for the same independent-switch reason
+    /// those two have theirs. See [`MaxOfferingSessionsPerDayInstance`].
+    offering_daily_count: Vec<u32>,
+    offering_daily_count_threshold: u32,
+    offering_daily_count_excess_total: u32,
+    offering_daily_count_rules: Vec<MaxOfferingSessionsPerDayInstance>,
+
+    /// `[offering * n_slots + slot]` — occurrence count of this Offering's
+    /// currently-placed Sessions at each slot, read a day at a time by
+    /// `run_excess_u32` (already generic — the Group/Person axis's own
+    /// function, reused unchanged) for the longest-consecutive-run excess.
+    /// See [`MaxConsecutiveOfferingBlocksInstance`].
+    offering_run_slot: Vec<u32>,
+    offering_run_threshold: u32,
+    offering_run_excess_total: u32,
+    offering_run_rules: Vec<MaxConsecutiveOfferingBlocksInstance>,
+
+    /// `[offering * n_slots + slot]` — same shape as `offering_run_slot`
+    /// again, kept as its OWN array for the same independent-switch reason,
+    /// read by `run_count_u32` (the number of separate maximal runs, not
+    /// their length) for `MinimizeOfferingDaySplit`'s own reduction.
+    offering_split_slot: Vec<u32>,
+    offering_split_excess_total: u32,
+    offering_split_rules: Vec<MinimizeOfferingDaySplitInstance>,
+
     /// `[person * n_weeks + week]` — how many Sessions (or blocks, per
     /// `teaching_load_count_blocks`) that Person currently leads that week.
     /// Empty when `MaxWeeklyTeachingLoad` is not configured.
@@ -718,6 +820,9 @@ impl Aggregates {
         max_consecutive_rules: Vec<MaxConsecutiveInstance>,
         max_daily_span_rules: Vec<MaxDailySpanInstance>,
         daily_count_rules: Vec<MaxDailySessionCountInstance>,
+        offering_daily_count_rules: Vec<MaxOfferingSessionsPerDayInstance>,
+        offering_run_rules: Vec<MaxConsecutiveOfferingBlocksInstance>,
+        offering_split_rules: Vec<MinimizeOfferingDaySplitInstance>,
         teaching_load_rules: Vec<MaxWeeklyTeachingLoadInstance>,
         exam_same_day_rules: Vec<ExamSpacingSameDayInstance>,
         exam_window_rules: Vec<ExamSpacingWindowInstance>,
@@ -794,6 +899,22 @@ impl Aggregates {
             .map(|r| r.max_per_day)
             .min()
             .unwrap_or(u32::MAX);
+
+        let track_offering_daily_count = !offering_daily_count_rules.is_empty();
+        let offering_daily_count_threshold = offering_daily_count_rules
+            .iter()
+            .map(|r| r.max_per_day)
+            .min()
+            .unwrap_or(u32::MAX);
+
+        let track_offering_run = !offering_run_rules.is_empty();
+        let offering_run_threshold = offering_run_rules
+            .iter()
+            .map(|r| r.max_consecutive)
+            .min()
+            .unwrap_or(u32::MAX);
+
+        let track_offering_split = !offering_split_rules.is_empty();
 
         let track_teaching_load = !teaching_load_rules.is_empty();
         // The instance supplying the tightest cap, since that is the one
@@ -918,6 +1039,29 @@ impl Aggregates {
             daily_count_group_excess_total: 0,
             daily_count_person_excess_total: 0,
             daily_count_rules,
+            offering_daily_count: if track_offering_daily_count {
+                vec![0; offerings * n_days.max(1)]
+            } else {
+                Vec::new()
+            },
+            offering_daily_count_threshold,
+            offering_daily_count_excess_total: 0,
+            offering_daily_count_rules,
+            offering_run_slot: if track_offering_run {
+                vec![0; offerings * slots]
+            } else {
+                Vec::new()
+            },
+            offering_run_threshold,
+            offering_run_excess_total: 0,
+            offering_run_rules,
+            offering_split_slot: if track_offering_split {
+                vec![0; offerings * slots]
+            } else {
+                Vec::new()
+            },
+            offering_split_excess_total: 0,
+            offering_split_rules,
             teaching_load_week: if track_teaching_load {
                 vec![0; n_persons.max(1) * weeks]
             } else {
@@ -2113,6 +2257,327 @@ impl Aggregates {
             }
         }
         cost
+    }
+
+    // -- (offering, day) cluster: count / consecutive-run / split ---------------
+    //
+    // Issues #34 (MaxConsecutiveOfferingBlocks), #35 (MaxOfferingSessionsPerDay)
+    // and #29 (MinimizeOfferingDaySplit) all reduce the same cell — one
+    // Offering's occupied blocks within one day — three different ways. See
+    // the doc comment on the instance structs for why storage stays separate
+    // per type despite the shared cell.
+
+    pub fn offering_daily_count_rules(&self) -> &[MaxOfferingSessionsPerDayInstance] {
+        &self.offering_daily_count_rules
+    }
+
+    pub fn offering_run_rules(&self) -> &[MaxConsecutiveOfferingBlocksInstance] {
+        &self.offering_run_rules
+    }
+
+    pub fn offering_split_rules(&self) -> &[MinimizeOfferingDaySplitInstance] {
+        &self.offering_split_rules
+    }
+
+    /// The number of separate maximal runs of occupied blocks in one day's
+    /// row — NOT their length (`run_excess_u32` already answers that). `0`
+    /// for an entirely idle day, `1` for a single run however long,
+    /// `MinimizeOfferingDaySplit`'s excess is this minus one, floored at
+    /// zero by the caller.
+    #[inline]
+    fn run_count_u32(day_cells: &[u32]) -> u32 {
+        let mut count = 0u32;
+        let mut in_run = false;
+        for &c in day_cells {
+            if c > 0 {
+                if !in_run {
+                    count += 1;
+                }
+                in_run = true;
+            } else {
+                in_run = false;
+            }
+        }
+        count
+    }
+
+    /// `run_count_u32`, but with `span` treated as already occupied —
+    /// mirroring [`Self::run_excess_u32_with`].
+    #[inline]
+    fn run_count_u32_with(day_cells: &[u32], start: usize, span: &[SlotIdx]) -> u32 {
+        let mut count = 0u32;
+        let mut in_run = false;
+        for (i, &c) in day_cells.iter().enumerate() {
+            let occupied = c > 0 || span.iter().any(|s| s.get() == start + i);
+            if occupied {
+                if !in_run {
+                    count += 1;
+                }
+                in_run = true;
+            } else {
+                in_run = false;
+            }
+        }
+        count
+    }
+
+    /// The count-excess DELTA `MaxOfferingSessionsPerDay` would experience if
+    /// `offering` gained one more Session on `day` — mirrors
+    /// [`Self::group_daily_count_delta`], singular rather than a slice: an
+    /// occupant realizes at most one Offering.
+    pub fn offering_daily_count_delta(&self, offering: OfferingIdx, day: u32) -> i64 {
+        if self.offering_daily_count.is_empty() {
+            return 0;
+        }
+        let c = offering.get() * self.n_days + day as usize;
+        let before = Self::daily_count_excess(
+            self.offering_daily_count[c],
+            self.offering_daily_count_threshold,
+        );
+        let after = Self::daily_count_excess(
+            self.offering_daily_count[c] + 1,
+            self.offering_daily_count_threshold,
+        );
+        i64::from(after) - i64::from(before)
+    }
+
+    pub fn add_offering_daily_count(&mut self, offering: OfferingIdx, day: u32) {
+        if self.offering_daily_count.is_empty() {
+            return;
+        }
+        let c = offering.get() * self.n_days + day as usize;
+        let before = Self::daily_count_excess(
+            self.offering_daily_count[c],
+            self.offering_daily_count_threshold,
+        );
+        self.offering_daily_count[c] += 1;
+        let after = Self::daily_count_excess(
+            self.offering_daily_count[c],
+            self.offering_daily_count_threshold,
+        );
+        self.offering_daily_count_excess_total = (i64::from(self.offering_daily_count_excess_total)
+            + i64::from(after)
+            - i64::from(before)) as u32;
+    }
+
+    pub fn remove_offering_daily_count(&mut self, offering: OfferingIdx, day: u32) {
+        if self.offering_daily_count.is_empty() {
+            return;
+        }
+        let c = offering.get() * self.n_days + day as usize;
+        let before = Self::daily_count_excess(
+            self.offering_daily_count[c],
+            self.offering_daily_count_threshold,
+        );
+        self.offering_daily_count[c] = self.offering_daily_count[c].saturating_sub(1);
+        let after = Self::daily_count_excess(
+            self.offering_daily_count[c],
+            self.offering_daily_count_threshold,
+        );
+        self.offering_daily_count_excess_total = (i64::from(self.offering_daily_count_excess_total)
+            + i64::from(after)
+            - i64::from(before)) as u32;
+    }
+
+    pub fn offering_daily_count_cost(&self, weight: f64) -> f64 {
+        self.offering_daily_count_excess_total as f64 * weight
+    }
+
+    pub fn offering_daily_count_ruin_cost(
+        &self,
+        offering: OfferingIdx,
+        day: u32,
+        weight: f64,
+    ) -> f64 {
+        if weight == 0.0 || self.offering_daily_count.is_empty() {
+            return 0.0;
+        }
+        let c = offering.get() * self.n_days + day as usize;
+        if Self::daily_count_excess(
+            self.offering_daily_count[c],
+            self.offering_daily_count_threshold,
+        ) > 0
+        {
+            weight
+        } else {
+            0.0
+        }
+    }
+
+    /// The run-excess DELTA `MaxConsecutiveOfferingBlocks` would experience —
+    /// mirrors [`Self::group_run_delta`], singular Offering.
+    pub fn offering_run_delta(&self, offering: OfferingIdx, day: u32, span: &[SlotIdx]) -> i64 {
+        if self.offering_run_slot.is_empty() || span.is_empty() {
+            return 0;
+        }
+        let (start, end) = self.day_range(day);
+        let row = offering.get() * self.n_slots;
+        let before = Self::run_excess_u32(
+            &self.offering_run_slot[row + start..row + end],
+            self.offering_run_threshold,
+        );
+        let after = Self::run_excess_u32_with(
+            &self.offering_run_slot[row + start..row + end],
+            start,
+            span,
+            self.offering_run_threshold,
+        );
+        i64::from(after) - i64::from(before)
+    }
+
+    pub fn add_offering_run(&mut self, offering: OfferingIdx, day: u32, span: &[SlotIdx]) {
+        if self.offering_run_slot.is_empty() || span.is_empty() {
+            return;
+        }
+        let (start, end) = self.day_range(day);
+        let row = offering.get() * self.n_slots;
+        let before = Self::run_excess_u32(
+            &self.offering_run_slot[row + start..row + end],
+            self.offering_run_threshold,
+        );
+        for &s in span {
+            self.offering_run_slot[row + s.get()] += 1;
+        }
+        let after = Self::run_excess_u32(
+            &self.offering_run_slot[row + start..row + end],
+            self.offering_run_threshold,
+        );
+        self.offering_run_excess_total = (i64::from(self.offering_run_excess_total)
+            + i64::from(after)
+            - i64::from(before)) as u32;
+    }
+
+    pub fn remove_offering_run(&mut self, offering: OfferingIdx, day: u32, span: &[SlotIdx]) {
+        if self.offering_run_slot.is_empty() || span.is_empty() {
+            return;
+        }
+        let (start, end) = self.day_range(day);
+        let row = offering.get() * self.n_slots;
+        let before = Self::run_excess_u32(
+            &self.offering_run_slot[row + start..row + end],
+            self.offering_run_threshold,
+        );
+        for &s in span {
+            self.offering_run_slot[row + s.get()] =
+                self.offering_run_slot[row + s.get()].saturating_sub(1);
+        }
+        let after = Self::run_excess_u32(
+            &self.offering_run_slot[row + start..row + end],
+            self.offering_run_threshold,
+        );
+        self.offering_run_excess_total = (i64::from(self.offering_run_excess_total)
+            + i64::from(after)
+            - i64::from(before)) as u32;
+    }
+
+    pub fn offering_run_cost(&self, weight: f64) -> f64 {
+        self.offering_run_excess_total as f64 * weight
+    }
+
+    pub fn offering_run_ruin_cost(&self, offering: OfferingIdx, day: u32, weight: f64) -> f64 {
+        if weight == 0.0 || self.offering_run_slot.is_empty() {
+            return 0.0;
+        }
+        let (start, end) = self.day_range(day);
+        let row = offering.get() * self.n_slots;
+        if Self::run_excess_u32(
+            &self.offering_run_slot[row + start..row + end],
+            self.offering_run_threshold,
+        ) > 0
+        {
+            weight
+        } else {
+            0.0
+        }
+    }
+
+    /// Runs minus one, floored at zero — `0` for an empty day (nothing to
+    /// split) or a single run (including a lone Session); `1` once a second
+    /// separated run of the same Offering appears that day.
+    #[inline]
+    fn split_excess(runs: u32) -> u32 {
+        runs.saturating_sub(1)
+    }
+
+    /// The split-excess DELTA `MinimizeOfferingDaySplit` would experience —
+    /// mirrors [`Self::offering_run_delta`], `run_count_u32` instead of
+    /// `run_excess_u32`.
+    pub fn offering_split_delta(&self, offering: OfferingIdx, day: u32, span: &[SlotIdx]) -> i64 {
+        if self.offering_split_slot.is_empty() || span.is_empty() {
+            return 0;
+        }
+        let (start, end) = self.day_range(day);
+        let row = offering.get() * self.n_slots;
+        let before = Self::split_excess(Self::run_count_u32(
+            &self.offering_split_slot[row + start..row + end],
+        ));
+        let after = Self::split_excess(Self::run_count_u32_with(
+            &self.offering_split_slot[row + start..row + end],
+            start,
+            span,
+        ));
+        i64::from(after) - i64::from(before)
+    }
+
+    pub fn add_offering_split(&mut self, offering: OfferingIdx, day: u32, span: &[SlotIdx]) {
+        if self.offering_split_slot.is_empty() || span.is_empty() {
+            return;
+        }
+        let (start, end) = self.day_range(day);
+        let row = offering.get() * self.n_slots;
+        let before = Self::split_excess(Self::run_count_u32(
+            &self.offering_split_slot[row + start..row + end],
+        ));
+        for &s in span {
+            self.offering_split_slot[row + s.get()] += 1;
+        }
+        let after = Self::split_excess(Self::run_count_u32(
+            &self.offering_split_slot[row + start..row + end],
+        ));
+        self.offering_split_excess_total = (i64::from(self.offering_split_excess_total)
+            + i64::from(after)
+            - i64::from(before)) as u32;
+    }
+
+    pub fn remove_offering_split(&mut self, offering: OfferingIdx, day: u32, span: &[SlotIdx]) {
+        if self.offering_split_slot.is_empty() || span.is_empty() {
+            return;
+        }
+        let (start, end) = self.day_range(day);
+        let row = offering.get() * self.n_slots;
+        let before = Self::split_excess(Self::run_count_u32(
+            &self.offering_split_slot[row + start..row + end],
+        ));
+        for &s in span {
+            self.offering_split_slot[row + s.get()] =
+                self.offering_split_slot[row + s.get()].saturating_sub(1);
+        }
+        let after = Self::split_excess(Self::run_count_u32(
+            &self.offering_split_slot[row + start..row + end],
+        ));
+        self.offering_split_excess_total = (i64::from(self.offering_split_excess_total)
+            + i64::from(after)
+            - i64::from(before)) as u32;
+    }
+
+    pub fn offering_split_cost(&self, weight: f64) -> f64 {
+        self.offering_split_excess_total as f64 * weight
+    }
+
+    pub fn offering_split_ruin_cost(&self, offering: OfferingIdx, day: u32, weight: f64) -> f64 {
+        if weight == 0.0 || self.offering_split_slot.is_empty() {
+            return 0.0;
+        }
+        let (start, end) = self.day_range(day);
+        let row = offering.get() * self.n_slots;
+        if Self::split_excess(Self::run_count_u32(
+            &self.offering_split_slot[row + start..row + end],
+        )) > 0
+        {
+            weight
+        } else {
+            0.0
+        }
     }
 
     // -- max weekly teaching load -----------------------------------------------
@@ -3587,6 +4052,9 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
+            vec![],
+            vec![],
             1,
             vec![],
             1,
@@ -3625,6 +4093,9 @@ mod tests {
             vec![],
             0,
             0,
+            vec![],
+            vec![],
+            vec![],
             vec![],
             vec![],
             vec![],
@@ -3690,6 +4161,9 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
+            vec![],
+            vec![],
             1,
             vec![],
             1,
@@ -3714,6 +4188,9 @@ mod tests {
             vec![],
             0,
             0,
+            vec![],
+            vec![],
+            vec![],
             vec![],
             vec![],
             vec![],
@@ -3763,6 +4240,9 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
+            vec![],
+            vec![],
             1,
             vec![],
             1,
@@ -3802,6 +4282,9 @@ mod tests {
             vec![],
             0,
             0,
+            vec![],
+            vec![],
+            vec![],
             vec![],
             vec![],
             vec![],
@@ -3863,6 +4346,9 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
+            vec![],
+            vec![],
             1,
             vec![],
             1,
@@ -3899,6 +4385,9 @@ mod tests {
             vec![],
             0,
             0,
+            vec![],
+            vec![],
+            vec![],
             vec![],
             vec![],
             vec![],
@@ -3959,6 +4448,9 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
+            vec![],
+            vec![],
             1,
             vec![],
             1,
@@ -4009,6 +4501,9 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
+            vec![],
+            vec![],
             1,
             vec![],
             1,
@@ -4037,6 +4532,9 @@ mod tests {
             vec![compactness_rule(false, true)],
             0,
             0,
+            vec![],
+            vec![],
+            vec![],
             vec![],
             vec![],
             vec![],
@@ -4089,6 +4587,9 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
+            vec![],
+            vec![],
             1,
             vec![],
             1,
@@ -4119,6 +4620,9 @@ mod tests {
             vec![compactness_rule(true, false)],
             0,
             0,
+            vec![],
+            vec![],
+            vec![],
             vec![],
             vec![],
             vec![],
@@ -4165,6 +4669,9 @@ mod tests {
             vec![compactness_rule(true, false)],
             0,
             0,
+            vec![],
+            vec![],
+            vec![],
             vec![],
             vec![],
             vec![],
@@ -4227,6 +4734,9 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
+            vec![],
+            vec![],
             1,
             vec![],
             1,
@@ -4257,6 +4767,9 @@ mod tests {
             1,
             2,
             vec![pattern_rule()],
+            vec![],
+            vec![],
+            vec![],
             vec![],
             vec![],
             vec![],
@@ -4306,6 +4819,9 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
+            vec![],
+            vec![],
             1,
             vec![],
             1,
@@ -4347,6 +4863,9 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
+            vec![],
+            vec![],
             1,
             vec![],
             1,
@@ -4379,6 +4898,9 @@ mod tests {
             1,
             vec![],
             vec![pattern_rule()],
+            vec![],
+            vec![],
+            vec![],
             vec![],
             vec![],
             vec![],
@@ -4431,6 +4953,9 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
+            vec![],
+            vec![],
             1,
             vec![],
             1,
@@ -4467,6 +4992,9 @@ mod tests {
             2,
             vec![],
             vec![pattern_rule()],
+            vec![],
+            vec![],
+            vec![],
             vec![],
             vec![],
             vec![],

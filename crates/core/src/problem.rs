@@ -8,9 +8,11 @@
 use crate::aggregates::{
     Aggregates, CompactnessInstance, DayMixInstance, ExamSpacingSameDayInstance,
     ExamSpacingWindowInstance, LecturerConsistencyInstance, MaxConsecutiveInstance,
-    MaxDailySessionCountInstance, MaxDailySpanInstance, MaxWeeklyTeachingLoadInstance,
-    MinimizeLocationChangeInstance, MinimizeRoomChurnInstance, MinimizeWeekdayImbalanceInstance,
-    PatternAdherenceInstance, RoomConsistencyInstance, RoomTurnaroundBufferInstance, ShareInstance,
+    MaxConsecutiveOfferingBlocksInstance, MaxDailySessionCountInstance, MaxDailySpanInstance,
+    MaxOfferingSessionsPerDayInstance, MaxWeeklyTeachingLoadInstance,
+    MinimizeLocationChangeInstance, MinimizeOfferingDaySplitInstance, MinimizeRoomChurnInstance,
+    MinimizeWeekdayImbalanceInstance, PatternAdherenceInstance, RoomConsistencyInstance,
+    RoomTurnaroundBufferInstance, ShareInstance,
 };
 use crate::bitset::BitSet;
 use crate::groups::{GroupClosure, GroupCycle};
@@ -315,6 +317,24 @@ pub struct ConstraintSet {
     /// satisfy both of those and still be overloaded, e.g. 6 lessons split
     /// 3 + gap + 3. See [`crate::aggregates::MaxDailySessionCountInstance`].
     pub max_daily_session_count: Vec<MaxDailySessionCountInstance>,
+    /// SOFT, aggregate over `(Offering, day)`. Caps how many blocks of ONE
+    /// Offering may run back to back in a day — distinguishes an intentional
+    /// multi-block Session (`Offering.duration_blocks`) from several
+    /// separate Sessions of the same Offering landing consecutively by
+    /// accident. See [`crate::aggregates::MaxConsecutiveOfferingBlocksInstance`].
+    pub max_consecutive_offering_blocks: Vec<MaxConsecutiveOfferingBlocksInstance>,
+    /// SOFT, aggregate over `(Offering, day)`. Caps a raw Session COUNT of
+    /// ONE Offering on one day — "Maths, 4x a week" means four different
+    /// days unless a tenant says otherwise. See
+    /// [`crate::aggregates::MaxOfferingSessionsPerDayInstance`].
+    pub max_offering_sessions_per_day: Vec<MaxOfferingSessionsPerDayInstance>,
+    /// SOFT, aggregate over `(Offering, day)`. Prices the number of
+    /// non-contiguous runs of one Offering's Sessions within a day, minus
+    /// one — NOT the same question `compactness` asks: a day packed solid
+    /// with unrelated teaching in between two runs of the same Offering has
+    /// zero gaps and still splits it. See
+    /// [`crate::aggregates::MinimizeOfferingDaySplitInstance`].
+    pub minimize_offering_day_split: Vec<MinimizeOfferingDaySplitInstance>,
     /// SOFT, aggregate over a week. Caps how many Sessions (or blocks) a
     /// lecturer teaches in one week. See
     /// [`crate::aggregates::MaxWeeklyTeachingLoadInstance`].
@@ -448,6 +468,9 @@ pub struct Enforce {
     pub max_daily_span_person: bool,
     pub max_daily_session_count_group: bool,
     pub max_daily_session_count_person: bool,
+    pub max_consecutive_offering_blocks: bool,
+    pub max_offering_sessions_per_day: bool,
+    pub minimize_offering_day_split: bool,
     pub max_weekly_teaching_load: bool,
     pub exam_spacing_same_day: bool,
     pub exam_spacing_window: bool,
@@ -504,6 +527,18 @@ impl ConstraintSet {
                 .max_daily_session_count
                 .iter()
                 .any(|c| c.person && c.covers(kind)),
+            max_consecutive_offering_blocks: self
+                .max_consecutive_offering_blocks
+                .iter()
+                .any(|c| c.covers(kind)),
+            max_offering_sessions_per_day: self
+                .max_offering_sessions_per_day
+                .iter()
+                .any(|c| c.covers(kind)),
+            minimize_offering_day_split: self
+                .minimize_offering_day_split
+                .iter()
+                .any(|c| c.covers(kind)),
             max_weekly_teaching_load: self.max_weekly_teaching_load.iter().any(|c| c.covers(kind)),
             exam_spacing_same_day: self.exam_spacing_same_day.iter().any(|c| c.covers(kind)),
             exam_spacing_window: self.exam_spacing_window.iter().any(|c| c.covers(kind)),
@@ -1136,6 +1171,15 @@ pub struct Problem {
     pub max_daily_session_count_group_weight: f64,
     /// The Person-axis counterpart of `max_daily_session_count_group_weight`.
     pub max_daily_session_count_person_weight: f64,
+    /// Summed weight of every configured `MaxConsecutiveOfferingBlocks`
+    /// instance. Zero when not configured. Offering-keyed, no axis split.
+    pub max_consecutive_offering_blocks_weight: f64,
+    /// Summed weight of every configured `MaxOfferingSessionsPerDay`
+    /// instance. Zero when not configured. Offering-keyed, no axis split.
+    pub max_offering_sessions_per_day_weight: f64,
+    /// Summed weight of every configured `MinimizeOfferingDaySplit`
+    /// instance. Zero when not configured. Offering-keyed, no axis split.
+    pub minimize_offering_day_split_weight: f64,
     /// Summed weight of every configured `MaxWeeklyTeachingLoad` instance.
     /// Zero when not configured. Lecturer-only, no axis split.
     pub max_weekly_teaching_load_weight: f64,
@@ -1413,6 +1457,9 @@ impl Problem {
             constraints.max_consecutive_blocks.clone(),
             constraints.max_daily_span.clone(),
             constraints.max_daily_session_count.clone(),
+            constraints.max_offering_sessions_per_day.clone(),
+            constraints.max_consecutive_offering_blocks.clone(),
+            constraints.minimize_offering_day_split.clone(),
             constraints.max_weekly_teaching_load.clone(),
             constraints.exam_spacing_same_day.clone(),
             constraints.exam_spacing_window.clone(),
@@ -1489,6 +1536,21 @@ impl Problem {
             .max_daily_session_count
             .iter()
             .filter(|i| i.person)
+            .map(|i| i.weight)
+            .sum();
+        let max_consecutive_offering_blocks_weight: f64 = constraints
+            .max_consecutive_offering_blocks
+            .iter()
+            .map(|i| i.weight)
+            .sum();
+        let max_offering_sessions_per_day_weight: f64 = constraints
+            .max_offering_sessions_per_day
+            .iter()
+            .map(|i| i.weight)
+            .sum();
+        let minimize_offering_day_split_weight: f64 = constraints
+            .minimize_offering_day_split
+            .iter()
             .map(|i| i.weight)
             .sum();
         let max_weekly_teaching_load_weight: f64 = constraints
@@ -1675,6 +1737,9 @@ impl Problem {
             max_daily_span_person_weight,
             max_daily_session_count_group_weight,
             max_daily_session_count_person_weight,
+            max_consecutive_offering_blocks_weight,
+            max_offering_sessions_per_day_weight,
+            minimize_offering_day_split_weight,
             max_weekly_teaching_load_weight,
             exam_same_day_weight,
             exam_window_weight,

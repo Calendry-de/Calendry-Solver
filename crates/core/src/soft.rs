@@ -421,6 +421,20 @@ pub struct Objective {
     /// for an Offering without a genuine lecturer pool. See
     /// [`crate::aggregates::LecturerConsistencyInstance`].
     pub lecturer_consistency_cost: f64,
+    /// Sessions charged over a daily count cap for one Offering, summed over
+    /// every currently-occupied `(Offering, day)` cell and already
+    /// multiplied by the configured weight. See
+    /// [`crate::aggregates::MaxOfferingSessionsPerDayInstance`].
+    pub offering_daily_count_cost: f64,
+    /// Blocks charged over a consecutive-run cap for one Offering, same cell
+    /// as `offering_daily_count_cost`. See
+    /// [`crate::aggregates::MaxConsecutiveOfferingBlocksInstance`].
+    pub offering_run_cost: f64,
+    /// Non-contiguous runs of one Offering within a day, minus one, summed
+    /// over every currently-split `(Offering, day)` cell and already
+    /// multiplied by the configured weight. See
+    /// [`crate::aggregates::MinimizeOfferingDaySplitInstance`].
+    pub offering_split_cost: f64,
     /// `DistributedPatternAdherence` and `BlockPatternAdherence` together,
     /// already multiplied by each type's configured weight. Read whole off
     /// `Aggregates`' running totals for the same reason `compactness_cost` is:
@@ -459,6 +473,9 @@ impl Objective {
             + self.room_churn_cost
             + self.room_consistency_cost
             + self.lecturer_consistency_cost
+            + self.offering_daily_count_cost
+            + self.offering_run_cost
+            + self.offering_split_cost
             + self.scheduling_pattern_cost
     }
 }
@@ -681,6 +698,9 @@ mod tests {
             room_churn_cost: 0.0,
             room_consistency_cost: 0.0,
             lecturer_consistency_cost: 0.0,
+            offering_daily_count_cost: 0.0,
+            offering_run_cost: 0.0,
+            offering_split_cost: 0.0,
             scheduling_pattern_cost: 0.0,
         };
         let one_unplaced = Objective {
@@ -701,6 +721,9 @@ mod tests {
             room_churn_cost: 0.0,
             room_consistency_cost: 0.0,
             lecturer_consistency_cost: 0.0,
+            offering_daily_count_cost: 0.0,
+            offering_run_cost: 0.0,
+            offering_split_cost: 0.0,
             scheduling_pattern_cost: 0.0,
         };
         assert!(one_unplaced.total(hard_penalty) > all_soft_bad.total(hard_penalty));
@@ -738,6 +761,9 @@ mod tests {
             room_churn_cost: 0.0,
             room_consistency_cost: 0.0,
             lecturer_consistency_cost: 0.0,
+            offering_daily_count_cost: 0.0,
+            offering_run_cost: 0.0,
+            offering_split_cost: 0.0,
             scheduling_pattern_cost: 0.0,
         };
         let one_unplaced = Objective {
@@ -758,6 +784,9 @@ mod tests {
             room_churn_cost: 0.0,
             room_consistency_cost: 0.0,
             lecturer_consistency_cost: 0.0,
+            offering_daily_count_cost: 0.0,
+            offering_run_cost: 0.0,
+            offering_split_cost: 0.0,
             scheduling_pattern_cost: 0.0,
         };
 

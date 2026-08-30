@@ -27,10 +27,12 @@ use std::collections::{HashMap, HashSet};
 
 use calendry_solver_core::aggregates::{
     CompactnessInstance, DayMixInstance, ExamSpacingSameDayInstance, ExamSpacingWindowInstance,
-    LecturerConsistencyInstance, MaxConsecutiveInstance, MaxDailySessionCountInstance,
-    MaxDailySpanInstance, MaxWeeklyTeachingLoadInstance, MinimizeLocationChangeInstance,
-    MinimizeRoomChurnInstance, MinimizeWeekdayImbalanceInstance, PatternAdherenceInstance,
-    RoomConsistencyInstance, RoomTurnaroundBufferInstance, ShareInstance, ShareWindow,
+    LecturerConsistencyInstance, MaxConsecutiveInstance, MaxConsecutiveOfferingBlocksInstance,
+    MaxDailySessionCountInstance, MaxDailySpanInstance, MaxOfferingSessionsPerDayInstance,
+    MaxWeeklyTeachingLoadInstance, MinimizeLocationChangeInstance,
+    MinimizeOfferingDaySplitInstance, MinimizeRoomChurnInstance, MinimizeWeekdayImbalanceInstance,
+    PatternAdherenceInstance, RoomConsistencyInstance, RoomTurnaroundBufferInstance, ShareInstance,
+    ShareWindow,
 };
 use calendry_solver_core::ids::{GroupIdx, OfferingIdx, PersonIdx, RoomIdx, SlotIdx};
 use calendry_solver_core::preferences::{Preference, PreferenceInstance};
@@ -1612,6 +1614,58 @@ fn build_constraints(input: &pb::SolverInput) -> Result<ConstraintSet, ConvertEr
                         group,
                         person,
                         max_per_day: p.max_per_day,
+                    });
+            }
+            // Built — see `crate::aggregates::MaxOfferingSessionsPerDayInstance`.
+            // The (Offering, day) cluster's count reduction — no group/person
+            // scope, unlike its Group/Person-axis sibling above.
+            Some(Params::MaxOfferingSessionsPerDay(p)) => {
+                if c.weight < 0.0 || c.weight.is_nan() {
+                    return Err(ConvertError::NegativeSoftWeight {
+                        constraint: c.id.clone(),
+                        weight: c.weight,
+                    });
+                }
+                set.max_offering_sessions_per_day
+                    .push(MaxOfferingSessionsPerDayInstance {
+                        id: c.id.clone(),
+                        kinds: c.applies_to_kinds.clone(),
+                        weight: c.weight,
+                        max_per_day: p.max_per_day,
+                    });
+            }
+            // Built — see `crate::aggregates::MaxConsecutiveOfferingBlocksInstance`.
+            // The cluster's longest-run reduction.
+            Some(Params::MaxConsecutiveOfferingBlocks(p)) => {
+                if c.weight < 0.0 || c.weight.is_nan() {
+                    return Err(ConvertError::NegativeSoftWeight {
+                        constraint: c.id.clone(),
+                        weight: c.weight,
+                    });
+                }
+                set.max_consecutive_offering_blocks
+                    .push(MaxConsecutiveOfferingBlocksInstance {
+                        id: c.id.clone(),
+                        kinds: c.applies_to_kinds.clone(),
+                        weight: c.weight,
+                        max_consecutive: p.max_consecutive,
+                    });
+            }
+            // Built — see `crate::aggregates::MinimizeOfferingDaySplitInstance`.
+            // The cluster's split-run-count reduction. Empty message: no
+            // params beyond id/kinds/weight.
+            Some(Params::MinimizeOfferingDaySplit(_)) => {
+                if c.weight < 0.0 || c.weight.is_nan() {
+                    return Err(ConvertError::NegativeSoftWeight {
+                        constraint: c.id.clone(),
+                        weight: c.weight,
+                    });
+                }
+                set.minimize_offering_day_split
+                    .push(MinimizeOfferingDaySplitInstance {
+                        id: c.id.clone(),
+                        kinds: c.applies_to_kinds.clone(),
+                        weight: c.weight,
                     });
             }
 
