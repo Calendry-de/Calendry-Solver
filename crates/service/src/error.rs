@@ -168,6 +168,12 @@ pub enum ConvertError {
     )]
     NegativeMovementWeight { weight: f64 },
     #[error(
+        "scope.minimize_inscope_movement_weight is {weight}; it must be >= 0 for the same reason \
+         every other soft weight must be — it declares minimize, and a negative weight would \
+         invert it"
+    )]
+    NegativeInScopeMovementWeight { weight: f64 },
+    #[error(
         "scope.outside_scope_policy must be set; supported values are LOCK_POLICY_HARD and \
          LOCK_POLICY_MINIMIZE_MOVEMENT"
     )]

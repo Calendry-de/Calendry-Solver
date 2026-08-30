@@ -872,6 +872,15 @@ pub struct ProblemSpec {
     /// of `0.0` — when nothing in `placements` carries an `original`, exactly
     /// like every other soft weight with nothing to weigh.
     pub movement_weight: f64,
+    /// The in-scope counterpart of `movement_weight`: bias against disturbing
+    /// an in-scope placement that already realizes an existing Session, away
+    /// from where it already sat. A SEPARATE weight rather than reusing
+    /// `movement_weight` — issue #58 ("In-scope Sessions have no stay-put
+    /// pressure") — because the two conflate different magnitudes: "do not
+    /// disturb the neighbours" (out-of-scope) and "do not churn what a
+    /// targeted repair was not asked to touch" (in-scope) are different
+    /// products sharing one mechanism. See [`Problem::movement_cost`].
+    pub in_scope_movement_weight: f64,
 }
 
 impl ProblemSpec {
@@ -889,6 +898,7 @@ impl ProblemSpec {
             relations: Vec::new(),
             scope: ScopeSpec::All,
             movement_weight: 0.0,
+            in_scope_movement_weight: 0.0,
         }
     }
 
@@ -1034,10 +1044,13 @@ pub struct PlacementVar {
     /// Preserved when this occurrence corresponds to an existing in-scope
     /// Session, so a re-solve does not needlessly churn Session ids downstream.
     pub existing_session_id: Option<String>,
-    /// Where this occurrence already sat, when it is an out-of-scope Session
-    /// made movable by `LOCK_POLICY_MINIMIZE_MOVEMENT` rather than hard-locked.
-    /// `None` for every other placement variable — an in-scope Session has
-    /// nothing to be charged for leaving.
+    /// Where this occurrence already sat, when it realizes an existing
+    /// Session that is either out-of-scope and made movable by
+    /// `LOCK_POLICY_MINIMIZE_MOVEMENT`, or in-scope and reused (see
+    /// [`Problem::movement_cost`], which charges `movement_weight` for the
+    /// first and `in_scope_movement_weight` for the second). `None` for a
+    /// brand-new Session — nothing to be charged for leaving a place it
+    /// never held.
     ///
     /// The inner `Option<RoomIdx>` mirrors [`FixedSpec::room`]: an
     /// online-only or not-yet-roomed Session is a real state there, so it
@@ -1081,6 +1094,8 @@ pub struct Problem {
     /// Bias against disturbing a movable out-of-scope placement. See
     /// [`ProblemSpec::movement_weight`] and [`Problem::movement_cost`].
     pub movement_weight: f64,
+    /// See [`ProblemSpec::in_scope_movement_weight`].
+    pub in_scope_movement_weight: f64,
     /// Summed weight of every configured `Compactness` instance covering the
     /// Group axis. Zero when not configured, or when no instance selects it —
     /// see [`crate::aggregates::CompactnessInstance::group`].
@@ -1167,6 +1182,7 @@ impl Problem {
             relations,
             scope,
             movement_weight,
+            in_scope_movement_weight,
         } = spec;
 
         let parent_of: Vec<Option<GroupIdx>> = groups.iter().map(|g| g.parent).collect();
@@ -1545,7 +1561,10 @@ impl Problem {
          * ceiling, and multiplying by every placement rather than only the
          * movable ones stays safe for the same reason `soft.total_weight`
          * already does — a placement a term does not apply to costs it
-         * nothing, which only widens the bound.
+         * nothing, which only widens the bound. `in_scope_movement_weight` is
+         * the same shape one axis over; the two can never both charge the
+         * SAME placement (a placement is in scope or is not), so summing both
+         * ceilings is a safe bound, if not the tightest one.
          *
          * THE CAPACITY-WASTE TERM IS BOUNDED THE SAME WAY `MinimizeRoomRank`
          * IS: `capacity_waste_cost`'s saturating curve caps each covering
@@ -1557,6 +1576,7 @@ impl Problem {
             + preferences.max_cost_per_placement() * placements.len() as f64
             + day_mix_weight * aggregate_template.day_mix_cell_count() as f64
             + movement_weight * placements.len() as f64
+            + in_scope_movement_weight * placements.len() as f64
             + capacity_waste_weight * placements.len() as f64
             // Read off `(group, day)` cell counts, exactly like day_mix_weight
             // above: neither is bounded by placements, since one placement can
@@ -1611,6 +1631,7 @@ impl Problem {
             day_mix_weight,
             max_concurrent_online,
             movement_weight,
+            in_scope_movement_weight,
             compactness_group_weight,
             compactness_person_weight,
             max_consecutive_group_weight,
@@ -1722,20 +1743,34 @@ impl Problem {
         &self.offerings[self.placements[p.get()].offering.get()]
     }
 
-    /// What placing `p` at `(start, room)` costs under
-    /// `LOCK_POLICY_MINIMIZE_MOVEMENT`.
+    /// What placing `p` at `(start, room)` costs for leaving where it
+    /// already was.
     ///
-    /// `0.0` when `p` has no `original` (every in-scope placement) or when it
-    /// is placed back exactly where it was. A room-only change counts as
+    /// `0.0` when `p` has no `original` (a brand-new Session) or when it is
+    /// placed back exactly where it was. A room-only change counts as
     /// "moved" too — this is a single knob, not a slot/room split — so the
     /// comparison is on the whole pair, not `start` alone. No table: unlike
     /// [`crate::preferences::PreferenceModel`], the cost does not depend on
     /// who leads the placement, only on where it already was, so a direct
-    /// compare is the entire computation.
+    /// compare is most of the computation.
+    ///
+    /// Which of the two weights applies is `p`'s Offering's SCOPE, not
+    /// whether `original` happens to be set: `movement_weight` for an
+    /// out-of-scope Session made movable by `LOCK_POLICY_MINIMIZE_MOVEMENT`,
+    /// `in_scope_movement_weight` for an in-scope Session reused by a
+    /// targeted repair. The two never charge the same placement, since a
+    /// placement's Offering is in scope or is not.
     #[inline]
     pub fn movement_cost(&self, p: PlacementIdx, start: SlotIdx, room: RoomIdx) -> f64 {
-        match self.placements[p.get()].original {
-            Some(original) if original != (start, Some(room)) => self.movement_weight,
+        let var = &self.placements[p.get()];
+        match var.original {
+            Some(original) if original != (start, Some(room)) => {
+                if self.in_scope(var.offering) {
+                    self.in_scope_movement_weight
+                } else {
+                    self.movement_weight
+                }
+            }
             _ => 0.0,
         }
     }
@@ -2021,10 +2056,13 @@ mod tests {
         assert!(lecture.group && lecture.room);
     }
 
-    /// A movable `PlacementVar`, `original` set, on a spec NOT passed through
-    /// `expand_placements` — that helper unconditionally rebuilds `placements`
-    /// from `offerings.required_session_count` with `original: None`, which is
-    /// exactly the v1 shape this is testing past.
+    /// A movable, OUT-OF-SCOPE `PlacementVar`, `original` set, on a spec NOT
+    /// passed through `expand_placements` — that helper unconditionally
+    /// rebuilds `placements` from `offerings.required_session_count` with
+    /// `original: None`, which is exactly the v1 shape this is testing past.
+    /// Out of scope is what selects `movement_weight` over
+    /// `in_scope_movement_weight` in `movement_cost` — see
+    /// [`in_scope_movable_spec`] for the other side.
     fn movable_spec(weight: f64) -> ProblemSpec {
         ProblemSpec {
             offerings: vec![offering("o", 1)],
@@ -2035,6 +2073,24 @@ mod tests {
                 original: Some((SlotIdx(0), Some(RoomIdx(0)))),
             }],
             movement_weight: weight,
+            scope: ScopeSpec::Offerings(vec![]),
+            ..ProblemSpec::new(grid())
+        }
+    }
+
+    /// The in-scope counterpart of [`movable_spec`]: same reused placement,
+    /// but the Offering IS in scope, so `movement_cost` must select
+    /// `in_scope_movement_weight` instead.
+    fn in_scope_movable_spec(weight: f64) -> ProblemSpec {
+        ProblemSpec {
+            offerings: vec![offering("o", 1)],
+            placements: vec![PlacementVar {
+                offering: OfferingIdx(0),
+                occurrence: 0,
+                existing_session_id: Some("s1".into()),
+                original: Some((SlotIdx(0), Some(RoomIdx(0)))),
+            }],
+            in_scope_movement_weight: weight,
             ..ProblemSpec::new(grid())
         }
     }
@@ -2063,13 +2119,44 @@ mod tests {
 
     #[test]
     fn movement_cost_is_zero_without_an_original_regardless_of_weight() {
-        // Every in-scope placement — the overwhelming majority of any run —
-        // has no `original`. This is what makes it safe for `hard_penalty` and
-        // `initial_temperature` to fold `movement_weight` in unconditionally:
-        // a placement the term does not apply to costs it nothing.
+        // A brand-new Session — the overwhelming majority of any run's
+        // placements — has no `original`. This is what makes it safe for
+        // `hard_penalty` and `initial_temperature` to fold both movement
+        // weights in unconditionally: a placement neither term applies to
+        // costs it nothing.
         let mut spec = movable_spec(3.0);
         spec.placements[0].original = None;
         let p = Problem::build(spec).unwrap();
         assert_eq!(p.movement_cost(PlacementIdx(0), SlotIdx(1), RoomIdx(1)), 0.0);
+    }
+
+    #[test]
+    fn in_scope_movement_cost_is_zero_back_at_the_original_placement() {
+        let p = Problem::build(in_scope_movable_spec(3.0)).unwrap();
+        assert_eq!(p.movement_cost(PlacementIdx(0), SlotIdx(0), RoomIdx(0)), 0.0);
+    }
+
+    #[test]
+    fn in_scope_movement_cost_charges_the_in_scope_weight_for_a_slot_change() {
+        let p = Problem::build(in_scope_movable_spec(3.0)).unwrap();
+        assert_eq!(p.movement_cost(PlacementIdx(0), SlotIdx(1), RoomIdx(0)), 3.0);
+    }
+
+    #[test]
+    fn an_out_of_scope_placement_never_reads_the_in_scope_weight() {
+        // `movable_spec` is out of scope and sets ONLY `movement_weight`;
+        // `in_scope_movement_weight` defaults to 0.0. If `movement_cost` ever
+        // mixed the two up, this would charge nothing instead of `weight`.
+        let p = Problem::build(movable_spec(3.0)).unwrap();
+        assert_eq!(p.movement_cost(PlacementIdx(0), SlotIdx(1), RoomIdx(0)), 3.0);
+    }
+
+    #[test]
+    fn an_in_scope_placement_never_reads_the_out_of_scope_weight() {
+        // `in_scope_movable_spec` is in scope and sets ONLY
+        // `in_scope_movement_weight`; `movement_weight` defaults to 0.0. If
+        // `movement_cost` ever mixed the two up, this would charge nothing.
+        let p = Problem::build(in_scope_movable_spec(3.0)).unwrap();
+        assert_eq!(p.movement_cost(PlacementIdx(0), SlotIdx(1), RoomIdx(0)), 3.0);
     }
 }

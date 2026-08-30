@@ -208,6 +208,15 @@ hard-locked under either policy). Construction seeds a movable Session back at
 its original placement when nothing conflicts, so the search does not
 gratuitously pay the penalty for a move nobody asked for.
 
+**In-scope stay-put pressure is built (issue #58).** A reused IN-scope
+Session now ALSO carries an `original`, charged by the independent
+`SolveScope.minimize_inscope_movement_weight` rather than
+`minimize_movement_weight` — the two never charge the same placement, since
+`Problem::movement_cost` picks between them by the placement's Offering's
+scope. Closes the measured gap (36–100% churn on a targeted repair) without
+the larger, session-level-scope redesign the tracking card also considered;
+see ADR-0008's "In-scope stay-put pressure, landed" addendum for why.
+
 **Lecturer-pool selection is built.** `candidate_lecturer_ids.len() >
 required_lecturer_count` is a genuine choice, not a refusal: construction and
 repair enumerate every valid combination the same way they already enumerate

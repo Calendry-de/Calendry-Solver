@@ -168,12 +168,20 @@ pub fn minimize_movement_scope(ids: &[&str], weight: f64) -> pb::SolveScope {
     }
 }
 
+/// A scope carrying `minimize_inscope_movement_weight`, independent of
+/// `outside_scope_policy` — issue #58, the IN-scope counterpart of
+/// `minimize_movement_scope`.
+pub fn in_scope_movement_scope(ids: &[&str], weight: f64) -> pb::SolveScope {
+    pb::SolveScope { minimize_inscope_movement_weight: weight, ..scope(ids) }
+}
+
 pub fn scope(ids: &[&str]) -> pb::SolveScope {
     pb::SolveScope {
         offering_ids: ids.iter().map(|s| (*s).to_string()).collect(),
         group_ids: vec![],
         outside_scope_policy: pb::LockPolicy::Hard as i32,
         minimize_movement_weight: 0.0,
+        minimize_inscope_movement_weight: 0.0,
     }
 }
 

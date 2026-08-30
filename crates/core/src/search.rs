@@ -1111,11 +1111,18 @@ fn initial_temperature(problem: &Problem) -> f64 {
     // the preference type would start at `MIN_TEMPERATURE` and hill-climb.
     // Minimize-movement joins them for the same reason: a scope-limited
     // re-solve with no other soft rule configured would otherwise start cold.
+    // The in-scope counterpart is a separate axis (issue #58) that can be
+    // configured independently, so it gets its own `n`/`total` bump rather
+    // than sharing `movement_weight`'s.
     let mut n = problem.soft.instances.len() + problem.preferences.instances.len();
     let mut total = problem.soft.total_weight + problem.preferences.total_weight;
     if problem.movement_weight > 0.0 {
         n += 1;
         total += problem.movement_weight;
+    }
+    if problem.in_scope_movement_weight > 0.0 {
+        n += 1;
+        total += problem.in_scope_movement_weight;
     }
     if n == 0 {
         return tuning::MIN_TEMPERATURE;
@@ -1216,13 +1223,14 @@ mod tests {
     // Minimize-movement (LOCK_POLICY_MINIMIZE_MOVEMENT)
     // -------------------------------------------------------------------
 
-    /// A single movable placement, `original` set to `(orig_slot, orig_room)`.
-    /// Bypasses `testing::assemble`, which calls `expand_placements` and would
-    /// overwrite `original` with `None` — exactly the v1 shape these tests are
-    /// testing past.
+    /// A single movable, OUT-OF-SCOPE placement, `original` set to
+    /// `(orig_slot, orig_room)`. Bypasses `testing::assemble`, which calls
+    /// `expand_placements` and would overwrite `original` with `None` —
+    /// exactly the v1 shape these tests are testing past. Out of scope is
+    /// what selects `movement_weight` in `Problem::movement_cost`.
     fn movable_problem(rooms_n: u32, eligible: &[u32], original: (u32, u32)) -> Problem {
         use crate::ids::OfferingIdx;
-        use crate::problem::{PlacementVar, ProblemSpec};
+        use crate::problem::{PlacementVar, ProblemSpec, ScopeSpec};
         let (orig_slot, orig_room) = original;
         let spec = ProblemSpec {
             rooms: testing::rooms(rooms_n),
@@ -1234,6 +1242,7 @@ mod tests {
                 original: Some((SlotIdx(orig_slot), Some(RoomIdx(orig_room)))),
             }],
             movement_weight: 1.0,
+            scope: ScopeSpec::Offerings(vec![]),
             ..ProblemSpec::new(testing::grid(4, 1))
         };
         Problem::build(spec).unwrap()
@@ -1271,7 +1280,7 @@ mod tests {
     #[test]
     fn ruin_worst_picks_up_a_movement_charge() {
         use crate::ids::OfferingIdx;
-        use crate::problem::{PlacementVar, ProblemSpec};
+        use crate::problem::{PlacementVar, ProblemSpec, ScopeSpec};
 
         // Placement 0: ordinary, no `original`, free wherever it sits.
         // Placement 1: movable, `original` at slot 2, but PLACED at slot 1 —
@@ -1297,6 +1306,7 @@ mod tests {
                 },
             ],
             movement_weight: 1.0,
+            scope: ScopeSpec::Offerings(vec![]),
             ..ProblemSpec::new(testing::grid(4, 1))
         };
         let problem = Problem::build(spec).unwrap();

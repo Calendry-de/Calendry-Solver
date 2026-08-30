@@ -50,6 +50,12 @@ use crate::error::{ConvertError, Resolver};
 
 pub fn convert(input: &pb::SolverInput, scope: &pb::SolveScope) -> Result<Problem, ConvertError> {
     let lock_policy = check_lock_policy(scope)?;
+    let in_scope_movement_weight = scope.minimize_inscope_movement_weight;
+    if in_scope_movement_weight < 0.0 || in_scope_movement_weight.is_nan() {
+        return Err(ConvertError::NegativeInScopeMovementWeight {
+            weight: in_scope_movement_weight,
+        });
+    }
 
     let slots = build_grid(input)?;
     let rooms = build_rooms(input);
@@ -119,6 +125,7 @@ pub fn convert(input: &pb::SolverInput, scope: &pb::SolveScope) -> Result<Proble
         relations,
         scope: ScopeSpec::Offerings(in_scope),
         movement_weight: lock_policy.movement_weight(),
+        in_scope_movement_weight,
         ..ProblemSpec::new(slots)
     })?)
 }
@@ -752,8 +759,11 @@ fn partition_sessions(
 ) -> Result<(Vec<PlacementVar>, Vec<FixedSpec>), ConvertError> {
     let mut fixed = Vec::new();
     // Existing in-scope Sessions, per Offering, so a re-solve preserves Session
-    // ids instead of churning them downstream.
-    let mut reusable: HashMap<String, Vec<String>> = HashMap::new();
+    // ids instead of churning them downstream. Also carries each one's current
+    // (start, room) — the same `original` a movable out-of-scope Session
+    // carries below — so a `PlacementVar` reusing it can be charged by
+    // `minimize_inscope_movement_weight` (issue #58) for leaving it.
+    let mut reusable: HashMap<String, Vec<(String, SlotIdx, Option<RoomIdx>)>> = HashMap::new();
     // Existing out-of-scope Sessions made movable by
     // `LOCK_POLICY_MINIMIZE_MOVEMENT`, one `PlacementVar` per Session, carrying
     // `original` so the search can be charged for leaving it. Kept separate
@@ -891,17 +901,27 @@ fn partition_sessions(
                 })?,
                 reason,
             }),
-            None => reusable
-                .entry(s.offering_id.clone())
-                .or_default()
-                .push(s.id.clone()),
+            None => {
+                let room = if s.room_id.is_empty() {
+                    None
+                } else {
+                    Some(ix.rooms.require(&s.room_id, RoomIdx, |room| {
+                        ConvertError::UnknownRoom { context: format!("session '{}'", s.id), room }
+                    })?)
+                };
+                reusable.entry(s.offering_id.clone()).or_default().push((
+                    s.id.clone(),
+                    start,
+                    room,
+                ));
+            }
         }
     }
 
-    // Deterministic id reuse: sort so that the mapping does not depend on the
-    // caller's ordering of existing_sessions.
+    // Deterministic id reuse: sort by session id so that the mapping does not
+    // depend on the caller's ordering of existing_sessions.
     for ids in reusable.values_mut() {
-        ids.sort();
+        ids.sort_by(|a, b| a.0.cmp(&b.0));
     }
 
     // Immovable Sessions already realizing each in-scope Offering. These are
@@ -931,11 +951,21 @@ fn partition_sessions(
 
         let reuse = reusable.remove(&o.id).unwrap_or_default();
         for occurrence in 0..outstanding {
+            let reused = reuse.get(occurrence as usize);
             placements.push(PlacementVar {
                 offering: OfferingIdx(i as u32),
                 occurrence,
-                existing_session_id: reuse.get(occurrence as usize).cloned(),
-                original: None,
+                existing_session_id: reused.map(|(id, _, _)| id.clone()),
+                // Charged by `minimize_inscope_movement_weight`, not
+                // `minimize_movement_weight` — this Offering IS in scope, so
+                // `Problem::movement_cost` reads the other weight. Set
+                // unconditionally rather than only when that weight is
+                // nonzero: it is harmless at weight 0 (the term costs
+                // nothing), and it ALSO seeds construction back at this slot
+                // first, the same free win `movable_out_of_scope` already
+                // gets above (search.rs's "try the original first" fast
+                // path) — issue #58's whole point.
+                original: reused.map(|&(_, start, room)| (start, room)),
             });
         }
     }

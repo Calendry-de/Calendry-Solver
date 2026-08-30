@@ -65,3 +65,51 @@ still eligible for its Offering and nothing else occupies it — so the search
 does not gratuitously pay a penalty for a move nobody asked for, and falls
 through to the ordinary greedy scan (pricing the resulting move) when it
 cannot.
+
+## In-scope stay-put pressure, landed — issue #58's measured gap, closed
+
+Issue #58 ("In-scope Sessions have no stay-put pressure") measured, rather than
+assumed, that this was worth fixing: scoping a targeted repair to one Offering
+churned 36–100% of that Offering's OTHER Sessions across every benchmark preset
+(`crates/gen`'s churn report), because `movement_cost` returned `0.0` for every
+in-scope placement — there was nothing biasing the search toward the Sessions'
+existing slots at all. The card named two candidate shapes and deliberately did
+not pick one; this is that pick, and the reasoning for it.
+
+**Chosen: a second, independent weight on the SAME mechanism, not a
+session-level scope.** `SolveScope.minimize_inscope_movement_weight`
+(`calendry-proto`, `SolveScope` field 5) is `movement_weight`'s in-scope
+counterpart — same `original: Option<(SlotIdx, Option<RoomIdx>)>` field on
+`PlacementVar`, same `Problem::movement_cost` charge, same wiring into
+`evaluator::score_one`/`Trial::place`/`unplace`/`ruin_worst`/
+`recompute_objective`. The alternative — scoping by Session id rather than by
+Offering — is the "largest wire change" the card itself flagged, and cuts
+across `resolve_scope`'s existing "an Offering is in scope if any of its Groups
+is" rule; nothing forced that redesign once a second weight sufficed.
+
+**A separate weight, not a shared one, because the two conflate different
+magnitudes** — the card's own words, kept: "do not disturb the neighbours"
+(out-of-scope) and "do not churn what a targeted repair was not asked to
+fix" (in-scope) are different products sharing one mechanism, and a tenant
+tuning one must not be silently retuning the other.
+
+**Which weight applies is the placement's Offering's SCOPE, not merely
+whether `original` is set** — `Problem::movement_cost` now reads
+`self.in_scope(var.offering)` to choose. This is what makes summing both
+weights into `hard_penalty` and `initial_temperature` safe rather than
+double-counting: a placement's Offering is in scope or is not, so the two
+terms never both charge the same placement.
+
+**`partition_sessions` sets `original` unconditionally for every reused
+in-scope Session**, not only when the new weight is nonzero. Two reasons: it
+is harmless at weight `0.0` (the read-only reading every other soft weight
+already gives a zero), and it ALSO seeds `search::construct`'s existing "try
+the original first" fast path (see the v2 addendum above) for these Sessions
+too — a second, free reduction in gratuitous churn that needed no weight at
+all, since that fast path already reads `original` regardless of scope.
+
+Not addressed by this: the churn *measurement* harness itself
+(`crates/gen`'s `churn.rs`) still reports the pre-fix numbers — it was built to
+confirm the gap was real, not to track this fix's effect, and re-running it
+with the new weight configured is future work if the effect size is ever
+worth a documented number.

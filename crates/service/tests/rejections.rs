@@ -95,6 +95,37 @@ fn a_nan_minimize_movement_weight_is_refused() {
 }
 
 #[test]
+fn a_negative_inscope_movement_weight_is_refused() {
+    // Independent of `outside_scope_policy` — this validation runs regardless
+    // of which lock policy the caller chose.
+    let mut s = scope(&[]);
+    s.minimize_inscope_movement_weight = -1.0;
+
+    let e = reject(&base_input(), &s);
+    assert!(
+        matches!(e, ConvertError::NegativeInScopeMovementWeight { weight } if weight == -1.0),
+        "{e}"
+    );
+    assert_eq!(
+        code_of(&e),
+        Code::InvalidArgument,
+        "the caller can fix this by sending a non-negative weight"
+    );
+}
+
+#[test]
+fn a_nan_inscope_movement_weight_is_refused() {
+    let mut s = scope(&[]);
+    s.minimize_inscope_movement_weight = f64::NAN;
+
+    let e = reject(&base_input(), &s);
+    assert!(
+        matches!(e, ConvertError::NegativeInScopeMovementWeight { weight } if weight.is_nan()),
+        "{e}"
+    );
+}
+
+#[test]
 fn an_unset_lock_policy_is_refused() {
     let mut s = scope(&[]);
     s.outside_scope_policy = 0;
@@ -588,6 +619,7 @@ fn every_refusal_maps_to_invalid_argument_or_unimplemented_and_nothing_else() {
         ConvertError::NotAnIsoWeekday { constraint: "c".into(), day: 9 },
         ConvertError::NegativeSoftWeight { constraint: "c".into(), weight: -1.0 },
         ConvertError::NegativeMovementWeight { weight: -1.0 },
+        ConvertError::NegativeInScopeMovementWeight { weight: -1.0 },
         ConvertError::LockPolicyUnset,
         ConvertError::TooManyLecturersRequired { offering: "o".into(), required: 99, max: 4 },
         ConvertError::InsufficientLecturerCandidates {
