@@ -6,6 +6,7 @@
 //! doc for why (cost depends on THIS Offering's `min_capacity`, not only on
 //! `(kind-profile, slot, room)`).
 
+use calendry_solver_core::ids::RoomIdx;
 use calendry_solver_core::problem::{CapacityWasteInstance, ConstraintSet, ProblemSpec, Room};
 use calendry_solver_core::search::{NeverHalt, objectives_agree, recompute_objective, solve};
 use calendry_solver_core::testing;
@@ -48,7 +49,7 @@ fn the_search_prefers_the_tighter_fitting_room() {
         .solution
         .get(calendry_solver_core::ids::PlacementIdx(0))
         .unwrap();
-    assert_eq!(pl.room, calendry_solver_core::ids::RoomIdx(0), "the tightly-fitting Room must win");
+    assert_eq!(pl.room, RoomIdx(0), "the tightly-fitting Room must win");
 }
 
 #[test]
@@ -101,6 +102,51 @@ fn a_multi_room_placements_ratio_uses_summed_capacity() {
     // this reading.
     let cost = problem.capacity_waste_cost(&problem.offerings[0], 40);
     assert_eq!(cost, 0.0);
+}
+
+#[test]
+fn a_virtual_room_is_never_charged_for_capacity_waste() {
+    // A virtual Room is not a scarce resource (ADR-0022): it has no seats to
+    // waste. Capacity 999 against min_capacity 20 would be a ratio of ~50 for
+    // a physical Room -- easily the biggest waste in the suite -- but must
+    // cost nothing here.
+    let offering = testing::with_min_capacity(testing::offering("O", 1, &[0]), 20);
+    let problem = testing::assemble(ProblemSpec {
+        rooms: vec![Room { capacity: 999, ..testing::room_with("R0", 1, true) }],
+        offerings: vec![offering],
+        constraints: capped(10.0, 1.0),
+        ..ProblemSpec::new(testing::grid(1, 1))
+    });
+
+    let outcome = solve(&problem, SEED, moves(500), &NeverHalt);
+    assert_eq!(outcome.objective.unplaced, 0);
+    assert_eq!(outcome.objective.soft, 0.0, "a virtual Room has nothing to waste");
+}
+
+#[test]
+fn a_mixed_combination_charges_only_the_physical_rooms_capacity() {
+    // Multi-room: one physical (20 seats), one virtual (999). The waste ratio
+    // must read against 20 alone, not 1019 -- the virtual seat count is not
+    // real scarcity to grade a fit against.
+    let offering = testing::with_room_combinations(
+        testing::with_min_capacity(testing::offering("O", 1, &[]), 20),
+        2,
+        &[0, 1],
+    );
+    let problem = testing::assemble(ProblemSpec {
+        rooms: vec![
+            room_with_capacity("R0", 20),
+            Room { capacity: 999, ..testing::room_with("R1", 1, true) },
+        ],
+        offerings: vec![offering],
+        constraints: capped(10.0, 1.0),
+        ..ProblemSpec::new(testing::grid(1, 1))
+    });
+
+    // ratio = 20 / 20 = 1.0, at the threshold: excess 0, cost 0. Summing in
+    // the virtual Room's 999 would instead give ratio ~51 and a large charge.
+    let capacity = problem.exclusive_capacity([RoomIdx(0), RoomIdx(1)].into_iter());
+    assert_eq!(problem.capacity_waste_cost(&problem.offerings[0], capacity), 0.0);
 }
 
 #[test]

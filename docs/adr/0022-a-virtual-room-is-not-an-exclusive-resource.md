@@ -55,3 +55,19 @@ permitted online, one not — so it cannot regress the same way.
 The measured consequence is its own decision:
 [ADR-0025](0025-maxonlineshare-is-not-enforced-by-the-search.md). The cap this
 bug was enforcing by accident is now enforced by nothing.
+
+## A second consequence of the same fact: `MinimizeCapacityWaste` (issue #63)
+
+`Problem::capacity_waste_cost` charged every enabled instance by how far a
+placement's summed Room capacity exceeded `min_capacity` — with nothing
+exempting a virtual Room, so an online placement was priced as though it were
+a lecture hall standing mostly empty. Same argument as this ADR's own, applied
+to waste instead of to occupancy: a virtual Room has no seats and no scarcity,
+so it has nothing to waste either.
+
+Fixed by `Problem::exclusive_capacity`, a single helper (replacing five
+duplicated `all_rooms().map(capacity).sum()` call sites) that sums only
+non-virtual Rooms. A multi-Room combination mixing physical and virtual now
+reads its waste ratio against the physical seats alone; an all-virtual
+combination reads `0`, which `capacity_waste_cost` already treats the same way
+it treats `min_capacity == 0` — nothing to charge.

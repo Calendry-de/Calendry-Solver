@@ -1799,14 +1799,33 @@ impl Problem {
         }
     }
 
+    /// The capacity `capacity_waste_cost` should be charged against: the SUM
+    /// of every EXCLUSIVE (non-virtual) Room in the placement, `capacity`'s
+    /// same "sum across the set" convention with virtual Rooms excluded
+    /// entirely.
+    ///
+    /// A virtual Room is not a scarce resource (ADR-0022) — it has no seats
+    /// to waste, so including it here would price an online placement as
+    /// though it were a lecture hall standing mostly empty. `0` for an
+    /// all-virtual combination, which `capacity_waste_cost` already treats
+    /// the same way it treats `min_capacity == 0`: nothing to charge.
+    #[inline]
+    pub fn exclusive_capacity(&self, rooms: impl Iterator<Item = RoomIdx>) -> u32 {
+        rooms
+            .filter(|r| !self.rooms[r.get()].is_virtual)
+            .map(|r| self.rooms[r.get()].capacity)
+            .sum()
+    }
+
     /// SOFT. Rewards a good Room-size fit: charges every enabled
     /// `MinimizeCapacityWaste` instance covering `offering.kind`, scaled by
     /// how far `capacity / offering.min_capacity` exceeds the instance's
     /// `waste_ratio_threshold`. `capacity` is the caller's SUM across every
-    /// Room in a placement — the same "capacity is summed" convention
-    /// Multi-room Sessions established for eligibility, not a per-Room ratio
-    /// summed across the set, which would price the identical fit
-    /// differently depending on how many Rooms happened to supply it.
+    /// EXCLUSIVE Room in a placement (see [`Self::exclusive_capacity`]) — the
+    /// same "capacity is summed" convention Multi-room Sessions established
+    /// for eligibility, not a per-Room ratio summed across the set, which
+    /// would price the identical fit differently depending on how many Rooms
+    /// happened to supply it.
     ///
     /// `min_capacity == 0` is never penalized — a ratio against zero is
     /// meaningless, and this Offering never asked for a minimum at all.

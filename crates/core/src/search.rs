@@ -226,10 +226,7 @@ impl<'p> Trial<'p> {
         }
         self.solution.set(p, Some(at));
         let o = self.problem.offering_of(p);
-        let capacity: u32 = at
-            .all_rooms()
-            .map(|r| self.problem.rooms[r.get()].capacity)
-            .sum();
+        let capacity = self.problem.exclusive_capacity(at.all_rooms());
         self.soft += at
             .all_rooms()
             .map(|r| self.problem.soft.cost(o.soft_profile, at.start, r))
@@ -250,10 +247,7 @@ impl<'p> Trial<'p> {
         debug_assert!(released, "a placed Session's span must still resolve");
         self.solution.set(p, None);
         let o = self.problem.offering_of(p);
-        let capacity: u32 = at
-            .all_rooms()
-            .map(|r| self.problem.rooms[r.get()].capacity)
-            .sum();
+        let capacity = self.problem.exclusive_capacity(at.all_rooms());
         self.soft -= at
             .all_rooms()
             .map(|r| self.problem.soft.cost(o.soft_profile, at.start, r))
@@ -689,10 +683,7 @@ fn ruin_worst(
             // by what they cost, and a Session sitting on a slot its lecturer
             // asked to avoid — or away from where a minimize-movement policy
             // wants it — is exactly what it should pick up.
-            let capacity: u32 = pl
-                .all_rooms()
-                .map(|r| problem.rooms[r.get()].capacity)
-                .sum();
+            let capacity = problem.exclusive_capacity(pl.all_rooms());
             let mut cost = pl
                 .all_rooms()
                 .map(|r| problem.soft.cost(o.soft_profile, pl.start, r))
@@ -902,10 +893,7 @@ pub fn recompute_objective(problem: &Problem, solution: &Solution) -> Objective 
         match solution.get(p) {
             Some(pl) => {
                 let o = problem.offering_of(p);
-                let capacity: u32 = pl
-                    .all_rooms()
-                    .map(|r| problem.rooms[r.get()].capacity)
-                    .sum();
+                let capacity = problem.exclusive_capacity(pl.all_rooms());
                 soft += pl
                     .all_rooms()
                     .map(|r| problem.soft.cost(o.soft_profile, pl.start, r))

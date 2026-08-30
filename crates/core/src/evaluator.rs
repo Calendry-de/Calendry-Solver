@@ -185,11 +185,7 @@ fn score_one(problem: &Problem, solution: &Solution, state: &SearchState, mv: &M
     // comment above — for the Offering-scoped counterpart.
     let scheduling_pattern_delta = state.scheduling_pattern_delta(problem, &candidate, &span);
 
-    let capacity: u32 = mv
-        .to
-        .all_rooms()
-        .map(|r| problem.rooms[r.get()].capacity)
-        .sum();
+    let capacity = problem.exclusive_capacity(mv.to.all_rooms());
 
     Score(
         mv.to
