@@ -8,9 +8,9 @@
 use crate::aggregates::{
     Aggregates, CompactnessInstance, DayMixInstance, ExamSpacingSameDayInstance,
     ExamSpacingWindowInstance, LecturerConsistencyInstance, MaxConsecutiveInstance,
-    MaxDailySpanInstance, MaxWeeklyTeachingLoadInstance, MinimizeLocationChangeInstance,
-    MinimizeRoomChurnInstance, MinimizeWeekdayImbalanceInstance, PatternAdherenceInstance,
-    RoomConsistencyInstance, RoomTurnaroundBufferInstance, ShareInstance,
+    MaxDailySessionCountInstance, MaxDailySpanInstance, MaxWeeklyTeachingLoadInstance,
+    MinimizeLocationChangeInstance, MinimizeRoomChurnInstance, MinimizeWeekdayImbalanceInstance,
+    PatternAdherenceInstance, RoomConsistencyInstance, RoomTurnaroundBufferInstance, ShareInstance,
 };
 use crate::bitset::BitSet;
 use crate::groups::{GroupClosure, GroupCycle};
@@ -309,6 +309,12 @@ pub struct ConstraintSet {
     /// long if the bracketing Sessions are simply far apart. See
     /// [`crate::aggregates::MaxDailySpanInstance`].
     pub max_daily_span: Vec<MaxDailySpanInstance>,
+    /// SOFT, aggregate over a day. Caps a raw Session COUNT per day for a
+    /// Group and/or a Person — the volume-limit sibling of `max_daily_span`
+    /// (elapsed time) and `max_consecutive_blocks` (continuity): a day can
+    /// satisfy both of those and still be overloaded, e.g. 6 lessons split
+    /// 3 + gap + 3. See [`crate::aggregates::MaxDailySessionCountInstance`].
+    pub max_daily_session_count: Vec<MaxDailySessionCountInstance>,
     /// SOFT, aggregate over a week. Caps how many Sessions (or blocks) a
     /// lecturer teaches in one week. See
     /// [`crate::aggregates::MaxWeeklyTeachingLoadInstance`].
@@ -440,6 +446,8 @@ pub struct Enforce {
     pub max_consecutive_person: bool,
     pub max_daily_span_group: bool,
     pub max_daily_span_person: bool,
+    pub max_daily_session_count_group: bool,
+    pub max_daily_session_count_person: bool,
     pub max_weekly_teaching_load: bool,
     pub exam_spacing_same_day: bool,
     pub exam_spacing_window: bool,
@@ -486,6 +494,14 @@ impl ConstraintSet {
                 .any(|c| c.group && c.covers(kind)),
             max_daily_span_person: self
                 .max_daily_span
+                .iter()
+                .any(|c| c.person && c.covers(kind)),
+            max_daily_session_count_group: self
+                .max_daily_session_count
+                .iter()
+                .any(|c| c.group && c.covers(kind)),
+            max_daily_session_count_person: self
+                .max_daily_session_count
                 .iter()
                 .any(|c| c.person && c.covers(kind)),
             max_weekly_teaching_load: self.max_weekly_teaching_load.iter().any(|c| c.covers(kind)),
@@ -1114,6 +1130,12 @@ pub struct Problem {
     pub max_daily_span_group_weight: f64,
     /// The Person-axis counterpart of `max_daily_span_group_weight`.
     pub max_daily_span_person_weight: f64,
+    /// Summed weight of every configured `MaxDailySessionCount` instance
+    /// covering the Group axis. Zero when not configured, or when no
+    /// instance selects it.
+    pub max_daily_session_count_group_weight: f64,
+    /// The Person-axis counterpart of `max_daily_session_count_group_weight`.
+    pub max_daily_session_count_person_weight: f64,
     /// Summed weight of every configured `MaxWeeklyTeachingLoad` instance.
     /// Zero when not configured. Lecturer-only, no axis split.
     pub max_weekly_teaching_load_weight: f64,
@@ -1390,6 +1412,7 @@ impl Problem {
             constraints.block_pattern_adherence.clone(),
             constraints.max_consecutive_blocks.clone(),
             constraints.max_daily_span.clone(),
+            constraints.max_daily_session_count.clone(),
             constraints.max_weekly_teaching_load.clone(),
             constraints.exam_spacing_same_day.clone(),
             constraints.exam_spacing_window.clone(),
@@ -1452,6 +1475,18 @@ impl Problem {
             .sum();
         let max_daily_span_person_weight: f64 = constraints
             .max_daily_span
+            .iter()
+            .filter(|i| i.person)
+            .map(|i| i.weight)
+            .sum();
+        let max_daily_session_count_group_weight: f64 = constraints
+            .max_daily_session_count
+            .iter()
+            .filter(|i| i.group)
+            .map(|i| i.weight)
+            .sum();
+        let max_daily_session_count_person_weight: f64 = constraints
+            .max_daily_session_count
             .iter()
             .filter(|i| i.person)
             .map(|i| i.weight)
@@ -1638,6 +1673,8 @@ impl Problem {
             max_consecutive_person_weight,
             max_daily_span_group_weight,
             max_daily_span_person_weight,
+            max_daily_session_count_group_weight,
+            max_daily_session_count_person_weight,
             max_weekly_teaching_load_weight,
             exam_same_day_weight,
             exam_window_weight,

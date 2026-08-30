@@ -958,6 +958,36 @@ impl SearchState {
         delta
     }
 
+    /// The `MaxDailySessionCount` cost DELTA of placing `who` at `span` —
+    /// mirrors [`Self::max_daily_span_delta`], a raw count-excess instead of
+    /// span-excess.
+    pub fn max_daily_session_count_delta(
+        &self,
+        problem: &Problem,
+        who: &Occupant<'_>,
+        span: &[SlotIdx],
+    ) -> f64 {
+        if span.is_empty()
+            || (!who.enforce.max_daily_session_count_group
+                && !who.enforce.max_daily_session_count_person)
+        {
+            return 0.0;
+        }
+        let day = problem.slots.flags(span[0]).day_index;
+        let mut delta = 0.0;
+        if who.enforce.max_daily_session_count_group {
+            delta += self
+                .aggregates
+                .group_daily_count_delta(who.subtree_groups, day) as f64
+                * problem.max_daily_session_count_group_weight;
+        }
+        if who.enforce.max_daily_session_count_person {
+            delta += self.aggregates.person_daily_count_delta(who.attendees, day) as f64
+                * problem.max_daily_session_count_person_weight;
+        }
+        delta
+    }
+
     /// The `MinimizeLocationChange` cost DELTA of placing `who` at `span` —
     /// mirrors [`Self::max_daily_span_delta`], over distinct-location excess
     /// instead of span-excess.
@@ -1173,6 +1203,23 @@ impl SearchState {
                 self.aggregates.add_person_span(who.attendees, day, span);
             } else {
                 self.aggregates.remove_person_span(who.attendees, day, span);
+            }
+        }
+        if who.enforce.max_daily_session_count_group {
+            if add {
+                self.aggregates
+                    .add_group_daily_count(who.subtree_groups, day);
+            } else {
+                self.aggregates
+                    .remove_group_daily_count(who.subtree_groups, day);
+            }
+        }
+        if who.enforce.max_daily_session_count_person {
+            if add {
+                self.aggregates.add_person_daily_count(who.attendees, day);
+            } else {
+                self.aggregates
+                    .remove_person_daily_count(who.attendees, day);
             }
         }
         if who.enforce.max_weekly_teaching_load {
@@ -1396,6 +1443,17 @@ impl SearchState {
             );
         }
 
+        if who.enforce.max_daily_session_count_group || who.enforce.max_daily_session_count_person {
+            let day = problem.slots.flags(span[0]).day_index;
+            score += self.aggregates.max_daily_session_count_ruin_cost(
+                who.subtree_groups,
+                who.attendees,
+                day,
+                problem.max_daily_session_count_group_weight,
+                problem.max_daily_session_count_person_weight,
+            );
+        }
+
         if who.enforce.max_weekly_teaching_load {
             let week = problem.slots.flags(span[0]).week;
             score += self.aggregates.teaching_load_ruin_cost(
@@ -1560,6 +1618,20 @@ impl SearchState {
         self.aggregates.max_daily_span_cost(
             problem.max_daily_span_group_weight,
             problem.max_daily_span_person_weight,
+        )
+    }
+
+    /// What the currently over-cap daily Session counts cost, at the
+    /// configured weight(s). Mirrors [`Self::max_daily_span_cost`].
+    pub fn max_daily_session_count_cost(&self, problem: &Problem) -> f64 {
+        if problem.max_daily_session_count_group_weight == 0.0
+            && problem.max_daily_session_count_person_weight == 0.0
+        {
+            return 0.0;
+        }
+        self.aggregates.max_daily_session_count_cost(
+            problem.max_daily_session_count_group_weight,
+            problem.max_daily_session_count_person_weight,
         )
     }
 

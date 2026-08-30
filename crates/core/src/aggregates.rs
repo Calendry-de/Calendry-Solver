@@ -156,6 +156,30 @@ impl MaxDailySpanInstance {
     }
 }
 
+/// One configured `MaxDailySessionCount` rule — same `group`/`person` axis
+/// split as `MaxDailySpan`, but capping a raw Session COUNT per day rather
+/// than elapsed span. SOFT and priced once the cap is exceeded rather than
+/// refused, the same reasoning `MaxWeeklyTeachingLoad` and ADR-0025 give: a
+/// hard cap on a count only fully known as placements accumulate risks the
+/// same dead-end-construction problem.
+#[derive(Clone, Debug)]
+pub struct MaxDailySessionCountInstance {
+    pub id: String,
+    /// Empty means all kinds.
+    pub kinds: Vec<String>,
+    pub weight: f64,
+    pub group: bool,
+    pub person: bool,
+    pub max_per_day: u32,
+}
+
+impl MaxDailySessionCountInstance {
+    #[inline]
+    pub fn covers(&self, kind: &str) -> bool {
+        self.kinds.is_empty() || self.kinds.iter().any(|k| k == kind)
+    }
+}
+
 /// One configured `MaxWeeklyTeachingLoad` rule. Lecturer-only — unlike
 /// `CompactnessInstance` and its siblings, there is no Group/Person axis
 /// split, since the whole point is capping the person actually TEACHING.
@@ -499,6 +523,23 @@ pub struct Aggregates {
 
     max_daily_span_rules: Vec<MaxDailySpanInstance>,
 
+    /// `[entity * n_days + day]` — how many Sessions this Group/Person
+    /// currently has on this day, across the whole term. Same day indexing
+    /// as `imbalance_day` (an absolute day index, not per-week-of-day), but
+    /// this is a running count read against a fixed cap rather than a
+    /// per-week window read for variance.
+    daily_count_group: Vec<u32>,
+    daily_count_person: Vec<u32>,
+    /// The TIGHTEST `max_per_day` among every enabled instance covering each
+    /// axis, same "whichever binds hardest" convention as the other
+    /// thresholds here. `u32::MAX` when nothing configures that axis.
+    daily_count_group_threshold: u32,
+    daily_count_person_threshold: u32,
+    daily_count_group_excess_total: u32,
+    daily_count_person_excess_total: u32,
+
+    daily_count_rules: Vec<MaxDailySessionCountInstance>,
+
     /// `[person * n_weeks + week]` — how many Sessions (or blocks, per
     /// `teaching_load_count_blocks`) that Person currently leads that week.
     /// Empty when `MaxWeeklyTeachingLoad` is not configured.
@@ -676,6 +717,7 @@ impl Aggregates {
         block_rules: Vec<PatternAdherenceInstance>,
         max_consecutive_rules: Vec<MaxConsecutiveInstance>,
         max_daily_span_rules: Vec<MaxDailySpanInstance>,
+        daily_count_rules: Vec<MaxDailySessionCountInstance>,
         teaching_load_rules: Vec<MaxWeeklyTeachingLoadInstance>,
         exam_same_day_rules: Vec<ExamSpacingSameDayInstance>,
         exam_window_rules: Vec<ExamSpacingWindowInstance>,
@@ -735,6 +777,21 @@ impl Aggregates {
             .iter()
             .filter(|r| r.person)
             .map(|r| r.max_span_blocks)
+            .min()
+            .unwrap_or(u32::MAX);
+
+        let track_daily_count_group = daily_count_rules.iter().any(|r| r.group);
+        let track_daily_count_person = daily_count_rules.iter().any(|r| r.person);
+        let daily_count_group_threshold = daily_count_rules
+            .iter()
+            .filter(|r| r.group)
+            .map(|r| r.max_per_day)
+            .min()
+            .unwrap_or(u32::MAX);
+        let daily_count_person_threshold = daily_count_rules
+            .iter()
+            .filter(|r| r.person)
+            .map(|r| r.max_per_day)
             .min()
             .unwrap_or(u32::MAX);
 
@@ -846,6 +903,21 @@ impl Aggregates {
             span_group_excess_total: 0,
             span_person_excess_total: 0,
             max_daily_span_rules,
+            daily_count_group: if track_daily_count_group {
+                vec![0; groups * n_days.max(1)]
+            } else {
+                Vec::new()
+            },
+            daily_count_person: if track_daily_count_person {
+                vec![0; n_persons.max(1) * n_days.max(1)]
+            } else {
+                Vec::new()
+            },
+            daily_count_group_threshold,
+            daily_count_person_threshold,
+            daily_count_group_excess_total: 0,
+            daily_count_person_excess_total: 0,
+            daily_count_rules,
             teaching_load_week: if track_teaching_load {
                 vec![0; n_persons.max(1) * weeks]
             } else {
@@ -1848,6 +1920,192 @@ impl Aggregates {
                 if Self::span_excess_u8(
                     &self.span_person_slot[row + start..row + end],
                     self.span_person_threshold,
+                ) > 0
+                {
+                    cost += person_weight;
+                }
+            }
+        }
+        cost
+    }
+
+    // -- max daily session count -------------------------------------------------
+
+    pub fn daily_count_rules(&self) -> &[MaxDailySessionCountInstance] {
+        &self.daily_count_rules
+    }
+
+    #[inline]
+    fn daily_count_excess(count: u32, threshold: u32) -> u32 {
+        count.saturating_sub(threshold)
+    }
+
+    /// The count-excess DELTA `MaxDailySessionCount` would experience if
+    /// `groups` gained one more Session on `day` — the read-only preview,
+    /// mirroring [`Self::group_span_delta`] but a plain +1 rather than a
+    /// span/gap recompute, since a raw count needs no slot-level detail.
+    pub fn group_daily_count_delta(&self, groups: &[GroupIdx], day: u32) -> i64 {
+        if self.daily_count_group.is_empty() {
+            return 0;
+        }
+        let mut delta = 0i64;
+        for &g in groups {
+            let c = g.get() * self.n_days + day as usize;
+            let before = Self::daily_count_excess(
+                self.daily_count_group[c],
+                self.daily_count_group_threshold,
+            );
+            let after = Self::daily_count_excess(
+                self.daily_count_group[c] + 1,
+                self.daily_count_group_threshold,
+            );
+            delta += i64::from(after) - i64::from(before);
+        }
+        delta
+    }
+
+    /// See [`Self::group_daily_count_delta`]; the Person counterpart.
+    pub fn person_daily_count_delta(&self, persons: &[PersonIdx], day: u32) -> i64 {
+        if self.daily_count_person.is_empty() {
+            return 0;
+        }
+        let mut delta = 0i64;
+        for &p in persons {
+            let c = p.get() * self.n_days + day as usize;
+            let before = Self::daily_count_excess(
+                self.daily_count_person[c],
+                self.daily_count_person_threshold,
+            );
+            let after = Self::daily_count_excess(
+                self.daily_count_person[c] + 1,
+                self.daily_count_person_threshold,
+            );
+            delta += i64::from(after) - i64::from(before);
+        }
+        delta
+    }
+
+    pub fn add_group_daily_count(&mut self, groups: &[GroupIdx], day: u32) {
+        if self.daily_count_group.is_empty() {
+            return;
+        }
+        for &g in groups {
+            let c = g.get() * self.n_days + day as usize;
+            let before = Self::daily_count_excess(
+                self.daily_count_group[c],
+                self.daily_count_group_threshold,
+            );
+            self.daily_count_group[c] += 1;
+            let after = Self::daily_count_excess(
+                self.daily_count_group[c],
+                self.daily_count_group_threshold,
+            );
+            self.daily_count_group_excess_total = (i64::from(self.daily_count_group_excess_total)
+                + i64::from(after)
+                - i64::from(before)) as u32;
+        }
+    }
+
+    pub fn remove_group_daily_count(&mut self, groups: &[GroupIdx], day: u32) {
+        if self.daily_count_group.is_empty() {
+            return;
+        }
+        for &g in groups {
+            let c = g.get() * self.n_days + day as usize;
+            let before = Self::daily_count_excess(
+                self.daily_count_group[c],
+                self.daily_count_group_threshold,
+            );
+            self.daily_count_group[c] = self.daily_count_group[c].saturating_sub(1);
+            let after = Self::daily_count_excess(
+                self.daily_count_group[c],
+                self.daily_count_group_threshold,
+            );
+            self.daily_count_group_excess_total = (i64::from(self.daily_count_group_excess_total)
+                + i64::from(after)
+                - i64::from(before)) as u32;
+        }
+    }
+
+    pub fn add_person_daily_count(&mut self, persons: &[PersonIdx], day: u32) {
+        if self.daily_count_person.is_empty() {
+            return;
+        }
+        for &p in persons {
+            let c = p.get() * self.n_days + day as usize;
+            let before = Self::daily_count_excess(
+                self.daily_count_person[c],
+                self.daily_count_person_threshold,
+            );
+            self.daily_count_person[c] += 1;
+            let after = Self::daily_count_excess(
+                self.daily_count_person[c],
+                self.daily_count_person_threshold,
+            );
+            self.daily_count_person_excess_total = (i64::from(self.daily_count_person_excess_total)
+                + i64::from(after)
+                - i64::from(before)) as u32;
+        }
+    }
+
+    pub fn remove_person_daily_count(&mut self, persons: &[PersonIdx], day: u32) {
+        if self.daily_count_person.is_empty() {
+            return;
+        }
+        for &p in persons {
+            let c = p.get() * self.n_days + day as usize;
+            let before = Self::daily_count_excess(
+                self.daily_count_person[c],
+                self.daily_count_person_threshold,
+            );
+            self.daily_count_person[c] = self.daily_count_person[c].saturating_sub(1);
+            let after = Self::daily_count_excess(
+                self.daily_count_person[c],
+                self.daily_count_person_threshold,
+            );
+            self.daily_count_person_excess_total = (i64::from(self.daily_count_person_excess_total)
+                + i64::from(after)
+                - i64::from(before)) as u32;
+        }
+    }
+
+    /// What the currently over-cap daily Session counts cost, at the
+    /// configured weight(s). Mirrors [`Self::max_daily_span_cost`].
+    pub fn max_daily_session_count_cost(&self, group_weight: f64, person_weight: f64) -> f64 {
+        self.daily_count_group_excess_total as f64 * group_weight
+            + self.daily_count_person_excess_total as f64 * person_weight
+    }
+
+    /// Sum of `weight` over every currently over-cap `(entity, day)` cell
+    /// this occupant participates in, for `ruin_worst`'s attribution. Mirrors
+    /// [`Self::max_daily_span_ruin_cost`].
+    pub fn max_daily_session_count_ruin_cost(
+        &self,
+        groups: &[GroupIdx],
+        persons: &[PersonIdx],
+        day: u32,
+        group_weight: f64,
+        person_weight: f64,
+    ) -> f64 {
+        let mut cost = 0.0;
+        if group_weight != 0.0 && !self.daily_count_group.is_empty() {
+            for &g in groups {
+                let c = g.get() * self.n_days + day as usize;
+                if Self::daily_count_excess(
+                    self.daily_count_group[c],
+                    self.daily_count_group_threshold,
+                ) > 0
+                {
+                    cost += group_weight;
+                }
+            }
+        }
+        if person_weight != 0.0 && !self.daily_count_person.is_empty() {
+            for &p in persons {
+                let c = p.get() * self.n_days + day as usize;
+                if Self::daily_count_excess(
+                    self.daily_count_person[c],
+                    self.daily_count_person_threshold,
                 ) > 0
                 {
                     cost += person_weight;
@@ -3328,6 +3586,7 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
             1,
             vec![],
             1,
@@ -3366,6 +3625,7 @@ mod tests {
             vec![],
             0,
             0,
+            vec![],
             vec![],
             vec![],
             vec![],
@@ -3429,6 +3689,7 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
             1,
             vec![],
             1,
@@ -3453,6 +3714,7 @@ mod tests {
             vec![],
             0,
             0,
+            vec![],
             vec![],
             vec![],
             vec![],
@@ -3500,6 +3762,7 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
             1,
             vec![],
             1,
@@ -3539,6 +3802,7 @@ mod tests {
             vec![],
             0,
             0,
+            vec![],
             vec![],
             vec![],
             vec![],
@@ -3598,6 +3862,7 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
             1,
             vec![],
             1,
@@ -3634,6 +3899,7 @@ mod tests {
             vec![],
             0,
             0,
+            vec![],
             vec![],
             vec![],
             vec![],
@@ -3692,6 +3958,7 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
             1,
             vec![],
             1,
@@ -3741,6 +4008,7 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
             1,
             vec![],
             1,
@@ -3769,6 +4037,7 @@ mod tests {
             vec![compactness_rule(false, true)],
             0,
             0,
+            vec![],
             vec![],
             vec![],
             vec![],
@@ -3819,6 +4088,7 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
             1,
             vec![],
             1,
@@ -3849,6 +4119,7 @@ mod tests {
             vec![compactness_rule(true, false)],
             0,
             0,
+            vec![],
             vec![],
             vec![],
             vec![],
@@ -3894,6 +4165,7 @@ mod tests {
             vec![compactness_rule(true, false)],
             0,
             0,
+            vec![],
             vec![],
             vec![],
             vec![],
@@ -3954,6 +4226,7 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
             1,
             vec![],
             1,
@@ -3984,6 +4257,7 @@ mod tests {
             1,
             2,
             vec![pattern_rule()],
+            vec![],
             vec![],
             vec![],
             vec![],
@@ -4031,6 +4305,7 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
             1,
             vec![],
             1,
@@ -4071,6 +4346,7 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
             1,
             vec![],
             1,
@@ -4103,6 +4379,7 @@ mod tests {
             1,
             vec![],
             vec![pattern_rule()],
+            vec![],
             vec![],
             vec![],
             vec![],
@@ -4153,6 +4430,7 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            vec![],
             1,
             vec![],
             1,
@@ -4189,6 +4467,7 @@ mod tests {
             2,
             vec![],
             vec![pattern_rule()],
+            vec![],
             vec![],
             vec![],
             vec![],

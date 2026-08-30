@@ -278,6 +278,7 @@ pub fn all_constraints() -> ConstraintSet {
         protected_block: Vec::new(),
         max_consecutive_blocks: Vec::new(),
         max_daily_span: Vec::new(),
+        max_daily_session_count: Vec::new(),
         max_weekly_teaching_load: Vec::new(),
         exam_spacing_same_day: Vec::new(),
         exam_spacing_window: Vec::new(),

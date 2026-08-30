@@ -369,6 +369,12 @@ pub struct Objective {
     /// cell and already multiplied by each axis's configured weight — same
     /// "belongs to a day, not a placement" reason for living outside `soft`.
     pub max_daily_span_cost: f64,
+    /// Sessions charged over a daily count cap longer than the configured
+    /// max, summed over every currently-occupied `(Group-or-Person, day)`
+    /// cell and already multiplied by each axis's configured weight — same
+    /// "belongs to a day, not a placement" reason `max_daily_span_cost`
+    /// lives outside `soft`.
+    pub max_daily_session_count_cost: f64,
     /// Sessions/blocks charged over a weekly cap per lecturer, summed over
     /// every currently-loaded `(lecturer, week)` cell and already multiplied
     /// by the configured weight. Same "belongs to a week, not a placement"
@@ -443,6 +449,7 @@ impl Objective {
             + self.compactness_cost
             + self.max_consecutive_cost
             + self.max_daily_span_cost
+            + self.max_daily_session_count_cost
             + self.max_weekly_teaching_load_cost
             + self.exam_same_day_cost
             + self.exam_window_cost
@@ -664,6 +671,7 @@ mod tests {
             compactness_cost: 0.0,
             max_consecutive_cost: 0.0,
             max_daily_span_cost: 0.0,
+            max_daily_session_count_cost: 0.0,
             max_weekly_teaching_load_cost: 0.0,
             exam_same_day_cost: 0.0,
             exam_window_cost: 0.0,
@@ -683,6 +691,7 @@ mod tests {
             compactness_cost: 0.0,
             max_consecutive_cost: 0.0,
             max_daily_span_cost: 0.0,
+            max_daily_session_count_cost: 0.0,
             max_weekly_teaching_load_cost: 0.0,
             exam_same_day_cost: 0.0,
             exam_window_cost: 0.0,
@@ -719,6 +728,7 @@ mod tests {
             compactness_cost: 0.0,
             max_consecutive_cost: 0.0,
             max_daily_span_cost: 0.0,
+            max_daily_session_count_cost: 0.0,
             max_weekly_teaching_load_cost: 0.0,
             exam_same_day_cost: 0.0,
             exam_window_cost: 0.0,
@@ -738,6 +748,7 @@ mod tests {
             compactness_cost: 0.0,
             max_consecutive_cost: 0.0,
             max_daily_span_cost: 0.0,
+            max_daily_session_count_cost: 0.0,
             max_weekly_teaching_load_cost: 0.0,
             exam_same_day_cost: 0.0,
             exam_window_cost: 0.0,
