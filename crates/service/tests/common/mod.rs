@@ -186,6 +186,24 @@ pub fn scope(ids: &[&str]) -> pb::SolveScope {
         outside_scope_policy: pb::LockPolicy::Hard as i32,
         minimize_movement_weight: 0.0,
         minimize_inscope_movement_weight: 0.0,
+        movement_overrides: vec![],
+    }
+}
+
+/// A per-Person movement override (issue #70) on top of `weight`-scoped
+/// in-scope movement pressure — the shape a repair-mode selector sends.
+pub fn person_movement_override(id: &str, weight: f64) -> pb::MovementOverride {
+    pb::MovementOverride {
+        target: Some(pb::movement_override::Target::PersonId(id.to_string())),
+        weight,
+    }
+}
+
+/// The Group counterpart of [`person_movement_override`].
+pub fn group_movement_override(id: &str, weight: f64) -> pb::MovementOverride {
+    pb::MovementOverride {
+        target: Some(pb::movement_override::Target::GroupId(id.to_string())),
+        weight,
     }
 }
 

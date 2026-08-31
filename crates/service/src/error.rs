@@ -178,6 +178,18 @@ pub enum ConvertError {
          LOCK_POLICY_MINIMIZE_MOVEMENT"
     )]
     LockPolicyUnset,
+    #[error(
+        "scope.movement_overrides[{index}] has weight {weight}; it must be >= 0 for the same \
+         reason every other movement weight must be — it declares minimize, and a negative \
+         weight would reward moving the very Sessions it was sent to protect"
+    )]
+    NegativeMovementOverrideWeight { index: usize, weight: f64 },
+    #[error(
+        "scope.movement_overrides[{index}] sets neither person_id nor group_id; an override with \
+         no target cannot apply to anything, and silently dropping it would report a run as \
+         respecting a protection it never had"
+    )]
+    MovementOverrideWithoutTarget { index: usize },
 
     // -- deliberately not built yet ------------------------------------------
     //

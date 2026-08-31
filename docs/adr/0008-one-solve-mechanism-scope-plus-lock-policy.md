@@ -113,3 +113,83 @@ Not addressed by this: the churn *measurement* harness itself
 confirm the gap was real, not to track this fix's effect, and re-running it
 with the new weight configured is future work if the effect size is ever
 worth a documented number.
+
+## Per-entity movement overrides, landed (issue #70)
+
+Both weights above are run-wide: one number for everything outside the scope,
+one for everything inside it. Issue #70 asked for the axis they cannot express
+— a repair-mode selector marking specific People and Groups as fine to move,
+or as "please don't unless nothing else resolves this".
+
+**Chosen: a third field on the SAME mechanism.**
+`SolveScope.movement_overrides` (`calendry-proto`, `SolveScope` field 6) is a
+list of `MovementOverride { oneof target { person_id | group_id }, weight }`,
+and an entry covering a placement REPLACES whichever of the two weights above
+would otherwise have applied to it. Same `original` field, same
+`Problem::movement_cost` charge, same wiring downstream — nothing new on the
+objective, and no new term for `hard_penalty` to bound beyond a larger
+ceiling.
+
+**One number, not a movable/unmovable flag plus a weight.** The issue names
+two settings; replacement makes both fall out of one field. `weight: 0` is
+"movable, no extra cost" *even under a large run-wide weight*, which is
+precisely what a flag-plus-weight shape would need a special case for, and a
+large weight is soft-unmovable. Note what this is NOT: still SOFT, so unlike a
+Session `lock` it can never prevent a move. That distinction is the whole
+reason the issue exists — a hard lock already existed and was too blunt.
+
+**Replacement, not `max`, and not a multiplier.** `max(base, override)` can
+only ever protect more, so "movable, no extra cost" becomes inexpressible the
+moment the run-wide weight is nonzero — half the ask, gone. A multiplier makes
+`override × 0` and `base == 0` indistinguishable and forces the app to reason
+about a product.
+
+**On `SolveScope`, not on `Person`/`Group`, and not a `ConstraintConfig`.** It
+is per-RUN policy: the same lecturer is protected in the repair that must not
+disturb their week and freely movable in the end-of-term rebuild. Putting it on
+the entity would make that a data edit before every run. A constraint type was
+never available — ADR-0028 records that a `ConstraintConfig` carries policy and
+has never named a specific entity, which is the whole reason
+`OfferingRelation` is its own message.
+
+**Scope on each axis follows an existing precedent rather than inventing one:**
+
+- A `person_id` covers Sessions that Person **LECTURES**, never ones they merely
+  attend — ADR-0026's decision for `PersonPreferenceFit`, for its reason: an
+  attendee set averages ~65 people at benchmark scale, so an attendee reading
+  would leave nearly every Session in a real instance overridden. A student's
+  protection goes through their Group.
+- A `group_id` binds that Group **and its descendants**, so the query walks UP
+  — `GroupClosure::expand_ancestry`, exactly as `GroupVeto` does (ADR-0027),
+  and deliberately not the both-directions propagation double-booking uses. A
+  protected programme protects its cohorts' Sessions; a protected seminar group
+  does not protect the lecture its whole cohort attends.
+- Several overrides covering one Session: **the LARGEST weight wins.**
+  Order-independent, so the answer cannot depend on the order the app sent
+  them, and a broader "movable" never silently defeats a narrower protection.
+
+**Resolved once per Offering at build time, into
+`Problem::offering_movement_weight`.** An Offering's lecturers, Groups and
+scope are all fixed before the search starts, so the answer cannot change
+mid-run — which is what lets `movement_cost` keep its `(placement, start,
+room)` signature and stay one indexed read on the hottest path in the solver.
+
+**The one approximation, and which direction it errs.** A genuine lecturer POOL
+has no fixed lecturer set — that is a search-time choice — so an exact answer
+would have to be priced per candidate, the trap ADR-0026 records for the
+preference table. Instead an override matching ANY candidate covers the
+Offering. That over-protects rather than under-protects, which is the safe
+direction for a soft bias: a protected person's Session stays protected
+whichever pool member ends up teaching it.
+
+**`hard_penalty` had to grow.** Its bound is "each term costs at most its own
+ceiling per placement", and an override replaces the base, so the ceiling
+moved. The largest configured override is now folded in alongside both base
+weights — looser than necessary, safe for the same reason the other two terms
+are, and guarded by a test that a protected Session sitting still cannot
+outrank an unplaced one.
+
+**What this does NOT do: it cannot un-lock anything.** Under
+`LOCK_POLICY_HARD` an out-of-scope Session is `FixedSpec` occupancy with no
+`PlacementVar` at all, so there is nothing for an override to charge.
+Movability stays the lock policy's question; an override only prices it.

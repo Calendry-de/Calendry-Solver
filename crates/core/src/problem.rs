@@ -1097,10 +1097,46 @@ pub struct ProblemSpec {
     /// targeted repair was not asked to touch" (in-scope) are different
     /// products sharing one mechanism. See [`Problem::movement_cost`].
     pub in_scope_movement_weight: f64,
+    /// Per-entity exceptions to the two weights above — see
+    /// [`MovementOverrides`]. Empty leaves both behaving exactly as they did
+    /// before this existed.
+    pub movement_overrides: MovementOverrides,
     /// The grid's wall-clock gap structure — see [`GridTime`]. Defaults to
     /// no gaps anywhere, which is inert unless `MinimizeBreakSpanning` or
     /// `Daybreak` is configured.
     pub grid_time: GridTime,
+}
+
+/// Which Persons' and Groups' Sessions carry their OWN movement weight
+/// instead of the run-wide one (issue #70).
+///
+/// A repair-mode selector: some people and cohorts are fine to move, others
+/// should be disturbed only if nothing else resolves the repair. Both are one
+/// number — `0.0` is "movable, no extra cost" even under a large run-wide
+/// weight, and a large value is soft-unmovable. It stays SOFT: unlike a
+/// Session lock, an override can never prevent a move, only price it.
+///
+/// **A `persons` entry covers Sessions that Person LECTURES**, never ones
+/// they merely attend — the scope decision ADR-0026 records for
+/// `PersonPreferenceFit`, for the same reason (an attendee set averages ~65
+/// people at benchmark scale, so an attendee reading would leave nearly every
+/// Session overridden). A student's protection goes through their Group.
+///
+/// **A `groups` entry binds that Group and its DESCENDANTS**, so a Session
+/// attached to `g` is covered by an entry on `g` or on any ancestor of `g` —
+/// resolved through [`crate::groups::GroupClosure::expand_ancestry`], the
+/// same downward-binding direction `GroupVeto` uses and deliberately NOT the
+/// both-directions propagation double-booking uses (ADR-0027).
+#[derive(Clone, Debug, Default)]
+pub struct MovementOverrides {
+    pub persons: Vec<(PersonIdx, f64)>,
+    pub groups: Vec<(GroupIdx, f64)>,
+}
+
+impl MovementOverrides {
+    pub fn is_empty(&self) -> bool {
+        self.persons.is_empty() && self.groups.is_empty()
+    }
 }
 
 impl ProblemSpec {
@@ -1119,6 +1155,7 @@ impl ProblemSpec {
             scope: ScopeSpec::All,
             movement_weight: 0.0,
             in_scope_movement_weight: 0.0,
+            movement_overrides: MovementOverrides::default(),
             grid_time: GridTime::default(),
         }
     }
@@ -1321,6 +1358,13 @@ pub struct Problem {
     pub movement_weight: f64,
     /// See [`ProblemSpec::in_scope_movement_weight`].
     pub in_scope_movement_weight: f64,
+    /// Which movement weight each Offering's placements actually pay, indexed
+    /// by [`OfferingIdx`] — the two weights above already resolved against
+    /// scope and against any [`MovementOverrides`] entry covering the
+    /// Offering's lecturers or Groups. Precomputed because none of those
+    /// inputs can change during a run, which is what keeps
+    /// [`Problem::movement_cost`] a single indexed read.
+    offering_movement_weight: Vec<f64>,
     /// Summed weight of every configured `Compactness` instance covering the
     /// Group axis. Zero when not configured, or when no instance selects it —
     /// see [`crate::aggregates::CompactnessInstance::group`].
@@ -1460,6 +1504,7 @@ impl Problem {
             scope,
             movement_weight,
             in_scope_movement_weight,
+            movement_overrides,
             grid_time,
         } = spec;
 
@@ -1952,7 +1997,11 @@ impl Problem {
          * nothing, which only widens the bound. `in_scope_movement_weight` is
          * the same shape one axis over; the two can never both charge the
          * SAME placement (a placement is in scope or is not), so summing both
-         * ceilings is a safe bound, if not the tightest one.
+         * ceilings is a safe bound, if not the tightest one. A per-entity
+         * override (issue #70) REPLACES whichever of the two applies, so one
+         * placement's true ceiling is `max(base, override)` — bounded by
+         * adding the largest override configured, which is looser than
+         * necessary and safe for the same reason the other two are.
          *
          * THE CAPACITY-WASTE TERM IS BOUNDED THE SAME WAY `MinimizeRoomRank`
          * IS: `capacity_waste_cost`'s saturating curve caps each covering
@@ -1967,11 +2016,18 @@ impl Problem {
          * weight is the per-placement ceiling, same shape as
          * `capacity_waste_weight`.
          */
+        let max_movement_override = movement_overrides
+            .persons
+            .iter()
+            .map(|&(_, w)| w)
+            .chain(movement_overrides.groups.iter().map(|&(_, w)| w))
+            .fold(0.0_f64, f64::max);
         let hard_penalty = soft.total_weight * placements.len() as f64
             + preferences.max_cost_per_placement() * placements.len() as f64
             + day_mix_weight * aggregate_template.day_mix_cell_count() as f64
             + movement_weight * placements.len() as f64
             + in_scope_movement_weight * placements.len() as f64
+            + max_movement_override * placements.len() as f64
             + capacity_waste_weight * placements.len() as f64
             + break_spanning_weight * placements.len() as f64
             // Read off `(group, day)` cell counts, exactly like day_mix_weight
@@ -1994,6 +2050,61 @@ impl Problem {
                 flags
             }
         };
+
+        // Which movement weight each Offering's placements pay (issue #70).
+        //
+        // Resolved once per Offering rather than read per move: an Offering's
+        // lecturers and Groups are fixed before the search starts, and so is
+        // its scope, so the answer cannot change. That is what lets
+        // `movement_cost` keep its `(placement, start, room)` signature and
+        // stay a single indexed read on the hottest path there is.
+        //
+        // A genuine lecturer POOL is the one place this is approximate, and
+        // deliberately so: which candidate teaches a Session is a search-time
+        // choice, so an exact answer would have to be priced per candidate —
+        // the trap ADR-0026 records for the preference table. Instead an
+        // override matching ANY candidate covers the Offering, which
+        // over-protects rather than under-protects. That is the safe
+        // direction for a soft bias: a protected person's Session stays
+        // protected whichever pool member ends up teaching it.
+        let offering_movement_weight: Vec<f64> = derived_offerings
+            .iter()
+            .enumerate()
+            .map(|(i, o)| {
+                let base = if in_scope[i] { in_scope_movement_weight } else { movement_weight };
+                if movement_overrides.is_empty() {
+                    return base;
+                }
+                let lecturers = o.lecturers.iter().copied().chain(
+                    o.eligible_lecturer_combinations
+                        .iter()
+                        .flatten()
+                        .flatten()
+                        .copied(),
+                );
+                // A Group's protection binds downward, so the QUERY walks up
+                // — `expand_ancestry`, exactly as `GroupVeto` does and never
+                // `expand_subtree`/`expand_conflict` (ADR-0027).
+                let ancestry = closure.expand_ancestry(&o.own_groups);
+                let matched = movement_overrides
+                    .persons
+                    .iter()
+                    .filter(|(p, _)| lecturers.clone().any(|l| l == *p))
+                    .map(|&(_, w)| w)
+                    .chain(
+                        movement_overrides
+                            .groups
+                            .iter()
+                            .filter(|(g, _)| ancestry.contains(g))
+                            .map(|&(_, w)| w),
+                    )
+                    // The LARGEST wins: order-independent, so it cannot
+                    // depend on the order the caller sent them, and a broader
+                    // "movable" never silently defeats a narrower protection.
+                    .fold(f64::NEG_INFINITY, f64::max);
+                if matched.is_finite() { matched } else { base }
+            })
+            .collect();
 
         let mut placement_counts = vec![0u32; n];
         for var in &placements {
@@ -2029,6 +2140,7 @@ impl Problem {
             max_concurrent_online,
             movement_weight,
             in_scope_movement_weight,
+            offering_movement_weight,
             compactness_group_weight,
             compactness_person_weight,
             max_consecutive_group_weight,
@@ -2163,22 +2275,26 @@ impl Problem {
     /// who leads the placement, only on where it already was, so a direct
     /// compare is most of the computation.
     ///
-    /// Which of the two weights applies is `p`'s Offering's SCOPE, not
-    /// whether `original` happens to be set: `movement_weight` for an
-    /// out-of-scope Session made movable by `LOCK_POLICY_MINIMIZE_MOVEMENT`,
-    /// `in_scope_movement_weight` for an in-scope Session reused by a
-    /// targeted repair. The two never charge the same placement, since a
-    /// placement's Offering is in scope or is not.
+    /// Which weight applies is `p`'s Offering's SCOPE, not whether `original`
+    /// happens to be set: `movement_weight` for an out-of-scope Session made
+    /// movable by `LOCK_POLICY_MINIMIZE_MOVEMENT`, `in_scope_movement_weight`
+    /// for an in-scope Session reused by a targeted repair. The two never
+    /// charge the same placement, since a placement's Offering is in scope or
+    /// is not — and a [`MovementOverrides`] entry covering the Offering
+    /// REPLACES whichever of the two it would have been. All three are
+    /// already collapsed into `offering_movement_weight` at build time, so
+    /// this stays one indexed read.
+    ///
+    /// An override cannot make a HARD-locked Session movable: under
+    /// `LOCK_POLICY_HARD` an out-of-scope Session is `FixedSpec` occupancy
+    /// with no `PlacementVar` at all, so there is nothing here to charge.
+    /// Movability is the lock policy's question; this only prices it.
     #[inline]
     pub fn movement_cost(&self, p: PlacementIdx, start: SlotIdx, room: RoomIdx) -> f64 {
         let var = &self.placements[p.get()];
         match var.original {
             Some(original) if original != (start, Some(room)) => {
-                if self.in_scope(var.offering) {
-                    self.in_scope_movement_weight
-                } else {
-                    self.movement_weight
-                }
+                self.offering_movement_weight[var.offering.get()]
             }
             _ => 0.0,
         }
@@ -2625,5 +2741,155 @@ mod tests {
         // `movement_cost` ever mixed the two up, this would charge nothing.
         let p = Problem::build(in_scope_movable_spec(3.0)).unwrap();
         assert_eq!(p.movement_cost(PlacementIdx(0), SlotIdx(1), RoomIdx(0)), 3.0);
+    }
+
+    // -- per-entity movement overrides (issue #70) --------------------------
+
+    fn person(id: &str, groups: &[u32]) -> Person {
+        Person {
+            id: id.into(),
+            role_tags: vec!["lecturer".into()],
+            groups: groups.iter().map(|&g| GroupIdx(g)).collect(),
+            blackouts: vec![],
+            preferred: None,
+        }
+    }
+
+    /// `in_scope_movable_spec` with a two-level Group tree (`programme` ->
+    /// `cohort`), one lecturer, and the Offering attached to the LEAF Group.
+    /// Both axes an override can arrive on are then live at once.
+    fn overridable_spec(base: f64) -> ProblemSpec {
+        let mut spec = in_scope_movable_spec(base);
+        spec.groups = vec![group("programme", None), group("cohort", Some(0))];
+        spec.persons = vec![person("lecturer", &[]), person("other", &[])];
+        spec.offerings[0].lecturers = vec![PersonIdx(0)];
+        spec.offerings[0].groups = vec![GroupIdx(1)];
+        spec
+    }
+
+    /// The cost of moving the one placement, which is all these assert on.
+    fn moved(spec: ProblemSpec) -> f64 {
+        Problem::build(spec)
+            .unwrap()
+            .movement_cost(PlacementIdx(0), SlotIdx(1), RoomIdx(0))
+    }
+
+    #[test]
+    fn no_override_leaves_the_scope_wide_weight_untouched() {
+        assert_eq!(moved(overridable_spec(3.0)), 3.0);
+    }
+
+    #[test]
+    fn a_person_override_replaces_the_scope_wide_weight_for_a_session_they_lecture() {
+        let mut spec = overridable_spec(3.0);
+        spec.movement_overrides.persons = vec![(PersonIdx(0), 50.0)];
+        assert_eq!(moved(spec), 50.0, "replaces, never adds to or scales, the base");
+    }
+
+    #[test]
+    fn a_person_override_of_zero_makes_a_session_free_to_move() {
+        // Half the issue's ask: "movable, no extra cost" has to survive a
+        // large scope-wide weight, which is why an override REPLACES rather
+        // than maxes against the base.
+        let mut spec = overridable_spec(500.0);
+        spec.movement_overrides.persons = vec![(PersonIdx(0), 0.0)];
+        assert_eq!(moved(spec), 0.0);
+    }
+
+    #[test]
+    fn an_override_naming_someone_who_does_not_lecture_this_offering_is_inert() {
+        let mut spec = overridable_spec(3.0);
+        spec.movement_overrides.persons = vec![(PersonIdx(1), 50.0)];
+        assert_eq!(moved(spec), 3.0);
+    }
+
+    #[test]
+    fn a_group_override_covers_a_session_attached_to_that_group() {
+        let mut spec = overridable_spec(3.0);
+        spec.movement_overrides.groups = vec![(GroupIdx(1), 50.0)];
+        assert_eq!(moved(spec), 50.0);
+    }
+
+    #[test]
+    fn a_group_override_binds_downward_so_an_ancestors_entry_covers_a_descendants_session() {
+        // Declared on the PROGRAMME, and the Offering is attached to the
+        // COHORT beneath it. `expand_ancestry`, exactly as `GroupVeto` does
+        // (ADR-0027) — a protected programme protects its cohorts.
+        let mut spec = overridable_spec(3.0);
+        spec.movement_overrides.groups = vec![(GroupIdx(0), 50.0)];
+        assert_eq!(moved(spec), 50.0);
+    }
+
+    #[test]
+    fn a_group_override_does_not_bind_upward() {
+        // The mirror of the test above, and the reason `expand_subtree` and
+        // `expand_conflict` are both wrong here: an entry on the cohort must
+        // not protect a Session the whole programme attends.
+        let mut spec = overridable_spec(3.0);
+        spec.offerings[0].groups = vec![GroupIdx(0)];
+        spec.movement_overrides.groups = vec![(GroupIdx(1), 50.0)];
+        assert_eq!(moved(spec), 3.0);
+    }
+
+    #[test]
+    fn the_largest_matching_override_wins() {
+        // Order-independent, so it cannot depend on the order the caller sent
+        // them — asserted in both orders — and a broader "movable" never
+        // silently defeats a narrower protection.
+        let mut spec = overridable_spec(3.0);
+        spec.movement_overrides.persons = vec![(PersonIdx(0), 0.0)];
+        spec.movement_overrides.groups = vec![(GroupIdx(1), 50.0)];
+        assert_eq!(moved(spec), 50.0);
+
+        let mut spec = overridable_spec(3.0);
+        spec.movement_overrides.persons = vec![(PersonIdx(0), 50.0)];
+        spec.movement_overrides.groups = vec![(GroupIdx(1), 0.0)];
+        assert_eq!(moved(spec), 50.0);
+    }
+
+    #[test]
+    fn a_lecturer_pool_candidate_is_enough_to_carry_the_override() {
+        // Deliberately conservative: which pool candidate teaches a Session
+        // is a search-time choice, so an exact answer would need pricing per
+        // candidate (the trap ADR-0026 records for the preference table).
+        // Matching ANY candidate over-protects rather than under-protects,
+        // which is the safe direction for a soft bias.
+        let mut spec = overridable_spec(3.0);
+        spec.offerings[0].lecturers = vec![];
+        spec.offerings[0].eligible_lecturer_combinations = vec![
+            [Some(PersonIdx(1)), None, None, None],
+            [Some(PersonIdx(0)), None, None, None],
+        ];
+        spec.movement_overrides.persons = vec![(PersonIdx(0), 50.0)];
+        assert_eq!(moved(spec), 50.0);
+    }
+
+    #[test]
+    fn an_override_still_charges_nothing_without_an_original() {
+        // An override prices a move; it cannot invent one. A brand-new
+        // Session has nowhere it "already was", so there is nothing to
+        // charge — the same reason a HARD-locked Session is untouched by
+        // this, having no `PlacementVar` at all.
+        let mut spec = overridable_spec(3.0);
+        spec.placements[0].original = None;
+        spec.movement_overrides.persons = vec![(PersonIdx(0), 50.0)];
+        assert_eq!(moved(spec), 0.0);
+    }
+
+    #[test]
+    fn hard_penalty_still_dominates_an_override_larger_than_both_base_weights() {
+        // The bound `hard_penalty` relies on is "each term costs at most its
+        // own ceiling per placement". An override replaces the base, so the
+        // ceiling moved — if `hard_penalty` had not folded the largest
+        // override in, a protected Session sitting still could outrank an
+        // unplaced one.
+        let mut spec = overridable_spec(1.0);
+        spec.movement_overrides.persons = vec![(PersonIdx(0), 1_000.0)];
+        let p = Problem::build(spec).unwrap();
+        assert!(
+            p.hard_penalty > p.movement_cost(PlacementIdx(0), SlotIdx(1), RoomIdx(0)),
+            "hard_penalty {} must dominate one placement's movement cost",
+            p.hard_penalty
+        );
     }
 }

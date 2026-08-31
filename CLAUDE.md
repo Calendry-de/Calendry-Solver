@@ -96,7 +96,7 @@ the behaviour they exercise, and kept separate from the generator on purpose
 ```bash
 git clone --recurse-submodules …     # or: git submodule update --init --recursive
 
-cargo test --workspace               # 582 tests
+cargo test --workspace               # 603 tests
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo fmt --all --check
 
@@ -216,6 +216,21 @@ Session now ALSO carries an `original`, charged by the independent
 scope. Closes the measured gap (36–100% churn on a targeted repair) without
 the larger, session-level-scope redesign the tracking card also considered;
 see ADR-0008's "In-scope stay-put pressure, landed" addendum for why.
+
+**Per-entity movement overrides are built (issue #70).** Both weights above
+are run-wide; `SolveScope.movement_overrides` is the per-entity exception —
+`{ oneof target { person_id | group_id }, weight }`, and a matching entry
+REPLACES whichever run-wide weight would have applied. Still SOFT: unlike a
+Session `lock` it can never prevent a move, only price it. One number covers
+both settings the ticket asked for (`0` is "movable, no extra cost" even under
+a large run-wide weight; a large value is soft-unmovable). A `person_id`
+covers Sessions that Person LECTURES only (ADR-0026's scope decision); a
+`group_id` binds that Group and its DESCENDANTS, so the query walks up through
+`expand_ancestry` exactly as `GroupVeto` does (ADR-0027); the LARGEST matching
+entry wins. All resolved once per Offering into
+`Problem::offering_movement_weight`, so `movement_cost` stays one indexed
+read — which is also why a lecturer POOL is covered by ANY matching candidate
+rather than exactly. See ADR-0008's "Per-entity movement overrides" addendum.
 
 **Lecturer-pool selection is built.** `candidate_lecturer_ids.len() >
 required_lecturer_count` is a genuine choice, not a refusal: construction and

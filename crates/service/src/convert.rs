@@ -39,8 +39,8 @@ use calendry_solver_core::ids::{GroupIdx, OfferingIdx, PersonIdx, RoomIdx, SlotI
 use calendry_solver_core::preferences::{Preference, PreferenceInstance};
 use calendry_solver_core::problem::{
     CapacityWasteInstance, ConstraintInstance, ConstraintSet, FixedSpec, Immovable,
-    MaxConcurrentOnlineInstance, MinimizeBreakSpanningInstance, OfferingSpec, PlacementVar,
-    Problem, ProblemSpec, ProtectedBlockInstance, RelationKind, RelationSpec, Room,
+    MaxConcurrentOnlineInstance, MinimizeBreakSpanningInstance, MovementOverrides, OfferingSpec,
+    PlacementVar, Problem, ProblemSpec, ProtectedBlockInstance, RelationKind, RelationSpec, Room,
     SchedulingPattern, ScopeSpec, Unavailability, classify_immovable,
 };
 use calendry_solver_core::slots::{GridTime, SlotTable, WeekKind, WeekSpec};
@@ -68,6 +68,8 @@ pub fn convert(input: &pb::SolverInput, scope: &pb::SolveScope) -> Result<Proble
     let (groups, group_index) = build_groups(input)?;
     let persons = build_persons(input, &group_index)?;
     let person_index = index_by(&input.persons, |p| p.id.clone());
+
+    let movement_overrides = build_movement_overrides(scope, &group_index, &person_index)?;
 
     let reference = resolve_reference(input, &slots);
     let scope_offerings = resolve_scope(input, scope);
@@ -130,6 +132,7 @@ pub fn convert(input: &pb::SolverInput, scope: &pb::SolveScope) -> Result<Proble
         scope: ScopeSpec::Offerings(in_scope),
         movement_weight: lock_policy.movement_weight(),
         in_scope_movement_weight,
+        movement_overrides,
         grid_time,
         ..ProblemSpec::new(slots)
     })?)
@@ -275,6 +278,50 @@ fn resolve_scope(input: &pb::SolverInput, scope: &pb::SolveScope) -> HashSet<Str
         .filter(|o| by_id.contains(&o.id) || o.group_ids.iter().any(|g| by_group.contains(g)))
         .map(|o| o.id.clone())
         .collect()
+}
+
+/// Per-entity movement-weight overrides (issue #70).
+///
+/// Every fault here is an ERROR rather than a skip, and the reason is the same
+/// one `build_relations` gives for a dangling relation member: an override the
+/// caller sent and the solver silently dropped would let a run be reported as
+/// respecting a protection it never applied. That is worse than a refusal,
+/// because the app's own UI would show the person as protected.
+fn build_movement_overrides(
+    scope: &pb::SolveScope,
+    group_index: &HashMap<String, u32>,
+    person_index: &HashMap<String, u32>,
+) -> Result<MovementOverrides, ConvertError> {
+    use pb::movement_override::Target;
+
+    let groups = Resolver::new(group_index);
+    let persons = Resolver::new(person_index);
+    let mut out = MovementOverrides::default();
+
+    for (index, o) in scope.movement_overrides.iter().enumerate() {
+        if o.weight < 0.0 || o.weight.is_nan() {
+            return Err(ConvertError::NegativeMovementOverrideWeight { index, weight: o.weight });
+        }
+        match &o.target {
+            Some(Target::PersonId(id)) => {
+                let p = persons.require(id, PersonIdx, |person| ConvertError::UnknownPerson {
+                    context: format!("scope.movement_overrides[{index}]"),
+                    person,
+                })?;
+                out.persons.push((p, o.weight));
+            }
+            Some(Target::GroupId(id)) => {
+                let g = groups.require(id, GroupIdx, |group| ConvertError::UnknownGroup {
+                    context: format!("scope.movement_overrides[{index}]"),
+                    group,
+                })?;
+                out.groups.push((g, o.weight));
+            }
+            None => return Err(ConvertError::MovementOverrideWithoutTarget { index }),
+        }
+    }
+
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
