@@ -693,30 +693,9 @@ fn minimize_offering_distinct_days_is_unimplemented_not_invalid() {
     assert_eq!(code_of(&e), Code::Unimplemented);
 }
 
-#[test]
-fn travel_time_between_rooms_is_unimplemented_not_invalid() {
-    let mut input = base_input();
-    input.constraints.push(enabled(
-        "c-travel",
-        pb::constraint_config::Params::TravelTimeBetweenRooms(pb::TravelTimeBetweenRooms {
-            scope: vec![],
-            min_minutes_between_sites: 15,
-        }),
-    ));
-
-    let e = reject(&input, &scope(&[]));
-    assert!(
-        matches!(
-            &e,
-            ConvertError::ConstraintTypeUnimplemented {
-                constraint_type: "TravelTimeBetweenRooms",
-                ..
-            }
-        ),
-        "{e}"
-    );
-    assert_eq!(code_of(&e), Code::Unimplemented);
-}
+// `TravelTimeBetweenRooms` is now built — see
+// `crates/service/tests/travel_time_between_rooms.rs` and
+// `crates/core/tests/travel_time_between_rooms.rs` for its real behavior.
 
 // `MaxDays` and `MaxConsecutiveDays` are now built — see
 // `crates/service/tests/max_days.rs` and

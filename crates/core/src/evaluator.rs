@@ -139,6 +139,20 @@ fn score_one(problem: &Problem, solution: &Solution, state: &SearchState, mv: &M
         0.0
     };
 
+    // Same ranking-signal contract as `daybreak_penalty`.
+    let travel_penalty = if state.would_worsen_travel(problem, &candidate, &span) {
+        let mut w = 0.0;
+        if candidate.enforce.travel_group {
+            w += problem.travel_group_weight;
+        }
+        if candidate.enforce.travel_person {
+            w += problem.travel_person_weight;
+        }
+        w
+    } else {
+        0.0
+    };
+
     /*
      * OnlineOnsiteSameDay is soft, so it is priced here at its CONFIGURED
      * WEIGHT rather than at `hard_penalty` like the share cap above. That
@@ -253,6 +267,7 @@ fn score_one(problem: &Problem, solution: &Solution, state: &SearchState, mv: &M
             + max_days_penalty
             + max_consecutive_days_penalty
             + daybreak_penalty
+            + travel_penalty
             + day_mix_penalty
             + exam_same_day_penalty
             + exam_window_penalty

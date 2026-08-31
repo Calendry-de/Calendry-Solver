@@ -13,6 +13,7 @@ use crate::aggregates::{
     MaxWeeklyTeachingLoadInstance, MinimizeLocationChangeInstance,
     MinimizeOfferingDaySplitInstance, MinimizeRoomChurnInstance, MinimizeWeekdayImbalanceInstance,
     PatternAdherenceInstance, RoomConsistencyInstance, RoomTurnaroundBufferInstance, ShareInstance,
+    TravelTimeInstance,
 };
 use crate::bitset::BitSet;
 use crate::groups::{GroupClosure, GroupCycle};
@@ -397,6 +398,10 @@ pub struct ConstraintSet {
     /// last occupied block of one teaching day and their first of the next.
     /// See [`DaybreakInstance`].
     pub daybreak: Vec<DaybreakInstance>,
+    /// SOFT. Requires a minimum gap when a Group's or Person's consecutive
+    /// same-day placements are in Rooms whose `Room.location` differs. See
+    /// [`TravelTimeInstance`].
+    pub travel_time_between_rooms: Vec<TravelTimeInstance>,
 }
 
 /// One `ProtectedBlock` instance. The FIRST hard type whose values
@@ -525,6 +530,8 @@ pub struct Enforce {
     pub max_consecutive_days_person: bool,
     pub daybreak_group: bool,
     pub daybreak_person: bool,
+    pub travel_group: bool,
+    pub travel_person: bool,
 }
 
 impl ConstraintSet {
@@ -614,6 +621,14 @@ impl ConstraintSet {
                 .any(|c| c.person && c.covers(kind)),
             daybreak_group: self.daybreak.iter().any(|c| c.group && c.covers(kind)),
             daybreak_person: self.daybreak.iter().any(|c| c.person && c.covers(kind)),
+            travel_group: self
+                .travel_time_between_rooms
+                .iter()
+                .any(|c| c.group && c.covers(kind)),
+            travel_person: self
+                .travel_time_between_rooms
+                .iter()
+                .any(|c| c.person && c.covers(kind)),
         }
     }
 }
@@ -1273,6 +1288,12 @@ pub struct Problem {
     pub daybreak_group_weight: f64,
     /// The Person-axis counterpart of `daybreak_group_weight`.
     pub daybreak_person_weight: f64,
+    /// Summed weight of every configured `TravelTimeBetweenRooms` instance
+    /// covering the Group axis. Zero when not configured, or when no
+    /// instance selects it.
+    pub travel_group_weight: f64,
+    /// The Person-axis counterpart of `travel_group_weight`.
+    pub travel_person_weight: f64,
     /// Summed weight of every configured `MinimizeRoomChurn` instance. Zero
     /// when not configured.
     pub room_churn_weight: f64,
@@ -1546,6 +1567,7 @@ impl Problem {
             constraints.room_consistency.clone(),
             constraints.lecturer_consistency.clone(),
             constraints.daybreak.clone(),
+            constraints.travel_time_between_rooms.clone(),
         );
 
         let day_mix_weight: f64 = constraints
@@ -1672,6 +1694,18 @@ impl Problem {
             .sum();
         let daybreak_person_weight: f64 = constraints
             .daybreak
+            .iter()
+            .filter(|i| i.person)
+            .map(|i| i.weight)
+            .sum();
+        let travel_group_weight: f64 = constraints
+            .travel_time_between_rooms
+            .iter()
+            .filter(|i| i.group)
+            .map(|i| i.weight)
+            .sum();
+        let travel_person_weight: f64 = constraints
+            .travel_time_between_rooms
             .iter()
             .filter(|i| i.person)
             .map(|i| i.weight)
@@ -1851,6 +1885,8 @@ impl Problem {
             room_turnaround_weight,
             daybreak_group_weight,
             daybreak_person_weight,
+            travel_group_weight,
+            travel_person_weight,
             room_churn_weight,
             room_consistency_weight,
             lecturer_consistency_weight,

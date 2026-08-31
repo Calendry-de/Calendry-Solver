@@ -418,6 +418,12 @@ pub struct Objective {
     /// of days, not to either day's placements alone. See
     /// [`crate::solution::SearchState::daybreak_cost`].
     pub daybreak_cost: f64,
+    /// Violated same-day adjacent-block travel-time gaps, already
+    /// multiplied by each axis's configured weight — read fresh, the same
+    /// "belongs to a PAIR of placements" reason `daybreak_cost` lives
+    /// outside `soft`. See
+    /// [`crate::solution::SearchState::travel_cost`].
+    pub travel_cost: f64,
     /// Distinct-Room excess over the configured weekly cap, summed over every
     /// currently-occupied `(Group, week)` cell and already multiplied by the
     /// configured weight — the "home room" cap, at WEEK granularity rather
@@ -488,6 +494,7 @@ impl Objective {
             + self.location_change_cost
             + self.room_turnaround_cost
             + self.daybreak_cost
+            + self.travel_cost
             + self.room_churn_cost
             + self.room_consistency_cost
             + self.lecturer_consistency_cost
@@ -723,6 +730,7 @@ mod tests {
             offering_split_cost: 0.0,
             scheduling_pattern_cost: 0.0,
             daybreak_cost: 0.0,
+            travel_cost: 0.0,
         };
         let one_unplaced = Objective {
             unplaced: 1,
@@ -749,6 +757,7 @@ mod tests {
             offering_split_cost: 0.0,
             scheduling_pattern_cost: 0.0,
             daybreak_cost: 0.0,
+            travel_cost: 0.0,
         };
         assert!(one_unplaced.total(hard_penalty) > all_soft_bad.total(hard_penalty));
     }
@@ -792,6 +801,7 @@ mod tests {
             offering_split_cost: 0.0,
             scheduling_pattern_cost: 0.0,
             daybreak_cost: 0.0,
+            travel_cost: 0.0,
         };
         let one_unplaced = Objective {
             unplaced: 1,
@@ -818,6 +828,7 @@ mod tests {
             offering_split_cost: 0.0,
             scheduling_pattern_cost: 0.0,
             daybreak_cost: 0.0,
+            travel_cost: 0.0,
         };
 
         assert!(one_unplaced.total(hard_penalty) > everything_mixed.total(hard_penalty));

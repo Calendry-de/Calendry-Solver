@@ -346,6 +346,33 @@ impl MinimizeLocationChangeInstance {
     }
 }
 
+/// One configured `TravelTimeBetweenRooms` rule. SOFT, priced like
+/// `RoomTurnaroundBuffer` and `Daybreak` (a minimum-gap requirement, so the
+/// "tightest" convention is `max`, not `min`). Same `group`/`person` axis
+/// split as `MinimizeLocationChangeInstance` — and reads the SAME
+/// `Room.location` field that type already does: the wire also carries a
+/// dedicated `Room.site`, staged alongside this type, but `location` is
+/// already documented as a "building/campus identifier" and introducing a
+/// second field for the identical concept would be pure duplication. The
+/// unused `site` field is left in the schema rather than removed, since
+/// removing it now would mean rewriting an already-made commit.
+#[derive(Clone, Debug)]
+pub struct TravelTimeInstance {
+    pub id: String,
+    pub kinds: Vec<String>,
+    pub weight: f64,
+    pub group: bool,
+    pub person: bool,
+    pub min_minutes_between_sites: u32,
+}
+
+impl TravelTimeInstance {
+    #[inline]
+    pub fn covers(&self, kind: &str) -> bool {
+        self.kinds.is_empty() || self.kinds.iter().any(|k| k == kind)
+    }
+}
+
 /// One configured `RoomTurnaroundBuffer` rule. Room-keyed rather than
 /// Group/Person-keyed — the first aggregate type to be — so it has no
 /// `group`/`person` axis split; it cares which ROOM a Session lands in, not
@@ -800,6 +827,24 @@ pub struct Aggregates {
     daybreak_person_threshold_minutes: u32,
     daybreak_rules: Vec<DaybreakInstance>,
 
+    /// `[entity * n_slots + slot]` — the `TravelTimeBetweenRooms` counterpart
+    /// of `daybreak_group_slot`/`daybreak_person_slot`, but storing the
+    /// occupying Room's dense index (`u32::MAX` = unoccupied) rather than a
+    /// count, since this type needs to compare WHICH Room, not merely
+    /// whether one is occupied. Read across ADJACENT blocks within one day
+    /// (never across a day boundary, unlike `Daybreak`), so no within-day
+    /// excess total is maintained — read fresh, like every cross-placement
+    /// aggregate above.
+    travel_group_slot: Vec<u32>,
+    travel_person_slot: Vec<u32>,
+    /// Tightest (LARGEST) `min_minutes_between_sites` among every enabled
+    /// instance covering each axis — a FLOOR, same convention
+    /// `daybreak_group_threshold_minutes` uses. `0` (never binding) when
+    /// nothing configures that axis.
+    travel_group_threshold_minutes: u32,
+    travel_person_threshold_minutes: u32,
+    travel_rules: Vec<TravelTimeInstance>,
+
     /// `[group * n_days * n_locations + day * n_locations + loc]` —
     /// occurrence count of Sessions this Group has in each distinct
     /// `Room.location` on each day. The inner axis is LOCATION rather than
@@ -949,6 +994,7 @@ impl Aggregates {
         consistency_rules: Vec<RoomConsistencyInstance>,
         lecturer_consistency_rules: Vec<LecturerConsistencyInstance>,
         daybreak_rules: Vec<DaybreakInstance>,
+        travel_rules: Vec<TravelTimeInstance>,
     ) -> Self {
         let groups = n_groups.max(1);
         let counters = rules
@@ -1095,6 +1141,21 @@ impl Aggregates {
             .iter()
             .filter(|r| r.person)
             .map(|r| r.min_rest_minutes)
+            .max()
+            .unwrap_or(0);
+
+        let track_travel_group = travel_rules.iter().any(|r| r.group);
+        let track_travel_person = travel_rules.iter().any(|r| r.person);
+        let travel_group_threshold_minutes = travel_rules
+            .iter()
+            .filter(|r| r.group)
+            .map(|r| r.min_minutes_between_sites)
+            .max()
+            .unwrap_or(0);
+        let travel_person_threshold_minutes = travel_rules
+            .iter()
+            .filter(|r| r.person)
+            .map(|r| r.min_minutes_between_sites)
             .max()
             .unwrap_or(0);
 
@@ -1284,6 +1345,19 @@ impl Aggregates {
             daybreak_group_threshold_minutes,
             daybreak_person_threshold_minutes,
             daybreak_rules,
+            travel_group_slot: if track_travel_group {
+                vec![u32::MAX; groups * slots]
+            } else {
+                Vec::new()
+            },
+            travel_person_slot: if track_travel_person {
+                vec![u32::MAX; n_persons.max(1) * slots]
+            } else {
+                Vec::new()
+            },
+            travel_group_threshold_minutes,
+            travel_person_threshold_minutes,
+            travel_rules,
             location_group_loc: if track_location_group {
                 vec![0; groups * n_days.max(1) * locations]
             } else {
@@ -3700,6 +3774,98 @@ impl Aggregates {
         Self::occupied_range_u8(&self.daybreak_person_slot[row + start..row + end])
     }
 
+    // -- travel time between rooms -------------------------------------------
+    //
+    // SOFT, priced like `RoomTurnaroundBuffer`/`Daybreak`. Occupancy stores
+    // the ROOM'S dense index rather than a count, since this type must
+    // compare WHICH Room adjacent blocks used, not merely whether one was
+    // occupied — the one array in this module keyed that way. `Aggregates`
+    // has no knowledge of `Room.location`, so the site comparison and the
+    // actual `GridTime` gap lookup live in
+    // `crate::solution::SearchState::travel_cost`; this module only
+    // answers "which Room, if any, did this entity occupy at this block".
+
+    pub fn travel_rules(&self) -> &[TravelTimeInstance] {
+        &self.travel_rules
+    }
+
+    pub fn travel_group_threshold_minutes(&self) -> u32 {
+        self.travel_group_threshold_minutes
+    }
+
+    pub fn travel_person_threshold_minutes(&self) -> u32 {
+        self.travel_person_threshold_minutes
+    }
+
+    pub fn add_group_travel(&mut self, groups: &[GroupIdx], room: RoomIdx, span: &[SlotIdx]) {
+        if self.travel_group_slot.is_empty() || span.is_empty() {
+            return;
+        }
+        for &g in groups {
+            let row = g.get() * self.n_slots;
+            for &s in span {
+                self.travel_group_slot[row + s.get()] = room.get() as u32;
+            }
+        }
+    }
+
+    pub fn remove_group_travel(&mut self, groups: &[GroupIdx], span: &[SlotIdx]) {
+        if self.travel_group_slot.is_empty() || span.is_empty() {
+            return;
+        }
+        for &g in groups {
+            let row = g.get() * self.n_slots;
+            for &s in span {
+                self.travel_group_slot[row + s.get()] = u32::MAX;
+            }
+        }
+    }
+
+    pub fn add_person_travel(&mut self, persons: &[PersonIdx], room: RoomIdx, span: &[SlotIdx]) {
+        if self.travel_person_slot.is_empty() || span.is_empty() {
+            return;
+        }
+        for &p in persons {
+            let row = p.get() * self.n_slots;
+            for &s in span {
+                self.travel_person_slot[row + s.get()] = room.get() as u32;
+            }
+        }
+    }
+
+    pub fn remove_person_travel(&mut self, persons: &[PersonIdx], span: &[SlotIdx]) {
+        if self.travel_person_slot.is_empty() || span.is_empty() {
+            return;
+        }
+        for &p in persons {
+            let row = p.get() * self.n_slots;
+            for &s in span {
+                self.travel_person_slot[row + s.get()] = u32::MAX;
+            }
+        }
+    }
+
+    /// The Room occupying `group`'s `block` on `day`, or `None` if
+    /// unoccupied.
+    pub fn group_room_at(&self, group: GroupIdx, day: u32, block: u32) -> Option<RoomIdx> {
+        if self.travel_group_slot.is_empty() {
+            return None;
+        }
+        let idx = group.get() * self.n_slots + day as usize * self.blocks_per_day + block as usize;
+        let r = self.travel_group_slot[idx];
+        (r != u32::MAX).then_some(RoomIdx(r))
+    }
+
+    /// See [`Self::group_room_at`]; the Person counterpart.
+    pub fn person_room_at(&self, person: PersonIdx, day: u32, block: u32) -> Option<RoomIdx> {
+        if self.travel_person_slot.is_empty() {
+            return None;
+        }
+        let idx = person.get() * self.n_slots + day as usize * self.blocks_per_day + block as usize;
+        let r = self.travel_person_slot[idx];
+        (r != u32::MAX).then_some(RoomIdx(r))
+    }
+
     // -- location change -------------------------------------------------------
 
     pub fn location_rules(&self) -> &[MinimizeLocationChangeInstance] {
@@ -4720,6 +4886,7 @@ mod tests {
             vec![],
             vec![], // lecturer_consistency_rules
             vec![], // daybreak_rules
+            vec![], // travel_rules
         );
         let g = [GroupIdx(0)];
 
@@ -4773,6 +4940,7 @@ mod tests {
             vec![],
             vec![], // lecturer_consistency_rules
             vec![], // daybreak_rules
+            vec![], // travel_rules
         );
         let g = [GroupIdx(0)];
 
@@ -4835,6 +5003,7 @@ mod tests {
             vec![],
             vec![], // lecturer_consistency_rules
             vec![], // daybreak_rules
+            vec![], // travel_rules
         );
         load(&mut term);
         assert_eq!(term.share_violations(), 0);
@@ -4874,6 +5043,7 @@ mod tests {
             vec![],
             vec![], // lecturer_consistency_rules
             vec![], // daybreak_rules
+            vec![], // travel_rules
         );
         load(&mut week);
         assert_eq!(week.share_violations(), 1);
@@ -4920,6 +5090,7 @@ mod tests {
             vec![],
             vec![], // lecturer_consistency_rules
             vec![], // daybreak_rules
+            vec![], // travel_rules
         );
         a.apply_share("staff_meeting", &[GroupIdx(0)], 0, true, true);
         assert_eq!(a.share_violations(), 0, "out-of-scope kind must not count");
@@ -4974,6 +5145,7 @@ mod tests {
             vec![],
             vec![], // lecturer_consistency_rules
             vec![], // daybreak_rules
+            vec![], // travel_rules
         );
         let g = [GroupIdx(0)];
         // 2 online of 2 total = 100% > 50%: violated.
@@ -5032,6 +5204,7 @@ mod tests {
             vec![],
             vec![], // lecturer_consistency_rules
             vec![], // daybreak_rules
+            vec![], // travel_rules
         );
         let g = [GroupIdx(0)];
         a.apply_share("lecture", &g, 0, true, true);
@@ -5083,6 +5256,7 @@ mod tests {
             vec![],
             vec![], // lecturer_consistency_rules
             vec![], // daybreak_rules
+            vec![], // travel_rules
         );
         let g = [GroupIdx(0)];
         a.add_day_mode(&g, &[0], true);
@@ -5140,6 +5314,7 @@ mod tests {
             vec![],
             vec![], // lecturer_consistency_rules
             vec![], // daybreak_rules
+            vec![], // travel_rules
         );
         let g = [GroupIdx(0)];
 
@@ -5196,6 +5371,7 @@ mod tests {
             vec![],
             vec![], // lecturer_consistency_rules
             vec![], // daybreak_rules
+            vec![], // travel_rules
         );
         let g = [GroupIdx(0)];
         a.add_group_compactness(&g, 0, &[SlotIdx(0)]);
@@ -5239,6 +5415,7 @@ mod tests {
             vec![],
             vec![], // lecturer_consistency_rules
             vec![], // daybreak_rules
+            vec![], // travel_rules
         );
         let p = [PersonIdx(0)];
 
@@ -5288,6 +5465,7 @@ mod tests {
             vec![],
             vec![], // lecturer_consistency_rules
             vec![], // daybreak_rules
+            vec![], // travel_rules
         );
         a.add_person_compactness(&[PersonIdx(0)], 0, &[SlotIdx(0), SlotIdx(3)]);
         assert_eq!(a.compactness_cost(0.0, 1.0), 0.0, "Person axis was never configured");
@@ -5333,6 +5511,7 @@ mod tests {
             vec![],
             vec![], // lecturer_consistency_rules
             vec![], // daybreak_rules
+            vec![], // travel_rules
         );
         let g = [GroupIdx(0)];
         a.add_group_compactness(&g, 0, &[SlotIdx(0)]);
@@ -5385,6 +5564,7 @@ mod tests {
             vec![],
             vec![], // lecturer_consistency_rules
             vec![], // daybreak_rules
+            vec![], // travel_rules
         );
         let g = [GroupIdx(0)];
         a.add_group_compactness(&g, 0, &[SlotIdx(0)]);
@@ -5444,6 +5624,7 @@ mod tests {
             vec![],
             vec![], // lecturer_consistency_rules
             vec![], // daybreak_rules
+            vec![], // travel_rules
         );
         let o = OfferingIdx(0);
         a.add_distributed(o, 0);
@@ -5488,6 +5669,7 @@ mod tests {
             vec![],
             vec![], // lecturer_consistency_rules
             vec![], // daybreak_rules
+            vec![], // travel_rules
         );
         let o = OfferingIdx(0);
         a.add_distributed(o, 0);
@@ -5535,6 +5717,7 @@ mod tests {
             vec![],
             vec![], // lecturer_consistency_rules
             vec![], // daybreak_rules
+            vec![], // travel_rules
         );
         let o = OfferingIdx(0);
         a.add_distributed(o, 0);
@@ -5582,6 +5765,7 @@ mod tests {
             vec![],
             vec![], // lecturer_consistency_rules
             vec![], // daybreak_rules
+            vec![], // travel_rules
         );
         a.add_distributed(OfferingIdx(0), 0);
         a.add_distributed(OfferingIdx(0), 1);
@@ -5627,6 +5811,7 @@ mod tests {
             vec![],
             vec![], // lecturer_consistency_rules
             vec![], // daybreak_rules
+            vec![], // travel_rules
         );
         let o = OfferingIdx(0);
         a.add_block(o, 0);
@@ -5678,6 +5863,7 @@ mod tests {
             vec![],
             vec![], // lecturer_consistency_rules
             vec![], // daybreak_rules
+            vec![], // travel_rules
         );
         let o = OfferingIdx(0);
         a.add_block(o, 0);
@@ -5727,6 +5913,7 @@ mod tests {
             vec![],
             vec![], // lecturer_consistency_rules
             vec![], // daybreak_rules
+            vec![], // travel_rules
         );
         a.add_distributed(OfferingIdx(0), 0);
         a.add_distributed(OfferingIdx(0), 1);

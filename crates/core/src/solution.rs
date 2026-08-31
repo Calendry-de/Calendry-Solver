@@ -1358,6 +1358,29 @@ impl SearchState {
                 self.aggregates.remove_person_daybreak(who.attendees, span);
             }
         }
+        // Travel time reads the PRIMARY Room only (see
+        // `crate::solution::SearchState::travel_cost`'s own comment), so
+        // unlike every axis above it needs `who.room` — `None` only for a
+        // Session with no Room assigned at all, which has nothing for
+        // either side of a travel-time comparison to mean.
+        if let Some(room) = who.room {
+            if who.enforce.travel_group {
+                if add {
+                    self.aggregates
+                        .add_group_travel(who.subtree_groups, room, span);
+                } else {
+                    self.aggregates
+                        .remove_group_travel(who.subtree_groups, span);
+                }
+            }
+            if who.enforce.travel_person {
+                if add {
+                    self.aggregates.add_person_travel(who.attendees, room, span);
+                } else {
+                    self.aggregates.remove_person_travel(who.attendees, span);
+                }
+            }
+        }
 
         // Scheduling pattern: keyed by Offering, so unlike every axis above it
         // needs `who.offering` — `None` for an ad-hoc Session, which has
@@ -2011,6 +2034,151 @@ impl SearchState {
                 next_day,
                 self.aggregates.daybreak_person_threshold_minutes(),
             ) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// SOFT. Requires a minimum gap when a Group's or Person's consecutive
+    /// same-day placements are in Rooms whose `Room.location` differs —
+    /// modeling travel between buildings/campuses. Only same-day, adjacent-
+    /// block pairs are considered, unlike `Daybreak`'s cross-day pairing, so
+    /// no midnight-wraparound arithmetic is needed: the actual gap comes
+    /// straight off `problem.grid_time.gap_after`, the same lookup
+    /// `MinimizeBreakSpanning` (#26) already uses. Charges each covering
+    /// axis's weight ONCE per violated adjacent-block pair — flat, not
+    /// scaled by how short the gap is, the same shape `daybreak_cost` uses.
+    /// Read fresh over every (entity, day, block) triple, like
+    /// `daybreak_cost`: the gap belongs to a PAIR of placements, not to
+    /// either alone.
+    pub fn travel_cost(&self, problem: &Problem) -> f64 {
+        if self.aggregates.travel_rules().is_empty() {
+            return 0.0;
+        }
+        let day_count = problem.slots.day_count() as u32;
+        let blocks_per_day = problem.slots.blocks_per_day();
+        if blocks_per_day < 2 {
+            return 0.0;
+        }
+        let group_threshold = self.aggregates.travel_group_threshold_minutes();
+        let person_threshold = self.aggregates.travel_person_threshold_minutes();
+
+        let mut total = 0.0;
+        if group_threshold > 0 && problem.travel_group_weight != 0.0 {
+            for g in 0..problem.groups.len() as u32 {
+                for d in 0..day_count {
+                    let weekday = problem.slots.flags(SlotIdx(d * blocks_per_day)).iso_weekday;
+                    for b in 0..blocks_per_day - 1 {
+                        if let (Some(r1), Some(r2)) = (
+                            self.aggregates.group_room_at(GroupIdx(g), d, b),
+                            self.aggregates.group_room_at(GroupIdx(g), d, b + 1),
+                        ) && problem.rooms[r1.get()].location != problem.rooms[r2.get()].location
+                            && problem.grid_time.gap_after(b, weekday) < group_threshold
+                        {
+                            total += problem.travel_group_weight;
+                        }
+                    }
+                }
+            }
+        }
+        if person_threshold > 0 && problem.travel_person_weight != 0.0 {
+            for p in 0..problem.persons.len() as u32 {
+                for d in 0..day_count {
+                    let weekday = problem.slots.flags(SlotIdx(d * blocks_per_day)).iso_weekday;
+                    for b in 0..blocks_per_day - 1 {
+                        if let (Some(r1), Some(r2)) = (
+                            self.aggregates.person_room_at(PersonIdx(p), d, b),
+                            self.aggregates.person_room_at(PersonIdx(p), d, b + 1),
+                        ) && problem.rooms[r1.get()].location != problem.rooms[r2.get()].location
+                            && problem.grid_time.gap_after(b, weekday) < person_threshold
+                        {
+                            total += problem.travel_person_weight;
+                        }
+                    }
+                }
+            }
+        }
+        total
+    }
+
+    /// Would placing `who` at `span` newly violate `TravelTimeBetweenRooms`'
+    /// gap requirement with either same-day adjacent-block neighbor? A
+    /// ranking signal only, the same shape `would_worsen_daybreak` uses.
+    /// Only the span's own boundary blocks can matter: every INTERIOR gap
+    /// within one placement's span sees the SAME Room on both sides (one
+    /// Session occupies one Room for its whole duration), so it can never
+    /// trigger a location change.
+    pub fn would_worsen_travel(
+        &self,
+        problem: &Problem,
+        who: &Occupant<'_>,
+        span: &[SlotIdx],
+    ) -> bool {
+        if span.is_empty() || (!who.enforce.travel_group && !who.enforce.travel_person) {
+            return false;
+        }
+        let Some(room) = who.room else { return false };
+        let blocks_per_day = problem.slots.blocks_per_day();
+        let first = problem.slots.flags(span[0]);
+        let last = problem.slots.flags(*span.last().unwrap());
+        let day = first.day_index;
+        let weekday = first.iso_weekday;
+        let start_block = first.block;
+        let end_block = last.block;
+
+        let differs_and_close =
+            |neighbor: Option<RoomIdx>, gap_block: u32, threshold: u32| -> bool {
+                if threshold == 0 {
+                    return false;
+                }
+                neighbor.is_some_and(|nr| {
+                    problem.rooms[nr.get()].location != problem.rooms[room.get()].location
+                        && problem.grid_time.gap_after(gap_block, weekday) < threshold
+                })
+            };
+
+        if who.enforce.travel_group {
+            let prev = (start_block > 0)
+                .then(|| {
+                    who.subtree_groups
+                        .iter()
+                        .find_map(|&g| self.aggregates.group_room_at(g, day, start_block - 1))
+                })
+                .flatten();
+            let next = (end_block + 1 < blocks_per_day)
+                .then(|| {
+                    who.subtree_groups
+                        .iter()
+                        .find_map(|&g| self.aggregates.group_room_at(g, day, end_block + 1))
+                })
+                .flatten();
+            let threshold = self.aggregates.travel_group_threshold_minutes();
+            if differs_and_close(prev, start_block.saturating_sub(1), threshold)
+                || differs_and_close(next, end_block, threshold)
+            {
+                return true;
+            }
+        }
+        if who.enforce.travel_person {
+            let prev = (start_block > 0)
+                .then(|| {
+                    who.attendees
+                        .iter()
+                        .find_map(|&p| self.aggregates.person_room_at(p, day, start_block - 1))
+                })
+                .flatten();
+            let next = (end_block + 1 < blocks_per_day)
+                .then(|| {
+                    who.attendees
+                        .iter()
+                        .find_map(|&p| self.aggregates.person_room_at(p, day, end_block + 1))
+                })
+                .flatten();
+            let threshold = self.aggregates.travel_person_threshold_minutes();
+            if differs_and_close(prev, start_block.saturating_sub(1), threshold)
+                || differs_and_close(next, end_block, threshold)
+            {
                 return true;
             }
         }

@@ -33,7 +33,7 @@ use calendry_solver_core::aggregates::{
     MaxWeeklyTeachingLoadInstance, MinimizeLocationChangeInstance,
     MinimizeOfferingDaySplitInstance, MinimizeRoomChurnInstance, MinimizeWeekdayImbalanceInstance,
     PatternAdherenceInstance, RoomConsistencyInstance, RoomTurnaroundBufferInstance, ShareInstance,
-    ShareWindow,
+    ShareWindow, TravelTimeInstance,
 };
 use calendry_solver_core::ids::{GroupIdx, OfferingIdx, PersonIdx, RoomIdx, SlotIdx};
 use calendry_solver_core::preferences::{Preference, PreferenceInstance};
@@ -1749,10 +1749,37 @@ fn build_constraints(input: &pb::SolverInput) -> Result<ConstraintSet, ConvertEr
                     constraint_type: "MinimizeOfferingDistinctDays",
                 });
             }
-            Some(Params::TravelTimeBetweenRooms(_)) => {
-                return Err(ConvertError::ConstraintTypeUnimplemented {
-                    constraint: c.id.clone(),
-                    constraint_type: "TravelTimeBetweenRooms",
+            // Built — see `crate::aggregates::TravelTimeInstance`. SOFT,
+            // like `RoomTurnaroundBuffer`/`Daybreak`, so weight IS
+            // validated. Reads `Room.location`, not the wire's separate
+            // `Room.site` (see `TravelTimeInstance`'s own doc for why).
+            // Same `CompactnessScope` parsing as `MaxConsecutiveBlocks`.
+            Some(Params::TravelTimeBetweenRooms(p)) => {
+                if c.weight < 0.0 || c.weight.is_nan() {
+                    return Err(ConvertError::NegativeSoftWeight {
+                        constraint: c.id.clone(),
+                        weight: c.weight,
+                    });
+                }
+                let (mut group, mut person) = (false, false);
+                for &s in &p.scope {
+                    match pb::CompactnessScope::try_from(s) {
+                        Ok(pb::CompactnessScope::Group) => group = true,
+                        Ok(pb::CompactnessScope::Person) => person = true,
+                        _ => {}
+                    }
+                }
+                if p.scope.is_empty() {
+                    group = true;
+                    person = true;
+                }
+                set.travel_time_between_rooms.push(TravelTimeInstance {
+                    id: c.id.clone(),
+                    kinds: c.applies_to_kinds.clone(),
+                    weight: c.weight,
+                    group,
+                    person,
+                    min_minutes_between_sites: p.min_minutes_between_sites,
                 });
             }
             // Built — see `crate::aggregates::MaxDaysInstance`. HARD: no

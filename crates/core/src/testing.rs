@@ -311,6 +311,7 @@ pub fn all_constraints() -> ConstraintSet {
         max_days: Vec::new(),
         max_consecutive_days: Vec::new(),
         daybreak: Vec::new(),
+        travel_time_between_rooms: Vec::new(),
     }
 }
 

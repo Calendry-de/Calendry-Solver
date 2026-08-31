@@ -217,6 +217,7 @@ impl<'p> Trial<'p> {
             offering_split_cost: self.state.offering_split_cost(self.problem),
             scheduling_pattern_cost: self.state.scheduling_pattern_cost(self.problem),
             daybreak_cost: self.state.daybreak_cost(self.problem),
+            travel_cost: self.state.travel_cost(self.problem),
         }
     }
 
@@ -952,6 +953,7 @@ pub fn recompute_objective(problem: &Problem, solution: &Solution) -> Objective 
         offering_split_cost: state.offering_split_cost(problem),
         scheduling_pattern_cost: state.scheduling_pattern_cost(problem),
         daybreak_cost: state.daybreak_cost(problem),
+        travel_cost: state.travel_cost(problem),
     }
 }
 
@@ -1109,6 +1111,7 @@ pub fn objectives_agree(a: Objective, b: Objective) -> bool {
         && (a.room_turnaround_cost - b.room_turnaround_cost).abs()
             <= 1e-9 * (1.0 + a.room_turnaround_cost.abs())
         && (a.daybreak_cost - b.daybreak_cost).abs() <= 1e-9 * (1.0 + a.daybreak_cost.abs())
+        && (a.travel_cost - b.travel_cost).abs() <= 1e-9 * (1.0 + a.travel_cost.abs())
         && (a.room_churn_cost - b.room_churn_cost).abs() <= 1e-9 * (1.0 + a.room_churn_cost.abs())
         && (a.room_consistency_cost - b.room_consistency_cost).abs()
             <= 1e-9 * (1.0 + a.room_consistency_cost.abs())

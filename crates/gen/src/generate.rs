@@ -833,6 +833,10 @@ fn build_constraints(params: &InstanceParams, slots: &SlotTable) -> ConstraintSe
         max_days: Vec::new(),
         max_consecutive_days: Vec::new(),
         daybreak: Vec::new(),
+        // OFF for the same reason `minimize_location_change` above is: the
+        // generator does not assign `Room.location`, so every Room reads
+        // as co-located and this could never fire.
+        travel_time_between_rooms: Vec::new(),
         // Weight 5 mirrors the app catalogue's `defaultWeight`, so generated
         // benchmark instances price a mixed day the way a real tenant does.
         online_onsite_same_day: vec![DayMixInstance {
