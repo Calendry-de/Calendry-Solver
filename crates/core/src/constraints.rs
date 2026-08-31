@@ -56,6 +56,7 @@ pub enum ConstraintType {
     SameDaysRelation,
     SameStartRelation,
     MeetTogetherRelation,
+    PrecedenceRelation,
 }
 
 impl ConstraintType {
@@ -81,6 +82,7 @@ impl ConstraintType {
             Self::SameDaysRelation => "SameDaysRelation",
             Self::SameStartRelation => "SameStartRelation",
             Self::MeetTogetherRelation => "MeetTogetherRelation",
+            Self::PrecedenceRelation => "PrecedenceRelation",
         }
     }
 }
@@ -186,6 +188,7 @@ pub fn evaluate_hard(problem: &Problem, solution: &Solution) -> Vec<Violation> {
     max_consecutive_days(problem, solution, &mut out);
     same_relations(problem, solution, &mut out);
     meet_together_relations(problem, solution, &mut out);
+    precedence_relations(problem, solution, &mut out);
     out
 }
 
@@ -812,6 +815,259 @@ pub fn meet_together_relations(problem: &Problem, solution: &Solution, out: &mut
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Precedence — a lab must follow its lecture (issue #37)
+//
+// The first relation kind that reads member ORDER, which is the reason
+// ADR-0028 made the set ordered rather than a bag. The members form a CHAIN:
+// the rule binds each consecutive pair `(members[i], members[i+1])`.
+//
+// TERM-WIDE, ALL PAIRS: every Session of the predecessor must end before
+// every Session of the successor begins — the block-teaching reading (all
+// lectures finish before any lab starts). That reduces to ONE comparison per
+// consecutive pair, because "every pair ordered" is exactly "the
+// predecessor's LATEST end precedes the successor's EARLIEST start", so each
+// pair has a single boundary and both parameters are measured across it
+// rather than across n x m Session pairs.
+//
+// HARD, but PRICED at `hard_penalty` rather than filtered, the same stance
+// `SameTime`/`SameDays`/`SameStart` and `MaxDays` take, for the same reason
+// spelled out above them: the boundary is a property of two Offerings'
+// COMPLETE placed sets, and no moment mid-construction has both. A candidate
+// filter would have to either refuse on partial information or never refuse a
+// genuine breach.
+//
+// LOCKED and PAST Sessions COUNT, unlike the `SameTime` family's placed-only
+// `member_week_sets` above. Deliberate, and the divergence is the point: a
+// repair run locks every out-of-scope Session, so a placed-only scan would
+// make a relation whose predecessor is out of scope silently inert — the
+// "enforces a DIFFERENT rule than the one configured" failure ADR-0028 names
+// for dangling members, arrived at from the other direction.
+// `DifferentTime` and `MeetTogether` already count locks (they read occupancy,
+// and `FixedOccupancy` carries both relations' row lists); `SameTime`'s
+// placed-only scan is the outlier, and is a per-week SET-equality question
+// where counting a lock would force the search to match that lock's exact
+// day and block — a stronger claim than the type makes. Ordering makes no
+// such claim: a locked Session is simply one more Session in the order.
+// ---------------------------------------------------------------------------
+
+const MINUTES_PER_DAY: u32 = 24 * 60;
+
+/// One end of a member's extent, in the three units the three checks need.
+///
+/// `block` and `minute` both increase with time and are never used
+/// interchangeably, because they answer different questions and one of them
+/// can be degenerate. **Ordering is decided on `block`**: it is structural,
+/// exact, and defined for every grid. **The gap is measured in `minute`**,
+/// because "at least a day between the lecture and the lab" is a wall-clock
+/// claim that a block index cannot express. Deciding ordering on `minute`
+/// instead would collapse a whole day into one instant on any grid whose
+/// `block_length_minutes` is zero — which is what a caller sending no
+/// wall-clock structure at all produces, and which must still order
+/// correctly.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+struct Extreme {
+    /// `week * 7 + (iso_weekday - 1)`, NOT [`crate::slots::SlotFlags::day_index`].
+    /// `day_index` is dense over TEACHING days, so it would read a Friday →
+    /// Monday boundary as one day apart and a closure week as no time at all.
+    /// A tenant saying "within 2 days" means the student's calendar.
+    day: u32,
+    /// `day * blocks_per_day` plus the block index within the day — a total
+    /// order over every slot in the grid, independent of any wall-clock
+    /// configuration.
+    block: u32,
+    /// `day * MINUTES_PER_DAY` plus the minute-of-day, so a plain subtraction
+    /// across any two Sessions is the true wall-clock gap. Resolved through
+    /// [`crate::slots::GridTime`], which owns block lengths, the grid default
+    /// gap and every named break.
+    minute: u32,
+}
+
+/// A member's earliest start and latest end over the Sessions it currently
+/// has, or `None` for a member with none at all — best-effort, imposing
+/// nothing on the boundaries it participates in. Issue #37 asked for this
+/// answer to be stated rather than left to throw or silently score zero.
+#[derive(Copy, Clone, Debug)]
+struct Extent {
+    first_start: Extreme,
+    last_end: Extreme,
+}
+
+impl Extent {
+    /// Extremes are selected on `block`, never on `minute` — see [`Extreme`].
+    fn widen(&mut self, start: Extreme, end: Extreme) {
+        if start.block < self.first_start.block {
+            self.first_start = start;
+        }
+        if end.block > self.last_end.block {
+            self.last_end = end;
+        }
+    }
+}
+
+/// Why one boundary fails.
+///
+/// `OutOfOrder` excludes the other two: once the successor is already in the
+/// wrong place, "the gap is 40 minutes short" and "these are 9 days apart"
+/// are noise, not additional findings. The remaining two can co-fire, but
+/// only under a self-contradicting configuration — a `min_gap_minutes` longer
+/// than `max_days_between` leaves room for.
+#[derive(Copy, Clone, Debug)]
+enum Breach {
+    /// The successor's first Session starts at or before the predecessor's
+    /// last Session ends. The ordering itself, decided structurally.
+    OutOfOrder,
+    /// Correctly ordered, but closer together than `min_gap_minutes`.
+    GapTooShort { observed: u32, required: u32 },
+    /// Correctly ordered, but spanning more calendar days than
+    /// `max_days_between` allows.
+    TooFarApart { observed: u32, allowed: u32 },
+}
+
+fn calendar_day(f: &crate::slots::SlotFlags) -> u32 {
+    f.week * 7 + f.iso_weekday - 1
+}
+
+/// Every member's [`Extent`], over placed AND fixed occupancy — see the
+/// module section above for why locks count here.
+fn precedence_extents(
+    problem: &Problem,
+    solution: &Solution,
+    members: &[OfferingIdx],
+) -> HashMap<OfferingIdx, Extent> {
+    let mut out: HashMap<OfferingIdx, Extent> = HashMap::new();
+
+    let blocks_per_day = problem.slots.blocks_per_day();
+    let mut record = |m: OfferingIdx, start: SlotIdx, duration_blocks: u32| {
+        if !members.contains(&m) {
+            return;
+        }
+        let f = problem.slots.flags(start);
+        let day = calendar_day(f);
+        let last_block = f.block + duration_blocks.saturating_sub(1);
+        let s = Extreme {
+            day,
+            block: day * blocks_per_day + f.block,
+            minute: day * MINUTES_PER_DAY
+                + problem.grid_time.block_start_minute(f.iso_weekday, f.block),
+        };
+        let e = Extreme {
+            day,
+            block: day * blocks_per_day + last_block,
+            minute: day * MINUTES_PER_DAY
+                + problem
+                    .grid_time
+                    .block_end_minute(f.iso_weekday, last_block),
+        };
+        out.entry(m)
+            .and_modify(|x| x.widen(s, e))
+            .or_insert(Extent { first_start: s, last_end: e });
+    };
+
+    for p in problem.placement_ids() {
+        let Some(pl) = solution.get(p) else { continue };
+        let m = problem.placement(p).offering;
+        record(m, pl.start, problem.offerings[m.get()].duration_blocks);
+    }
+    for f in &problem.fixed {
+        // An ad-hoc Session realizes no Offering, so it can be no relation's
+        // member — the same `offering: None` reading every other
+        // Offering-keyed check gives it.
+        if let Some(m) = f.offering {
+            record(m, f.start, f.duration_blocks);
+        }
+    }
+
+    out
+}
+
+/// Walks every `Precedence` relation's consecutive-member boundaries and
+/// hands each breach to `report`.
+///
+/// One walk behind both the counter and the reporter, so
+/// [`precedence_violations`] and [`precedence_relations`] cannot drift: the
+/// count IS the number of reported violations. Deterministic — relations in
+/// configured order, members in configured order, and the two checks in a
+/// fixed sequence — so it never iterates the `HashMap` it builds.
+fn for_each_precedence_breach(
+    problem: &Problem,
+    solution: &Solution,
+    mut report: impl FnMut(&crate::problem::RelationSpec, OfferingIdx, OfferingIdx, Breach),
+) {
+    for r in &problem.relations {
+        let RelationKind::Precedence { min_gap_minutes, max_days_between } = r.kind else {
+            continue;
+        };
+        let extents = precedence_extents(problem, solution, &r.members);
+        for pair in r.members.windows(2) {
+            let (a, b) = (pair[0], pair[1]);
+            let (Some(pred), Some(succ)) = (extents.get(&a), extents.get(&b)) else {
+                continue;
+            };
+            // Ordering first, and exclusively: a boundary in the wrong order
+            // has no meaningful gap to be short or long.
+            if succ.first_start.block <= pred.last_end.block {
+                report(r, a, b, Breach::OutOfOrder);
+                continue;
+            }
+            // Ordered on `block`, so the day difference below is
+            // non-negative by construction. The minute difference is too on
+            // any sane grid, but saturates rather than trusting it: a grid
+            // whose blocks run past midnight is a real state
+            // (`block_end_minute` is documented as not wrapping at 24h), and
+            // it would underflow here.
+            let gap = succ.first_start.minute.saturating_sub(pred.last_end.minute);
+            if gap < min_gap_minutes {
+                report(r, a, b, Breach::GapTooShort { observed: gap, required: min_gap_minutes });
+            }
+            let days = succ.first_start.day - pred.last_end.day;
+            if max_days_between > 0 && days > max_days_between {
+                report(r, a, b, Breach::TooFarApart { observed: days, allowed: max_days_between });
+            }
+        }
+    }
+}
+
+/// Breached `Precedence` boundaries, charged at `hard_penalty` like every
+/// other HARD-but-priced term.
+pub fn precedence_violations(problem: &Problem, solution: &Solution) -> u32 {
+    let mut n = 0;
+    for_each_precedence_breach(problem, solution, |_, _, _, _| n += 1);
+    n
+}
+
+/// Reports every breached `Precedence` boundary, naming both Offerings and
+/// what the boundary actually measured — a run can succeed while still saying
+/// which lab landed before its lecture, the same stance `same_relations` and
+/// `max_days` take.
+pub fn precedence_relations(problem: &Problem, solution: &Solution, out: &mut Vec<Violation>) {
+    for_each_precedence_breach(problem, solution, |r, a, b, breach| {
+        let (before, after) = (&problem.offerings[a.get()].id, &problem.offerings[b.get()].id);
+        let detail = match breach {
+            Breach::OutOfOrder => {
+                format!("relation '{}': '{after}' does not start after '{before}' ends", r.id)
+            }
+            Breach::GapTooShort { observed, required } => format!(
+                "relation '{}': only {observed} minute(s) between '{before}' ending and \
+                 '{after}' starting, below the required {required}",
+                r.id
+            ),
+            Breach::TooFarApart { observed, allowed } => format!(
+                "relation '{}': '{after}' starts {observed} day(s) after '{before}' ends, \
+                 above the allowed {allowed}",
+                r.id
+            ),
+        };
+        out.push(Violation {
+            constraint_id: r.id.clone(),
+            constraint_type: ConstraintType::PrecedenceRelation,
+            session_ids: Vec::new(),
+            offering_ids: vec![before.clone(), after.clone()],
+            detail,
+        });
+    });
 }
 
 // ---------------------------------------------------------------------------

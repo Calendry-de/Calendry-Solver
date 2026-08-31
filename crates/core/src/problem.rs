@@ -241,12 +241,37 @@ pub enum RelationKind {
     /// `meet_together_cells`), the same reason `DifferentTime` can be one.
     /// Scoped to the PRIMARY Room only; `additional_rooms` are never shared.
     MeetTogether,
+    /// HARD, same "priced, not filtered" stance as `SameTime` — and the ONLY
+    /// kind that reads `members`' ORDER, which is why ADR-0028 kept the set
+    /// ordered. The members form a CHAIN: the rule binds each consecutive
+    /// pair `(members[i], members[i+1])`, and every placed Session of the
+    /// predecessor must end before every placed Session of the successor
+    /// begins.
+    ///
+    /// "All pairs ordered" reduces to one comparison — the predecessor's
+    /// LATEST end against the successor's EARLIEST start — so each
+    /// consecutive pair has exactly ONE boundary, and both parameters are
+    /// measured across it. See
+    /// [`crate::constraints::precedence_violations`] for the arithmetic and
+    /// why this cannot be an occupancy filter.
+    ///
+    /// Best-effort on the unplaced side: a member with no placed Session
+    /// imposes nothing on the boundaries it participates in.
+    Precedence {
+        /// Wall-clock minutes required at the boundary, resolved through
+        /// [`crate::slots::GridTime`]. 0 = back-to-back is fine, but the
+        /// ordering itself still holds.
+        min_gap_minutes: u32,
+        /// Ceiling on the boundary in CALENDAR days (not teaching days).
+        /// 0 = unbounded.
+        max_days_between: u32,
+    },
 }
 
 /// One configured Offering relation — an ordered set of Offering references
-/// plus a type, per ADR-0028. `members` is ordered because a FEW future
-/// relation types (`Precedence`, `Next Day`) read the order; `DifferentTime`
-/// ignores it.
+/// plus a type, per ADR-0028. `members` is ordered because a FEW relation
+/// types read the order — `Precedence` is the first built one, and a future
+/// `Next Day` would be another; every other kind ignores it.
 #[derive(Clone, Debug)]
 pub struct RelationSpec {
     pub id: String,
@@ -1258,7 +1283,8 @@ pub struct PlacementVar {
 pub struct Problem {
     pub slots: SlotTable,
     /// The grid's wall-clock gap structure — see [`GridTime`]. Only read by
-    /// `MinimizeBreakSpanning` and `Daybreak`.
+    /// `MinimizeBreakSpanning`, `Daybreak` and `Precedence`'s
+    /// `min_gap_minutes`.
     pub grid_time: GridTime,
     pub rooms: Vec<Room>,
     pub groups: Vec<Group>,
@@ -1389,13 +1415,16 @@ pub struct Problem {
     /// `different_time_relation_ids` is, for the same reason: the occupancy
     /// index needs an O(1) row to key its anchor/cell maps by.
     pub meet_together_relation_ids: Vec<String>,
-    /// Every configured `SameTime`/`SameDays`/`SameStart` relation, kept
-    /// whole (unlike `DifferentTime`, which is fully consumed into the
-    /// per-Offering `different_time_relations` row indices at build time):
-    /// these are read fresh by [`crate::constraints::same_relations`]
-    /// rather than maintained as an occupancy bit, so the raw member list is
-    /// what every rescan needs. `DifferentTime` relations are never present
-    /// here. `MeetTogether` relations ARE also kept here, in ADDITION to
+    /// Every configured `SameTime`/`SameDays`/`SameStart`/`Precedence`
+    /// relation, kept whole (unlike `DifferentTime`, which is fully consumed
+    /// into the per-Offering `different_time_relations` row indices at build
+    /// time): these are read fresh by
+    /// [`crate::constraints::same_relations`] and
+    /// [`crate::constraints::precedence_relations`] rather than maintained as
+    /// an occupancy bit, so the raw member list is what every rescan needs —
+    /// **in its configured order**, which `Precedence` reads and no
+    /// per-Offering membership row could carry. `DifferentTime` relations are
+    /// never present here. `MeetTogether` relations ARE also kept here, in ADDITION to
     /// their own dense row above — the occupancy index needs the row for its
     /// hot-path anchor lookup, while `constraints::meet_together_disagreements`
     /// needs the raw member list to catch a bad LOCKED pairing the search
@@ -1546,9 +1575,12 @@ impl Problem {
         // to `different_time_relation_ids`) and a per-Offering membership
         // list — the same "precompute once per Offering, read on every
         // mark/unmark" shape `veto_mask` above uses. `SameTime`/`SameDays`/
-        // `SameStart` need no such precomputation: they are read fresh by
-        // `constraints::same_relations`, which wants the raw
-        // member list kept whole on `Problem::relations` instead.
+        // `SameStart`/`Precedence` need no such precomputation: they are read
+        // fresh by `constraints::same_relations` and
+        // `constraints::precedence_relations`, which want the raw member list
+        // kept whole on `Problem::relations` instead — and `Precedence`
+        // additionally needs it in its ORIGINAL order, which a per-Offering
+        // membership row cannot express.
         //
         // `MeetTogether` needs BOTH: the dense row (its occupancy index also
         // runs a hot-path filter, like `DifferentTime`) AND the raw member
@@ -1581,7 +1613,10 @@ impl Problem {
                     }
                     retained_relations.push(r.clone());
                 }
-                RelationKind::SameTime | RelationKind::SameDays | RelationKind::SameStart => {
+                RelationKind::SameTime
+                | RelationKind::SameDays
+                | RelationKind::SameStart
+                | RelationKind::Precedence { .. } => {
                     retained_relations.push(r.clone());
                 }
             }

@@ -327,8 +327,9 @@ struct BreakOverride {
 /// why the solver never carried this before (`toWireTimeGrid` sent no
 /// breaks). This exists only for the handful of constraints that price the
 /// ACTUAL elapsed time a Session's span or a day crosses —
-/// `MinimizeBreakSpanning` and `Daybreak` — so a constraint set with neither
-/// enabled never even builds a non-trivial one.
+/// `MinimizeBreakSpanning`, `Daybreak` and the `Precedence` relation's
+/// `min_gap_minutes` — so a constraint set with none of them enabled never
+/// even builds a non-trivial one.
 #[derive(Clone, Debug, Default)]
 pub struct GridTime {
     block_length_minutes: u32,
@@ -421,8 +422,8 @@ impl GridTime {
 
     /// The minute `block_index` (0-based) BEGINS on `iso_weekday` — the
     /// day's start plus every EARLIER block's length and gap. Only
-    /// `Daybreak` reads this: every other constraint reasons in block
-    /// indices, where a gap changes no adjacency.
+    /// `Daybreak` and `Precedence` read this: every other constraint reasons
+    /// in block indices, where a gap changes no adjacency.
     pub fn block_start_minute(&self, iso_weekday: u32, block_index: u32) -> u32 {
         let mut minute = self.day_start_minute;
         for b in 0..block_index {

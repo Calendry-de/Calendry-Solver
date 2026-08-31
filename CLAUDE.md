@@ -96,7 +96,7 @@ the behaviour they exercise, and kept separate from the generator on purpose
 ```bash
 git clone --recurse-submodules …     # or: git submodule update --init --recursive
 
-cargo test --workspace               # 210 tests
+cargo test --workspace               # 582 tests
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo fmt --all --check
 
@@ -229,17 +229,38 @@ ADR-0026's "Lecturer-pool selection landed" addendum for what this did to
 named) and why `LecturerVeto` combined with a pool is refused instead of
 fixed alongside it.
 
-**`OfferingRelation` (ADR-0028) and its first relation type, `DifferentTime`,
-are built.** A relation is an ordered set of Offering references plus a type
-— `RelationSpec`/`RelationKind` on `ProblemSpec`, resolved by
-`Problem::build` into a per-Offering membership list
-(`Offering::different_time_relations`), independent of `ConstraintSet`
-because a relation names specific Offerings, never a kind.
-`DifferentTime` — no two members may ever share a slot — turned out to be
-the same shape as the four structural double-booking types: a bit shared by
-every member Offering in `Occupancy`'s relation matrix, checked in
-`mark`/`unmark`/`is_free`, plus an independent `constraints::check_pair`
-check for the same ADR-0014 reason every other structural type has one.
+**`OfferingRelation` (ADR-0028) and every relation type on it are built.** A
+relation is an ordered set of Offering references plus a type —
+`RelationSpec`/`RelationKind` on `ProblemSpec`, resolved by `Problem::build`,
+independent of `ConstraintSet` because a relation names specific Offerings,
+never a kind. Six kinds exist, and they split cleanly into two enforcement
+styles, which is the thing to know before adding a seventh:
+
+* **Occupancy FILTERS — the search cannot violate them.** `DifferentTime` (no
+  two members ever share a slot) is the same shape as the four structural
+  double-booking types: a bit shared by every member Offering in `Occupancy`'s
+  relation matrix, checked in `mark`/`unmark`/`is_free`. `MeetTogether`
+  (members share ONE Room at one same-week slot, with their `min_capacity`
+  SUMMED against the Room's) is the other, via
+  `Occupancy::meet_together_anchor`/`meet_together_cells`. Both also keep an
+  independent `constraints` check, for the ADR-0014 reason every structural
+  type has one.
+* **HARD but PRICED at `hard_penalty`, read fresh off the solution.**
+  `SameTime`/`SameDays`/`SameStart` compare per-week SETS of `(day, block)` /
+  day / block for equality; `Precedence` (issue #37) compares the
+  predecessor's latest end against the successor's earliest start. Neither
+  question is decidable mid-search from partial state, so neither can be a
+  filter — a run can succeed while reporting one of these. Same stance
+  ADR-0025 records for `MaxOnlineShare`.
+
+`Precedence` is the ONLY kind that reads member order, which is what ADR-0028
+kept the set ordered for. It is term-wide and all-pairs (all lectures finish
+before any lab starts — not a per-week pairing, not `UniTime`'s
+first-meetings-only), it decides ordering structurally but measures
+`min_gap_minutes` in wall-clock minutes through `GridTime` and
+`max_days_between` in CALENDAR days, and it counts LOCKED Sessions where the
+`SameTime` family does not. All four decisions, and the one open divergence,
+are in ADR-0028's "`Precedence` landed" addendum.
 
 **`LecturerConsistency` is built.** Once its prerequisite (lecturer-pool
 selection) landed, the remaining gap was one evaluator: a distinct-lecturer
@@ -257,11 +278,14 @@ Deliberately not built:
 
 * **A GPU move-evaluation backend.** The seam exists and has two adapters; the
   backend does not. [ADR-0013](docs/adr/0013-move-evaluation-behind-a-trait.md).
-* **Every `OfferingRelation` type besides `DifferentTime`.** `Precedence`,
-  `SameTime`/`SameDays`/`SameStart`, `MeetTogether`/`CanShareRoom`, and the
-  "N hours between" family are each a new relation-type evaluator on top of
-  the now-built mechanism, not mechanism work. `MeetTogether` additionally
-  needs a change to Room occupancy semantics the others do not.
+* **`CanShareRoom`, and the "N hours between" relation family.** The last
+  unbuilt `OfferingRelation` types. `CanShareRoom` is `UniTime`'s weaker
+  `MeetTogether` — room sharing with no time binding — and nothing has
+  requested it independently of the full package; it would need its own answer
+  to what "sharing" means without `SameTime`/`SameDays` holding the pair
+  together. `Next Day` and `Two Days After` would each be a small evaluator on
+  the now-built mechanism, and would read member order the way `Precedence`
+  does. None is mechanism work.
 
 Outside this repo: the Nuxt integration session, including the one part of the
 schema pipeline never exercised end to end. See

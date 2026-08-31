@@ -135,3 +135,82 @@ the constraint itself*. That is what makes the reference, rather than the
 evaluator, the hard part — and it is why "put the data on the entity" cannot
 rescue this one: a relation is not a property of either Offering, it is a
 property of the pair.
+
+## `Precedence` landed (issue #37) — the order paid for itself, once
+
+The section above bet that "three types in forty" justified an ordered set.
+`Precedence` is the first of the three to be built, and it is the only kind on
+the mechanism that reads `members`' order at all — every other built kind
+(`DifferentTime`, `SameTime`, `SameDays`, `SameStart`, `MeetTogether`) is
+symmetric and ignores it. The bet was cheap and it paid: the order was already
+there, `build_relations` never normalized it, and the evaluator is a
+`members.windows(2)` walk. Had position needed adding here, every relation
+already configured would have been order-ambiguous, exactly as predicted.
+
+**Its occurrence pairing is TERM-WIDE, ALL PAIRS**, which this ADR required
+each type to declare rather than inherit. Every placed Session of the
+predecessor must end before every placed Session of the successor begins — the
+block-teaching reading. Two alternatives were live and both were rejected:
+
+- **A per-week pairing** (what the `SameTime` family uses) says nothing about
+  a lab in week 2 preceding a lecture in week 3, so the rule a tenant thinks
+  they configured holds only inside each week.
+- **`UniTime`'s first-meetings-only** ("the first meeting of the first class
+  has to end before the first meeting of the second") leaves every occurrence
+  after the first unconstrained.
+
+All-pairs also turns out to be the *cheapest* of the three to evaluate, not
+the most expensive: "every pair ordered" is exactly "the predecessor's latest
+end precedes the successor's earliest start", so each consecutive member pair
+has ONE boundary rather than n×m comparisons.
+
+**It is HARD but PRICED at `hard_penalty`**, joining `SameTime`/`SameDays`/
+`SameStart` and `MaxDays` rather than `DifferentTime`/`MeetTogether`'s
+occupancy filters, and for the same reason spelled out for the `SameTime`
+family: the boundary is a property of two Offerings' COMPLETE placed sets, and
+no moment mid-construction has both. A candidate filter would have to refuse
+on partial information or never refuse a genuine breach. So a run can succeed
+while reporting a `PrecedenceRelation` violation — the `ExactFrequency` shape,
+not a new exception. Issue #37 recommended SOFT as the safer default; HARD was
+chosen instead, which is the same stance every other built relation kind
+takes, and the pricing is what keeps it from dead-ending anything.
+
+### Two units, deliberately, and neither substitutes for the other
+
+`Precedence` is the first relation to carry parameters at all
+(`min_gap_minutes`, `max_days_between`), and they measure the same boundary in
+different units:
+
+- **Ordering is decided structurally**, on a block ordinal
+  (`calendar_day * blocks_per_day + block`). It has to be: a caller sending no
+  wall-clock structure produces `GridTime::default()`, whose
+  `block_length_minutes` is zero, and every minute-of-day on a day then
+  collapses to that day's start. Ordering must stay exact there.
+- **The gap is wall-clock minutes**, resolved through `GridTime` — block
+  lengths, the default gap, every named break. "At least a day between the
+  lecture and the lab" is not expressible in block indices.
+- **The ceiling is CALENDAR days** (`week * 7 + iso_weekday - 1`), not
+  `SlotFlags::day_index`, which is dense over *teaching* days. A tenant saying
+  "within 2 days" means the student's calendar; counting teaching days would
+  silently stretch that across every weekend and closure week. Note this
+  differs from `Daybreak`, which treats consecutive `day_index` values as
+  adjacent nights on purpose — that type is about *adjacency*, this one
+  *measures a multi-day distance*.
+
+### An open divergence this created: locks count here, and not in `SameTime`
+
+`Precedence` reads placed **and fixed** occupancy. It has to: a repair run
+locks every out-of-scope Session, so a placed-only scan would make a relation
+whose predecessor is out of scope silently inert — the "enforces a DIFFERENT
+rule than the one configured" failure this ADR names for dangling members,
+arrived at from the other direction. `DifferentTime` and `MeetTogether`
+already count locks (they read occupancy, and `FixedOccupancy` carries both
+relations' row lists).
+
+That leaves the `SameTime` family as the outlier: `constraints::member_week_sets`
+walks `placement_ids()` only. There is a defensible reading — including a lock
+in a per-week SET-equality check would force the search to match that lock's
+exact day and block, a stronger claim than the type makes — and ordering makes
+no such claim, so the two genuinely differ. But it has not been *decided*, only
+noticed. **Recorded here rather than changed in passing**: altering a shipped
+type's semantics belongs in its own change with its own tests.

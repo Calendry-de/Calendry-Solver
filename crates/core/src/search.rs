@@ -200,6 +200,7 @@ impl<'p> Trial<'p> {
             same_time_violations: constraints::same_time_violations(self.problem, &self.solution),
             same_days_violations: constraints::same_days_violations(self.problem, &self.solution),
             same_start_violations: constraints::same_start_violations(self.problem, &self.solution),
+            precedence_violations: constraints::precedence_violations(self.problem, &self.solution),
             soft: self.soft,
             day_mix_cost: self.state.day_mix_cost(self.problem),
             compactness_cost: self.state.compactness_cost(self.problem),
@@ -940,6 +941,7 @@ pub fn recompute_objective(problem: &Problem, solution: &Solution) -> Objective 
         same_time_violations: constraints::same_time_violations(problem, solution),
         same_days_violations: constraints::same_days_violations(problem, solution),
         same_start_violations: constraints::same_start_violations(problem, solution),
+        precedence_violations: constraints::precedence_violations(problem, solution),
         soft,
         day_mix_cost: state.day_mix_cost(problem),
         compactness_cost: state.compactness_cost(problem),
@@ -1100,6 +1102,7 @@ pub fn objectives_agree(a: Objective, b: Objective) -> bool {
         && a.same_time_violations == b.same_time_violations
         && a.same_days_violations == b.same_days_violations
         && a.same_start_violations == b.same_start_violations
+        && a.precedence_violations == b.precedence_violations
         && (a.soft - b.soft).abs() <= 1e-9 * (1.0 + a.soft.abs())
         && (a.day_mix_cost - b.day_mix_cost).abs() <= 1e-9 * (1.0 + a.day_mix_cost.abs())
         && (a.compactness_cost - b.compactness_cost).abs()

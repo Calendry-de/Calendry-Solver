@@ -354,6 +354,12 @@ pub struct Objective {
     pub same_days_violations: u32,
     /// The `SameStart` counterpart of `same_time_violations`.
     pub same_start_violations: u32,
+    /// Breached `Precedence` boundaries — one per consecutive member pair
+    /// whose ordering, minimum gap or maximum day distance does not hold.
+    /// Same "cannot be a construction filter" reasoning again: the boundary
+    /// is a property of two Offerings' COMPLETE placed sets, which no moment
+    /// mid-search has. See [`crate::constraints::precedence_violations`].
+    pub precedence_violations: u32,
     pub soft: f64,
     /// Mixed `(group, day)` cells, already multiplied by the configured weight.
     ///
@@ -496,6 +502,7 @@ impl Objective {
             + self.same_time_violations
             + self.same_days_violations
             + self.same_start_violations
+            + self.precedence_violations
     }
 
     #[inline]
@@ -734,6 +741,7 @@ mod tests {
             same_time_violations: 0,
             same_days_violations: 0,
             same_start_violations: 0,
+            precedence_violations: 0,
             soft: 7.0 * 4.0,
             day_mix_cost: 0.0,
             compactness_cost: 0.0,
@@ -765,6 +773,7 @@ mod tests {
             same_time_violations: 0,
             same_days_violations: 0,
             same_start_violations: 0,
+            precedence_violations: 0,
             soft: 0.0,
             day_mix_cost: 0.0,
             compactness_cost: 0.0,
@@ -813,6 +822,7 @@ mod tests {
             same_time_violations: 0,
             same_days_violations: 0,
             same_start_violations: 0,
+            precedence_violations: 0,
             soft: 7.0 * 4.0,
             day_mix_cost: day_mix_weight * cells,
             compactness_cost: 0.0,
@@ -844,6 +854,7 @@ mod tests {
             same_time_violations: 0,
             same_days_violations: 0,
             same_start_violations: 0,
+            precedence_violations: 0,
             soft: 0.0,
             day_mix_cost: 0.0,
             compactness_cost: 0.0,

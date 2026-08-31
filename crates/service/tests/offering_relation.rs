@@ -148,3 +148,77 @@ fn meet_together_resolves_to_meet_together_kind() {
     assert_eq!(problem.offerings[0].meet_together_relations, vec![0]);
     assert_eq!(problem.offerings[1].meet_together_relations, vec![0]);
 }
+
+// ---------------------------------------------------------------------------
+// Precedence (issue #37) is built, and is the one kind carrying PARAMETERS.
+// Both `u32`s pass through unvalidated on purpose — every value is
+// meaningful, the two zeroes included. The evaluator (term-wide all-pairs
+// ordering, the wall-clock gap, the calendar-day ceiling) is exercised in
+// `crates/core`'s own tests, not here.
+// ---------------------------------------------------------------------------
+
+fn with_precedence(min_gap_minutes: u32, max_days_between: u32) -> pb::OfferingRelation {
+    pb::OfferingRelation {
+        params: Some(pb::offering_relation::Params::Precedence(pb::Precedence {
+            min_gap_minutes,
+            max_days_between,
+        })),
+        ..relation("rel-1", &["o1", "o2"])
+    }
+}
+
+#[test]
+fn precedence_resolves_to_precedence_kind_carrying_both_parameters() {
+    let mut input = base_input();
+    two_related_offerings(&mut input);
+    input.offering_relations = vec![with_precedence(1_440, 7)];
+
+    let problem = convert(&input, &scope(&["o1", "o2"])).expect("valid input");
+    assert_eq!(problem.relations.len(), 1);
+    assert_eq!(
+        problem.relations[0].kind,
+        calendry_solver_core::problem::RelationKind::Precedence {
+            min_gap_minutes: 1_440,
+            max_days_between: 7,
+        }
+    );
+}
+
+#[test]
+fn precedence_keeps_its_members_in_the_configured_order() {
+    // The only kind that reads the order, so the conversion must not sort,
+    // dedupe or otherwise normalize `offering_ids` into a set.
+    let mut input = base_input();
+    two_related_offerings(&mut input);
+    input.offering_relations = vec![pb::OfferingRelation {
+        offering_ids: vec!["o2".into(), "o1".into()],
+        ..with_precedence(0, 0)
+    }];
+
+    let problem = convert(&input, &scope(&["o1", "o2"])).expect("valid input");
+    let members = &problem.relations[0].members;
+    assert_eq!(
+        problem.offerings[members[0].get()].id,
+        "o2",
+        "the predecessor is whichever Offering the caller listed first"
+    );
+    assert_eq!(problem.offerings[members[1].get()].id, "o1");
+}
+
+#[test]
+fn both_precedence_parameters_at_zero_are_accepted_not_treated_as_unset() {
+    // 0 / 0 means "back-to-back is fine, no upper bound" — a real
+    // configuration, and the one the app sends for a bare ordering rule.
+    let mut input = base_input();
+    two_related_offerings(&mut input);
+    input.offering_relations = vec![with_precedence(0, 0)];
+
+    let problem = convert(&input, &scope(&["o1", "o2"])).expect("valid input");
+    assert_eq!(
+        problem.relations[0].kind,
+        calendry_solver_core::problem::RelationKind::Precedence {
+            min_gap_minutes: 0,
+            max_days_between: 0,
+        }
+    );
+}
