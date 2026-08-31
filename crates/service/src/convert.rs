@@ -191,6 +191,33 @@ fn build_relations(
 
         let kind = match &r.params {
             Some(Params::DifferentTime(_)) => RelationKind::DifferentTime,
+            // Staged schema-first (calendry-proto v0.14.0), evaluator not yet
+            // built — see the solver repo's CLAUDE.md for what is actually
+            // implemented.
+            Some(Params::SameTime(_)) => {
+                return Err(ConvertError::RelationKindUnimplemented {
+                    relation: r.id.clone(),
+                    relation_kind: "SameTime",
+                });
+            }
+            Some(Params::SameDays(_)) => {
+                return Err(ConvertError::RelationKindUnimplemented {
+                    relation: r.id.clone(),
+                    relation_kind: "SameDays",
+                });
+            }
+            Some(Params::SameStart(_)) => {
+                return Err(ConvertError::RelationKindUnimplemented {
+                    relation: r.id.clone(),
+                    relation_kind: "SameStart",
+                });
+            }
+            Some(Params::MeetTogether(_)) => {
+                return Err(ConvertError::RelationKindUnimplemented {
+                    relation: r.id.clone(),
+                    relation_kind: "MeetTogether",
+                });
+            }
             None => {
                 return Err(ConvertError::RelationWithoutParams { relation: r.id.clone() });
             }
@@ -1667,6 +1694,46 @@ fn build_constraints(input: &pb::SolverInput) -> Result<ConstraintSet, ConvertEr
                         kinds: c.applies_to_kinds.clone(),
                         weight: c.weight,
                     });
+            }
+
+            // Staged schema-first (calendry-proto v0.14.0), evaluators not yet
+            // built — see the solver repo's CLAUDE.md for what is actually
+            // implemented.
+            Some(Params::MinimizeBreakSpanning(_)) => {
+                return Err(ConvertError::ConstraintTypeUnimplemented {
+                    constraint: c.id.clone(),
+                    constraint_type: "MinimizeBreakSpanning",
+                });
+            }
+            Some(Params::MinimizeOfferingDistinctDays(_)) => {
+                return Err(ConvertError::ConstraintTypeUnimplemented {
+                    constraint: c.id.clone(),
+                    constraint_type: "MinimizeOfferingDistinctDays",
+                });
+            }
+            Some(Params::TravelTimeBetweenRooms(_)) => {
+                return Err(ConvertError::ConstraintTypeUnimplemented {
+                    constraint: c.id.clone(),
+                    constraint_type: "TravelTimeBetweenRooms",
+                });
+            }
+            Some(Params::MaxDays(_)) => {
+                return Err(ConvertError::ConstraintTypeUnimplemented {
+                    constraint: c.id.clone(),
+                    constraint_type: "MaxDays",
+                });
+            }
+            Some(Params::MaxConsecutiveDays(_)) => {
+                return Err(ConvertError::ConstraintTypeUnimplemented {
+                    constraint: c.id.clone(),
+                    constraint_type: "MaxConsecutiveDays",
+                });
+            }
+            Some(Params::Daybreak(_)) => {
+                return Err(ConvertError::ConstraintTypeUnimplemented {
+                    constraint: c.id.clone(),
+                    constraint_type: "Daybreak",
+                });
             }
 
             None => {

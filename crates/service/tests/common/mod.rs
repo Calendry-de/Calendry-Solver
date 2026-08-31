@@ -31,6 +31,8 @@ pub fn base_input() -> pb::SolverInput {
             day_start_minute: 480,
             active_days: vec![1, 2, 3, 4, 5],
             institution_timezone: "Europe/Berlin".into(),
+            default_gap_minutes: 0,
+            breaks: vec![],
         }),
         calendar: Some(pb::AcademicCalendar {
             term_id: "term-1".into(),
@@ -74,6 +76,7 @@ pub fn room(i: u32) -> pb::Room {
         feature_tags: vec![],
         location: String::new(),
         feature_quantities: vec![],
+        site: String::new(),
     }
 }
 
@@ -135,6 +138,7 @@ pub fn offering(id: &str, required: u32) -> pb::Offering {
         room_feature_requirements: vec![],
         required_room_count: 0,
         scheduling_pattern: pb::SchedulingPattern::Unspecified as i32,
+        prefer_fuller_days: false,
     }
 }
 
@@ -193,6 +197,8 @@ pub fn one_slot_grid(input: &mut pb::SolverInput) {
         day_start_minute: 480,
         active_days: vec![1],
         institution_timezone: "Europe/Berlin".into(),
+        default_gap_minutes: 0,
+        breaks: vec![],
     });
     input.calendar = Some(pb::AcademicCalendar {
         term_id: "term-1".into(),

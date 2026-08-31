@@ -199,6 +199,14 @@ pub enum ConvertError {
         constraint: String,
         constraint_type: &'static str,
     },
+    #[error(
+        "relation '{relation}' uses kind {relation_kind}, which is in the schema but has no \
+         solver evaluator yet"
+    )]
+    RelationKindUnimplemented {
+        relation: String,
+        relation_kind: &'static str,
+    },
 }
 
 impl ConvertError {
@@ -210,6 +218,7 @@ impl ConvertError {
             self,
             Self::PreferenceRolesUnsupported { .. }
                 | Self::ConstraintTypeUnimplemented { .. }
+                | Self::RelationKindUnimplemented { .. }
                 | Self::LecturerVetoUnsupportedWithPool { .. }
         )
     }

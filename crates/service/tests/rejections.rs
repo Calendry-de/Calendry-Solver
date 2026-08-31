@@ -640,6 +640,10 @@ fn every_refusal_maps_to_invalid_argument_or_unimplemented_and_nothing_else() {
             constraint: "c".into(),
             constraint_type: "SomeFutureType",
         },
+        ConvertError::RelationKindUnimplemented {
+            relation: "r".into(),
+            relation_kind: "SomeFutureKind",
+        },
     ];
 
     for e in cases {
@@ -653,4 +657,138 @@ fn every_refusal_maps_to_invalid_argument_or_unimplemented_and_nothing_else() {
         );
         assert_eq!(status.message(), text, "the message must survive the mapping");
     }
+}
+
+// ---------------------------------------------------------------------------
+// Staged schema-first (calendry-proto v0.14.0), evaluators not yet built.
+// Each is replaced by a real behavior test as its own ticket lands — see the
+// solver repo's CLAUDE.md for what is actually implemented.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn minimize_break_spanning_is_unimplemented_not_invalid() {
+    let mut input = base_input();
+    input.constraints.push(enabled(
+        "c-break",
+        pb::constraint_config::Params::MinimizeBreakSpanning(pb::MinimizeBreakSpanning {}),
+    ));
+
+    let e = reject(&input, &scope(&[]));
+    assert!(
+        matches!(
+            &e,
+            ConvertError::ConstraintTypeUnimplemented {
+                constraint_type: "MinimizeBreakSpanning",
+                ..
+            }
+        ),
+        "{e}"
+    );
+    assert_eq!(code_of(&e), Code::Unimplemented);
+}
+
+#[test]
+fn minimize_offering_distinct_days_is_unimplemented_not_invalid() {
+    let mut input = base_input();
+    input.constraints.push(enabled(
+        "c-days",
+        pb::constraint_config::Params::MinimizeOfferingDistinctDays(
+            pb::MinimizeOfferingDistinctDays {},
+        ),
+    ));
+
+    let e = reject(&input, &scope(&[]));
+    assert!(
+        matches!(
+            &e,
+            ConvertError::ConstraintTypeUnimplemented {
+                constraint_type: "MinimizeOfferingDistinctDays",
+                ..
+            }
+        ),
+        "{e}"
+    );
+    assert_eq!(code_of(&e), Code::Unimplemented);
+}
+
+#[test]
+fn travel_time_between_rooms_is_unimplemented_not_invalid() {
+    let mut input = base_input();
+    input.constraints.push(enabled(
+        "c-travel",
+        pb::constraint_config::Params::TravelTimeBetweenRooms(pb::TravelTimeBetweenRooms {
+            scope: vec![],
+            min_minutes_between_sites: 15,
+        }),
+    ));
+
+    let e = reject(&input, &scope(&[]));
+    assert!(
+        matches!(
+            &e,
+            ConvertError::ConstraintTypeUnimplemented {
+                constraint_type: "TravelTimeBetweenRooms",
+                ..
+            }
+        ),
+        "{e}"
+    );
+    assert_eq!(code_of(&e), Code::Unimplemented);
+}
+
+#[test]
+fn max_days_is_unimplemented_not_invalid() {
+    let mut input = base_input();
+    input.constraints.push(enabled(
+        "c-max-days",
+        pb::constraint_config::Params::MaxDays(pb::MaxDays { scope: vec![], max_days: 2 }),
+    ));
+
+    let e = reject(&input, &scope(&[]));
+    assert!(
+        matches!(&e, ConvertError::ConstraintTypeUnimplemented { constraint_type: "MaxDays", .. }),
+        "{e}"
+    );
+    assert_eq!(code_of(&e), Code::Unimplemented);
+}
+
+#[test]
+fn max_consecutive_days_is_unimplemented_not_invalid() {
+    let mut input = base_input();
+    input.constraints.push(enabled(
+        "c-max-consec-days",
+        pb::constraint_config::Params::MaxConsecutiveDays(pb::MaxConsecutiveDays {
+            scope: vec![],
+            max_consecutive_days: 5,
+        }),
+    ));
+
+    let e = reject(&input, &scope(&[]));
+    assert!(
+        matches!(
+            &e,
+            ConvertError::ConstraintTypeUnimplemented { constraint_type: "MaxConsecutiveDays", .. }
+        ),
+        "{e}"
+    );
+    assert_eq!(code_of(&e), Code::Unimplemented);
+}
+
+#[test]
+fn daybreak_is_unimplemented_not_invalid() {
+    let mut input = base_input();
+    input.constraints.push(enabled(
+        "c-daybreak",
+        pb::constraint_config::Params::Daybreak(pb::Daybreak {
+            scope: vec![],
+            min_rest_minutes: 600,
+        }),
+    ));
+
+    let e = reject(&input, &scope(&[]));
+    assert!(
+        matches!(&e, ConvertError::ConstraintTypeUnimplemented { constraint_type: "Daybreak", .. }),
+        "{e}"
+    );
+    assert_eq!(code_of(&e), Code::Unimplemented);
 }

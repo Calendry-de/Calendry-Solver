@@ -78,3 +78,67 @@ fn a_relation_without_params_is_refused() {
     let e = convert(&input, &scope(&["o1", "o2"])).expect_err("no params set must be refused");
     assert!(matches!(e, ConvertError::RelationWithoutParams { .. }));
 }
+
+// ---------------------------------------------------------------------------
+// Staged schema-first (calendry-proto v0.14.0), evaluators not yet built.
+// Each of these is replaced by a real behavior test as its own ticket lands
+// — see the solver repo's CLAUDE.md for what is actually implemented.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn same_time_is_unimplemented_not_invalid() {
+    let mut input = base_input();
+    two_related_offerings(&mut input);
+    input.offering_relations = vec![pb::OfferingRelation {
+        params: Some(pb::offering_relation::Params::SameTime(pb::SameTime {})),
+        ..relation("rel-1", &["o1", "o2"])
+    }];
+
+    let e = convert(&input, &scope(&["o1", "o2"])).expect_err("not yet built");
+    assert!(matches!(e, ConvertError::RelationKindUnimplemented { relation_kind: "SameTime", .. }));
+}
+
+#[test]
+fn same_days_is_unimplemented_not_invalid() {
+    let mut input = base_input();
+    two_related_offerings(&mut input);
+    input.offering_relations = vec![pb::OfferingRelation {
+        params: Some(pb::offering_relation::Params::SameDays(pb::SameDays {})),
+        ..relation("rel-1", &["o1", "o2"])
+    }];
+
+    let e = convert(&input, &scope(&["o1", "o2"])).expect_err("not yet built");
+    assert!(matches!(e, ConvertError::RelationKindUnimplemented { relation_kind: "SameDays", .. }));
+}
+
+#[test]
+fn same_start_is_unimplemented_not_invalid() {
+    let mut input = base_input();
+    two_related_offerings(&mut input);
+    input.offering_relations = vec![pb::OfferingRelation {
+        params: Some(pb::offering_relation::Params::SameStart(pb::SameStart {})),
+        ..relation("rel-1", &["o1", "o2"])
+    }];
+
+    let e = convert(&input, &scope(&["o1", "o2"])).expect_err("not yet built");
+    assert!(matches!(
+        e,
+        ConvertError::RelationKindUnimplemented { relation_kind: "SameStart", .. }
+    ));
+}
+
+#[test]
+fn meet_together_is_unimplemented_not_invalid() {
+    let mut input = base_input();
+    two_related_offerings(&mut input);
+    input.offering_relations = vec![pb::OfferingRelation {
+        params: Some(pb::offering_relation::Params::MeetTogether(pb::MeetTogether {})),
+        ..relation("rel-1", &["o1", "o2"])
+    }];
+
+    let e = convert(&input, &scope(&["o1", "o2"])).expect_err("not yet built");
+    assert!(matches!(
+        e,
+        ConvertError::RelationKindUnimplemented { relation_kind: "MeetTogether", .. }
+    ));
+}
