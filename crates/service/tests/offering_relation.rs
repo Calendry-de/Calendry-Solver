@@ -129,12 +129,14 @@ fn same_start_resolves_to_same_start_kind() {
 }
 
 // ---------------------------------------------------------------------------
-// MeetTogether (issue #55) is staged schema-first, evaluator not yet built
-// — see the solver repo's CLAUDE.md for what is actually implemented.
+// MeetTogether (issue #55) is built: wire params resolve to
+// `RelationKind::MeetTogether`, same membership-resolution path as
+// `DifferentTime` above. The Room-sharing/capacity mechanism itself is
+// exercised in `crates/core`'s own tests, not here.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn meet_together_is_unimplemented_not_invalid() {
+fn meet_together_resolves_to_meet_together_kind() {
     let mut input = base_input();
     two_related_offerings(&mut input);
     input.offering_relations = vec![pb::OfferingRelation {
@@ -142,9 +144,7 @@ fn meet_together_is_unimplemented_not_invalid() {
         ..relation("rel-1", &["o1", "o2"])
     }];
 
-    let e = convert(&input, &scope(&["o1", "o2"])).expect_err("not yet built");
-    assert!(matches!(
-        e,
-        ConvertError::RelationKindUnimplemented { relation_kind: "MeetTogether", .. }
-    ));
+    let problem = convert(&input, &scope(&["o1", "o2"])).expect("valid input");
+    assert_eq!(problem.offerings[0].meet_together_relations, vec![0]);
+    assert_eq!(problem.offerings[1].meet_together_relations, vec![0]);
 }

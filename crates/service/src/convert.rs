@@ -200,12 +200,9 @@ fn build_relations(
             Some(Params::SameTime(_)) => RelationKind::SameTime,
             Some(Params::SameDays(_)) => RelationKind::SameDays,
             Some(Params::SameStart(_)) => RelationKind::SameStart,
-            Some(Params::MeetTogether(_)) => {
-                return Err(ConvertError::RelationKindUnimplemented {
-                    relation: r.id.clone(),
-                    relation_kind: "MeetTogether",
-                });
-            }
+            // Built — see `crate::solution::Occupancy`'s `meet_together_anchor`/
+            // `meet_together_cells` for the occupancy-level mechanism.
+            Some(Params::MeetTogether(_)) => RelationKind::MeetTogether,
             None => {
                 return Err(ConvertError::RelationWithoutParams { relation: r.id.clone() });
             }

@@ -1,5 +1,7 @@
 //! Mutable search state, and the occupancy index the hot loop reads.
 
+use std::collections::HashMap;
+
 use crate::aggregates::Aggregates;
 use crate::bitset::BitMatrix;
 use crate::ids::{GroupIdx, PersonIdx, PlacementIdx, RoomIdx, SlotIdx};
@@ -164,6 +166,15 @@ pub struct Occupant<'a> {
     /// `mark`/`unmark`/`is_free` path every other occupancy axis goes
     /// through.
     pub different_time_relations: &'a [u32],
+    /// Dense row indices of the `MeetTogether` relations this Session's
+    /// Offering is a member of — see `Offering::meet_together_relations`.
+    /// Same always-present rationale as `different_time_relations`.
+    pub meet_together_relations: &'a [u32],
+    /// This Session's own share of a `MeetTogether` Room's combined-capacity
+    /// check — see [`Offering::min_capacity`]/[`FixedOccupancy::min_capacity`].
+    /// Meaningless (and never read) unless `meet_together_relations` is
+    /// non-empty.
+    pub min_capacity: u32,
 }
 
 impl<'a> Occupant<'a> {
@@ -185,6 +196,8 @@ impl<'a> Occupant<'a> {
             pool_lecturers: [None; MAX_LECTURERS],
             enforce: o.enforce,
             different_time_relations: &o.different_time_relations,
+            meet_together_relations: &o.meet_together_relations,
+            min_capacity: o.min_capacity,
         }
     }
 
@@ -208,6 +221,8 @@ impl<'a> Occupant<'a> {
             pool_lecturers: [None; MAX_LECTURERS],
             enforce: f.enforce,
             different_time_relations: &f.different_time_relations,
+            meet_together_relations: &f.meet_together_relations,
+            min_capacity: f.min_capacity,
         }
     }
 
@@ -346,6 +361,51 @@ struct Occupancy {
     /// by every Session in it: whichever member marks a slot first, the
     /// SAME bit blocks every other member from that slot.
     relation: BitMatrix,
+    /// The committed (start, end, room) span for a `MeetTogether` relation,
+    /// per week — keyed by `(relation row, week)`. Absent until the first
+    /// member of that relation is placed that week; every OTHER member's
+    /// Session that week must then match `start`/`end`/`room` EXACTLY
+    /// (`Occupancy::is_free`), which is what makes "Same Time, Same Days,
+    /// Same Room" a single exact-span-match check rather than three, and
+    /// what lets the per-slot loop below trust that any occupied slot
+    /// within a validated candidate's span belongs to a legitimate sibling
+    /// rather than re-deriving whose it is slot by slot. `count` is the
+    /// number of currently-marked members holding it, so `unmark` knows
+    /// when the last one has left and the anchor should be forgotten.
+    ///
+    /// A sparse map, not a dense `Vec`: touched only by Offerings actually
+    /// named in a `MeetTogether` relation, a tiny fraction of a real
+    /// instance, so this costs nothing for every other Offering's mark/
+    /// `unmark`/`is_free` — measure before densifying (ADR-0021).
+    meet_together_anchor: HashMap<(u32, u32), MeetTogetherAnchor>,
+    /// Per-(Room, Slot) bookkeeping for a `MeetTogether` share: how many
+    /// members currently hold this exact cell, and their SUMMED
+    /// `min_capacity` — the "Capacity becomes a sum" requirement, checked
+    /// against `Room.capacity` in `is_free` before a new member may join.
+    /// `room`'s own bit stays the single source of truth for "is anyone
+    /// here"; this only tracks the running capacity sum and the refcount
+    /// `unmark` needs to know whether it may still clear that bit. Same
+    /// sparsity rationale as `meet_together_anchor`.
+    meet_together_cells: HashMap<(RoomIdx, SlotIdx), MeetTogetherCell>,
+}
+
+/// See [`Occupancy::meet_together_anchor`]. `start`/`end` (inclusive) is the
+/// anchor session's own span — a candidate must match BOTH, not just
+/// `start`, which is what lets sharing require identical duration too, the
+/// same "the same physical meeting" reading real cross-listing has.
+#[derive(Copy, Clone, Debug)]
+struct MeetTogetherAnchor {
+    start: SlotIdx,
+    end: SlotIdx,
+    room: RoomIdx,
+    count: u32,
+}
+
+/// See [`Occupancy::meet_together_cells`].
+#[derive(Copy, Clone, Debug, Default)]
+struct MeetTogetherCell {
+    count: u32,
+    capacity_sum: u32,
 }
 
 impl Occupancy {
@@ -391,6 +451,8 @@ impl Occupancy {
             group: BitMatrix::new(problem.groups.len().max(1), slots),
             online: vec![0; slots],
             relation: BitMatrix::new(problem.different_time_relation_ids.len().max(1), slots),
+            meet_together_anchor: HashMap::new(),
+            meet_together_cells: HashMap::new(),
         }
     }
 
@@ -403,6 +465,13 @@ impl Occupancy {
         who.room.is_some_and(|r| problem.rooms[r.get()].is_virtual)
     }
 
+    /// The week a span belongs to — a Session's span never crosses a week
+    /// boundary, so the first slot always answers for the whole thing.
+    #[inline]
+    fn week_of(problem: &Problem, span: &[SlotIdx]) -> Option<u32> {
+        span.first().map(|&s| problem.slots.flags(s).week)
+    }
+
     /// Mark a Session busy.
     ///
     /// Groups are marked through their **conflict closure** — a cohort-level
@@ -411,11 +480,17 @@ impl Occupancy {
     fn mark(&mut self, problem: &Problem, who: &Occupant<'_>, span: &[SlotIdx]) {
         let rooms = Self::exclusive_rooms(problem, who);
         let online = Self::is_online(problem, who);
+        let sharing = !who.meet_together_relations.is_empty();
         for &s in span {
             let c = s.get();
             if who.enforce.room {
                 for r in rooms.into_iter().flatten() {
                     self.room.set(r.get(), c);
+                    if sharing && who.room == Some(r) {
+                        let cell = self.meet_together_cells.entry((r, s)).or_default();
+                        cell.count += 1;
+                        cell.capacity_sum += who.min_capacity;
+                    }
                 }
             }
             if who.enforce.lecturer {
@@ -440,16 +515,66 @@ impl Occupancy {
                 self.relation.set(r as usize, c);
             }
         }
+        // Anchors are per (relation, week), not per slot: establish or join
+        // them once per mark, outside the loop above. `is_free` already
+        // guarantees that a JOINING call's (start, end, room) matches
+        // whatever is already there, so there is nothing to overwrite on
+        // the `Some` arm.
+        if who.enforce.room
+            && sharing
+            && let (Some(week), Some(&start), Some(&end), Some(room)) =
+                (Self::week_of(problem, span), span.first(), span.last(), who.room)
+        {
+            for &rel in who.meet_together_relations {
+                self.meet_together_anchor
+                    .entry((rel, week))
+                    .or_insert(MeetTogetherAnchor { start, end, room, count: 0 })
+                    .count += 1;
+            }
+        }
     }
 
     fn unmark(&mut self, problem: &Problem, who: &Occupant<'_>, span: &[SlotIdx]) {
         let rooms = Self::exclusive_rooms(problem, who);
         let online = Self::is_online(problem, who);
+        let sharing = !who.meet_together_relations.is_empty();
+
+        // Decrement (relation, week) anchors FIRST, so the per-slot
+        // bit-clearing below can read the post-decrement cell refcount to
+        // know whether a fellow member still holds this cell.
+        if who.enforce.room
+            && sharing
+            && let Some(week) = Self::week_of(problem, span)
+        {
+            for &rel in who.meet_together_relations {
+                if let Some(anchor) = self.meet_together_anchor.get_mut(&(rel, week)) {
+                    anchor.count -= 1;
+                    if anchor.count == 0 {
+                        self.meet_together_anchor.remove(&(rel, week));
+                    }
+                }
+            }
+        }
+
         for &s in span {
             let c = s.get();
             if who.enforce.room {
                 for r in rooms.into_iter().flatten() {
-                    self.room.clear(r.get(), c);
+                    let still_shared = sharing
+                        && who.room == Some(r)
+                        && self
+                            .meet_together_cells
+                            .get_mut(&(r, s))
+                            .is_some_and(|cell| {
+                                cell.count -= 1;
+                                cell.capacity_sum =
+                                    cell.capacity_sum.saturating_sub(who.min_capacity);
+                                cell.count != 0
+                            });
+                    if !still_shared {
+                        self.meet_together_cells.remove(&(r, s));
+                        self.room.clear(r.get(), c);
+                    }
                 }
             }
             if who.enforce.lecturer {
@@ -487,15 +612,64 @@ impl Occupancy {
         let online_cap = problem
             .max_concurrent_online
             .filter(|_| Self::is_online(problem, who));
+        let sharing = !who.meet_together_relations.is_empty();
+        let week = sharing.then(|| Self::week_of(problem, span)).flatten();
+        let (start, end) = (span.first().copied(), span.last().copied());
+
+        // `MeetTogether`: once a relation has an established (start, end,
+        // room) SPAN for a week — set by whichever member is placed there
+        // FIRST — every other member's Session that week must match it
+        // EXACTLY, same duration included ("Same Time, Same Days, Same
+        // Room" combined into one check, read as "the same physical
+        // meeting"). A mismatch is rejected even when the mismatched
+        // CANDIDATE cell itself happens to be free, which is why this runs
+        // once, up front, separate from the per-slot occupancy loop below.
+        // `joining` records whether at least one such anchor already
+        // exists (rather than this candidate being the week's first
+        // mover) — the per-slot loop trusts it, rather than re-deriving
+        // per slot whose sibling a given occupied cell belongs to, which
+        // span-exact-equality is what makes safe to do.
+        let mut joining = false;
+        if who.enforce.room
+            && sharing
+            && let Some(week) = week
+        {
+            for &rel in who.meet_together_relations {
+                if let Some(anchor) = self.meet_together_anchor.get(&(rel, week)) {
+                    if who.room != Some(anchor.room)
+                        || start != Some(anchor.start)
+                        || end != Some(anchor.end)
+                    {
+                        return false;
+                    }
+                    joining = true;
+                }
+            }
+        }
+
         for &s in span {
             let c = s.get();
-            if who.enforce.room
-                && rooms
-                    .into_iter()
-                    .flatten()
-                    .any(|r| self.room.get(r.get(), c))
-            {
-                return false;
+            if who.enforce.room {
+                for r in rooms.into_iter().flatten() {
+                    if !self.room.get(r.get(), c) {
+                        continue;
+                    }
+                    // Occupied. Free only for a MeetTogether member JOINING
+                    // an already-matching sibling span on its own Room —
+                    // guaranteed legitimate by the exact-span check above —
+                    // and only while the combined capacity still fits.
+                    let shareable = sharing && who.room == Some(r) && joining && {
+                        let cap = problem.rooms[r.get()].capacity;
+                        let used = self
+                            .meet_together_cells
+                            .get(&(r, s))
+                            .map_or(0, |cell| cell.capacity_sum);
+                        cap == 0 || used + who.min_capacity <= cap
+                    };
+                    if !shareable {
+                        return false;
+                    }
+                }
             }
             if who.enforce.lecturer && who.all_lecturers().any(|l| self.lecturer.get(l.get(), c)) {
                 return false;

@@ -210,7 +210,7 @@ pub enum RelationKind {
     DifferentTime,
     /// HARD, but PRICED at `hard_penalty` rather than enforced as an
     /// occupancy filter (unlike `DifferentTime`) — see the module doc on
-    /// [`crate::constraints::same_relation_violations`] for why a live
+    /// [`crate::constraints::same_relations`] for why a live
     /// filter cannot check SET equality against a still-incomplete week.
     /// For each week where 2+ members have a placed Session, those members'
     /// SETS of `(day, block)` pairs used that week must be exactly equal —
@@ -227,6 +227,20 @@ pub enum RelationKind {
     /// members have a placed Session, those members' SETS of start blocks
     /// used that week must be exactly equal — days may differ.
     SameStart,
+    /// HARD, but enforced the OPPOSITE way `SameTime`/`SameDays`/`SameStart`
+    /// are: a true occupancy FILTER, not a priced rescan. "Can Share Room,
+    /// Same Room, Same Time and Same Days" at once — whichever member is
+    /// placed first in a given week establishes that week's (start, room);
+    /// every other member's Session that week is then restricted to EXACTLY
+    /// that cell, and the two (or more) members occupy the exclusive Room
+    /// TOGETHER rather than clashing on it, subject to their SUMMED
+    /// `min_capacity` against `Room.capacity`. Unlike the three PRICED
+    /// kinds, a full week SET is not what is being compared — this is a
+    /// single, exact (start, room) match, which IS checkable as a candidate
+    /// filter (see `crate::solution::Occupancy`'s `meet_together_anchor`/
+    /// `meet_together_cells`), the same reason `DifferentTime` can be one.
+    /// Scoped to the PRIMARY Room only; `additional_rooms` are never shared.
+    MeetTogether,
 }
 
 /// One configured Offering relation — an ordered set of Offering references
@@ -826,6 +840,12 @@ pub struct Offering {
     /// `veto_slots` is: derived once in `Problem::build`, read every time a
     /// Session of this Offering is marked, unmarked or probed for a slot.
     pub different_time_relations: Vec<u32>,
+    /// Dense row indices into the problem's `MeetTogether` relations this
+    /// Offering is a member of — parallel to `different_time_relations`,
+    /// separately tracked because the two mechanisms behind them differ
+    /// entirely (a shared block bit vs. an anchored, capacity-checked Room
+    /// share). Empty for every Offering not named in one.
+    pub meet_together_relations: Vec<u32>,
 }
 
 impl Offering {
@@ -968,6 +988,16 @@ pub struct FixedOccupancy {
     /// slot, exactly like any of its other occupancy axes. Empty for an
     /// ad-hoc Session realizing no Offering.
     pub different_time_relations: Vec<u32>,
+    /// Resolved from `offering`'s own `meet_together_relations` — a locked
+    /// Session of a related Offering still counts as holding (or joining)
+    /// the relation's shared Room, exactly like `different_time_relations`
+    /// above. Empty for an ad-hoc Session realizing no Offering.
+    pub meet_together_relations: Vec<u32>,
+    /// Resolved from `offering`'s own `min_capacity`, needed only when this
+    /// Session is ALSO a `meet_together_relations` member — its own share of
+    /// the combined-capacity sum a shared Room is checked against. `0`
+    /// (never charged) for an ad-hoc Session realizing no Offering.
+    pub min_capacity: u32,
 }
 
 /// Which Offerings this run is actively placing.
@@ -1353,13 +1383,24 @@ pub struct Problem {
     /// `different_time_relations` entry names. Its length is the row count
     /// the solution module's relation occupancy matrix is sized against.
     pub different_time_relation_ids: Vec<String>,
+    /// Every configured `MeetTogether` relation's own id, dense, parallel to
+    /// the row index every Offering's and `FixedOccupancy`'s
+    /// `meet_together_relations` entry names — the same shape
+    /// `different_time_relation_ids` is, for the same reason: the occupancy
+    /// index needs an O(1) row to key its anchor/cell maps by.
+    pub meet_together_relation_ids: Vec<String>,
     /// Every configured `SameTime`/`SameDays`/`SameStart` relation, kept
     /// whole (unlike `DifferentTime`, which is fully consumed into the
     /// per-Offering `different_time_relations` row indices at build time):
-    /// these are read fresh by [`crate::constraints::same_relation_violations`]
+    /// these are read fresh by [`crate::constraints::same_relations`]
     /// rather than maintained as an occupancy bit, so the raw member list is
     /// what every rescan needs. `DifferentTime` relations are never present
-    /// here.
+    /// here. `MeetTogether` relations ARE also kept here, in ADDITION to
+    /// their own dense row above — the occupancy index needs the row for its
+    /// hot-path anchor lookup, while `constraints::meet_together_disagreements`
+    /// needs the raw member list to catch a bad LOCKED pairing the search
+    /// never had a chance to avoid, the same reason `DifferentTime` has its
+    /// own independent structural check despite also being occupancy-backed.
     pub relations: Vec<RelationSpec>,
 
     /// Whether each Offering is being actively placed by this run, indexed by
@@ -1506,10 +1547,18 @@ impl Problem {
         // list — the same "precompute once per Offering, read on every
         // mark/unmark" shape `veto_mask` above uses. `SameTime`/`SameDays`/
         // `SameStart` need no such precomputation: they are read fresh by
-        // `constraints::same_relation_violations`, which wants the raw
+        // `constraints::same_relations`, which wants the raw
         // member list kept whole on `Problem::relations` instead.
+        //
+        // `MeetTogether` needs BOTH: the dense row (its occupancy index also
+        // runs a hot-path filter, like `DifferentTime`) AND the raw member
+        // list (`constraints::meet_together_disagreements` re-derives a bad
+        // LOCKED pairing independently, the same reason `DifferentTime` has
+        // its own structural check despite being occupancy-backed too).
         let mut different_time_relation_ids: Vec<String> = Vec::new();
         let mut different_time_membership: Vec<Vec<u32>> = vec![Vec::new(); offerings.len()];
+        let mut meet_together_relation_ids: Vec<String> = Vec::new();
+        let mut meet_together_membership: Vec<Vec<u32>> = vec![Vec::new(); offerings.len()];
         let mut retained_relations: Vec<RelationSpec> = Vec::new();
         for r in &relations {
             match r.kind {
@@ -1522,6 +1571,16 @@ impl Problem {
                         }
                     }
                 }
+                RelationKind::MeetTogether => {
+                    let ri = meet_together_relation_ids.len() as u32;
+                    meet_together_relation_ids.push(r.id.clone());
+                    for &o in &r.members {
+                        if let Some(row) = meet_together_membership.get_mut(o.get()) {
+                            row.push(ri);
+                        }
+                    }
+                    retained_relations.push(r.clone());
+                }
                 RelationKind::SameTime | RelationKind::SameDays | RelationKind::SameStart => {
                     retained_relations.push(r.clone());
                 }
@@ -1533,6 +1592,7 @@ impl Problem {
             .enumerate()
             .map(|(i, o)| Offering {
                 different_time_relations: different_time_membership[i].clone(),
+                meet_together_relations: meet_together_membership[i].clone(),
                 soft_profile: soft.profile_for_kind(&o.kind),
                 veto_slots: veto_mask(&o.lecturers),
                 group_veto_slots: group_veto_mask(&o.groups),
@@ -1575,6 +1635,15 @@ impl Problem {
                     .and_then(|o| different_time_membership.get(o.get()))
                     .cloned()
                     .unwrap_or_default(),
+                meet_together_relations: f
+                    .offering
+                    .and_then(|o| meet_together_membership.get(o.get()))
+                    .cloned()
+                    .unwrap_or_default(),
+                min_capacity: f
+                    .offering
+                    .and_then(|o| derived_offerings.get(o.get()))
+                    .map_or(0, |o| o.min_capacity),
                 session_id: f.session_id,
                 offering: f.offering,
                 kind: f.kind,
@@ -1955,6 +2024,7 @@ impl Problem {
             lecturer_consistency_weight,
             room_location,
             different_time_relation_ids,
+            meet_together_relation_ids,
             relations: retained_relations,
             in_scope,
             placement_counts,

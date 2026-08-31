@@ -55,6 +55,7 @@ pub enum ConstraintType {
     SameTimeRelation,
     SameDaysRelation,
     SameStartRelation,
+    MeetTogetherRelation,
 }
 
 impl ConstraintType {
@@ -79,6 +80,7 @@ impl ConstraintType {
             Self::SameTimeRelation => "SameTimeRelation",
             Self::SameDaysRelation => "SameDaysRelation",
             Self::SameStartRelation => "SameStartRelation",
+            Self::MeetTogetherRelation => "MeetTogetherRelation",
         }
     }
 }
@@ -131,6 +133,11 @@ struct View<'a> {
     /// of any `DifferentTime` relation, so `check_pair`'s relation check has
     /// nothing to read.
     different_time_relations: &'a [u32],
+    /// The same, for `MeetTogether` — see `Offering::meet_together_relations`.
+    /// Only membership is needed here; `check_pair`'s combined-capacity
+    /// reporting reads `Offering::min_capacity` directly instead of through
+    /// a `View`, since it groups by relation and week rather than by pair.
+    meet_together_relations: &'a [u32],
     span: Vec<SlotIdx>,
 }
 
@@ -178,6 +185,7 @@ pub fn evaluate_hard(problem: &Problem, solution: &Solution) -> Vec<Violation> {
     max_days(problem, solution, &mut out);
     max_consecutive_days(problem, solution, &mut out);
     same_relations(problem, solution, &mut out);
+    meet_together_relations(problem, solution, &mut out);
     out
 }
 
@@ -716,6 +724,96 @@ pub fn same_relations(problem: &Problem, solution: &Solution, out: &mut Vec<Viol
     }
 }
 
+/// Reports a `MeetTogether` relation whose members disagree on (start, Room)
+/// or whose combined size exceeds their shared Room's capacity, in a week
+/// where 2+ of them have a placed Session.
+///
+/// `Occupancy::is_free` already prevents the search itself from ever
+/// creating either — this exists for the same reason `DifferentTime`'s own
+/// structural check exists despite being occupancy-backed too (ADR-0014):
+/// a bad or stale LOCKED pairing bypasses the search's own filter entirely,
+/// and needs its own independent check to be caught at all.
+pub fn meet_together_relations(problem: &Problem, solution: &Solution, out: &mut Vec<Violation>) {
+    for r in problem
+        .relations
+        .iter()
+        .filter(|r| r.kind == RelationKind::MeetTogether)
+    {
+        let mut by_week: HashMap<u32, Vec<(OfferingIdx, SlotIdx, RoomIdx, u32)>> = HashMap::new();
+        for p in problem.placement_ids() {
+            let Some(pl) = solution.get(p) else { continue };
+            let m = problem.placement(p).offering;
+            if !r.members.contains(&m) {
+                continue;
+            }
+            let week = problem.slots.flags(pl.start).week;
+            by_week.entry(week).or_default().push((
+                m,
+                pl.start,
+                pl.room,
+                problem.offerings[m.get()].min_capacity,
+            ));
+        }
+        for (week, members) in &by_week {
+            if members.len() < 2 {
+                continue;
+            }
+            let (anchor_start, anchor_room) = (members[0].1, members[0].2);
+            let names = || {
+                members
+                    .iter()
+                    .map(|&(o, _, _, _)| problem.offerings[o.get()].id.clone())
+                    .collect::<Vec<_>>()
+            };
+            let disagrees = members
+                .iter()
+                .any(|&(_, s, rm, _)| s != anchor_start || rm != anchor_room);
+            if disagrees {
+                let detail = members
+                    .iter()
+                    .map(|&(o, s, rm, _)| {
+                        format!(
+                            "'{}' at slot {} room '{}'",
+                            problem.offerings[o.get()].id,
+                            s.get(),
+                            problem.rooms[rm.get()].id
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                out.push(Violation {
+                    constraint_id: r.id.clone(),
+                    constraint_type: ConstraintType::MeetTogetherRelation,
+                    session_ids: Vec::new(),
+                    offering_ids: names(),
+                    detail: format!(
+                        "relation '{}' disagrees on (slot, room) in week {week}: {detail}",
+                        r.id
+                    ),
+                });
+                continue;
+            }
+            // Only meaningful once they agree — `capacity == 0` means
+            // unbounded, the same reading `group_size_fits_room` gives it.
+            let capacity = problem.rooms[anchor_room.get()].capacity;
+            let combined: u32 = members.iter().map(|&(_, _, _, cap)| cap).sum();
+            if capacity != 0 && combined > capacity {
+                out.push(Violation {
+                    constraint_id: r.id.clone(),
+                    constraint_type: ConstraintType::MeetTogetherRelation,
+                    session_ids: Vec::new(),
+                    offering_ids: names(),
+                    detail: format!(
+                        "relation '{}' seats {combined} combined in week {week}, room '{}' seats only {capacity}",
+                        r.id,
+                        problem.rooms[anchor_room.get()].id
+                    ),
+                });
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // ExactFrequency
 // ---------------------------------------------------------------------------
@@ -925,8 +1023,22 @@ fn check_pair<'p>(
     // predicate `Occupancy::exclusive_room` uses to decide whether to claim the
     // slot bit at all — so the search cannot refuse a placement this then
     // declines to report, or the reverse.
+    //
+    // A second exemption, for the same reason: two Sessions sharing a
+    // Room via a common `MeetTogether` relation are not a clash either —
+    // `Occupancy::is_free` already lets the search create exactly this, so
+    // the authoritative checker must not then report it as one (ADR-0014).
+    // `x`'s span already had to match `y`'s exactly for `Occupancy` to have
+    // allowed this pairing, which is why span identity is not re-checked
+    // here — a shared relation id at a shared slot is sufficient evidence.
+    let meet_together_pair = x.room.is_some()
+        && x.room == y.room
+        && x.meet_together_relations
+            .iter()
+            .any(|r| y.meet_together_relations.contains(r));
     if let Some(r) = x.all_rooms().find(|&rx| y.all_rooms().any(|ry| ry == rx))
         && problem.rooms[r.get()].is_exclusive()
+        && !meet_together_pair
     {
         for i in c.room_double_booking.iter().filter(|i| both(i)) {
             report(
@@ -1056,6 +1168,7 @@ fn collect_views<'a>(problem: &'a Problem, solution: &Solution) -> Vec<View<'a>>
             own_groups: &f.own_groups,
             attendees: &f.attendees,
             different_time_relations: &f.different_time_relations,
+            meet_together_relations: &f.meet_together_relations,
             span,
         });
     }
@@ -1076,6 +1189,7 @@ fn collect_views<'a>(problem: &'a Problem, solution: &Solution) -> Vec<View<'a>>
             own_groups: &o.own_groups,
             attendees: &o.attendees,
             different_time_relations: &o.different_time_relations,
+            meet_together_relations: &o.meet_together_relations,
             span,
         });
     }
