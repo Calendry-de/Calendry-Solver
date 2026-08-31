@@ -215,6 +215,7 @@ fn score_one(problem: &Problem, solution: &Solution, state: &SearchState, mv: &M
             + problem.preference_cost_for_placement(offering, mv.placement, mv.to)
             + problem.movement_cost(mv.placement, mv.to.start, mv.to.room)
             + problem.capacity_waste_cost(offering, capacity)
+            + problem.break_spanning_cost(offering, mv.to.start, offering.duration_blocks)
             + share_penalty
             + day_mix_penalty
             + exam_same_day_penalty

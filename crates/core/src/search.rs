@@ -237,7 +237,10 @@ impl<'p> Trial<'p> {
             .sum::<f64>()
             + self.problem.preference_cost_for_placement(o, p, at)
             + self.problem.movement_cost(p, at.start, at.room)
-            + self.problem.capacity_waste_cost(o, capacity);
+            + self.problem.capacity_waste_cost(o, capacity)
+            + self
+                .problem
+                .break_spanning_cost(o, at.start, o.duration_blocks);
         self.unplaced -= 1;
         self.journal.push(Change::Placed(p, at));
         true
@@ -258,7 +261,10 @@ impl<'p> Trial<'p> {
             .sum::<f64>()
             + self.problem.preference_cost_for_placement(o, p, at)
             + self.problem.movement_cost(p, at.start, at.room)
-            + self.problem.capacity_waste_cost(o, capacity);
+            + self.problem.capacity_waste_cost(o, capacity)
+            + self
+                .problem
+                .break_spanning_cost(o, at.start, o.duration_blocks);
         self.unplaced += 1;
         self.journal.push(Change::Removed(p, at));
         Some(at)
@@ -696,7 +702,8 @@ fn ruin_worst(
                     .preferences
                     .cost(p, pl.start, &problem.rooms[pl.room.get()].features)
                 + problem.movement_cost(p, pl.start, pl.room)
-                + problem.capacity_waste_cost(o, capacity);
+                + problem.capacity_waste_cost(o, capacity)
+                + problem.break_spanning_cost(o, pl.start, o.duration_blocks);
             if let Some(span) = problem.slots.span(pl.start, o.duration_blocks) {
                 let occupant = Occupant::of_offering(o)
                     .with_room(pl.room)
@@ -906,7 +913,8 @@ pub fn recompute_objective(problem: &Problem, solution: &Solution) -> Objective 
                         .preferences
                         .cost(p, pl.start, &problem.rooms[pl.room.get()].features)
                     + problem.movement_cost(p, pl.start, pl.room)
-                    + problem.capacity_waste_cost(o, capacity);
+                    + problem.capacity_waste_cost(o, capacity)
+                    + problem.break_spanning_cost(o, pl.start, o.duration_blocks);
             }
             None => unplaced += 1,
         }

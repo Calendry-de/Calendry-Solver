@@ -300,6 +300,7 @@ pub fn all_constraints() -> ConstraintSet {
         compactness: Vec::new(),
         distributed_pattern_adherence: Vec::new(),
         block_pattern_adherence: Vec::new(),
+        minimize_break_spanning: Vec::new(),
     }
 }
 

@@ -38,11 +38,11 @@ use calendry_solver_core::ids::{GroupIdx, OfferingIdx, PersonIdx, RoomIdx, SlotI
 use calendry_solver_core::preferences::{Preference, PreferenceInstance};
 use calendry_solver_core::problem::{
     CapacityWasteInstance, ConstraintInstance, ConstraintSet, FixedSpec, Immovable,
-    MaxConcurrentOnlineInstance, OfferingSpec, PlacementVar, Problem, ProblemSpec,
-    ProtectedBlockInstance, RelationKind, RelationSpec, Room, SchedulingPattern, ScopeSpec,
-    Unavailability, classify_immovable,
+    MaxConcurrentOnlineInstance, MinimizeBreakSpanningInstance, OfferingSpec, PlacementVar,
+    Problem, ProblemSpec, ProtectedBlockInstance, RelationKind, RelationSpec, Room,
+    SchedulingPattern, ScopeSpec, Unavailability, classify_immovable,
 };
-use calendry_solver_core::slots::{SlotTable, WeekKind, WeekSpec};
+use calendry_solver_core::slots::{GridTime, SlotTable, WeekKind, WeekSpec};
 use calendry_solver_core::soft::{SoftInstance, SoftParams};
 use calendry_solver_core::solution::{MAX_ADDITIONAL_ROOMS, MAX_LECTURERS};
 use calendry_solver_proto::v1 as pb;
@@ -60,6 +60,7 @@ pub fn convert(input: &pb::SolverInput, scope: &pb::SolveScope) -> Result<Proble
     }
 
     let slots = build_grid(input)?;
+    let grid_time = build_grid_time(input)?;
     let rooms = build_rooms(input);
     let room_index = index_by(&input.rooms, |r| r.id.clone());
 
@@ -128,6 +129,7 @@ pub fn convert(input: &pb::SolverInput, scope: &pb::SolveScope) -> Result<Proble
         scope: ScopeSpec::Offerings(in_scope),
         movement_weight: lock_policy.movement_weight(),
         in_scope_movement_weight,
+        grid_time,
         ..ProblemSpec::new(slots)
     })?)
 }
@@ -322,6 +324,30 @@ fn build_grid(input: &pb::SolverInput) -> Result<SlotTable, ConvertError> {
 
     SlotTable::build(grid.blocks_per_day, &grid.active_days, &weeks)
         .map_err(|e| ConvertError::InvalidTimeGrid { reason: e.to_string() })
+}
+
+/// The grid's wall-clock gap structure — see [`GridTime`]. Split from
+/// [`build_grid`] because it needs none of `SlotTable`'s own validation; a
+/// grid with no `MissingTimeGrid` fault always resolves one, even the
+/// default (no gaps).
+fn build_grid_time(input: &pb::SolverInput) -> Result<GridTime, ConvertError> {
+    let grid = input
+        .time_grid
+        .as_ref()
+        .ok_or(ConvertError::MissingTimeGrid)?;
+
+    let breaks = grid
+        .breaks
+        .iter()
+        .map(|b| (b.after_block_index, b.duration_minutes, b.day_of_week))
+        .collect();
+
+    Ok(GridTime::new(
+        grid.block_length_minutes,
+        grid.day_start_minute,
+        grid.default_gap_minutes,
+        breaks,
+    ))
 }
 
 /// The caller-supplied "now", resolved to a comparable slot.
@@ -1696,15 +1722,26 @@ fn build_constraints(input: &pb::SolverInput) -> Result<ConstraintSet, ConvertEr
                     });
             }
 
+            // Built — see `Problem::break_spanning_cost`. Empty message: no
+            // params beyond id/kinds/weight.
+            Some(Params::MinimizeBreakSpanning(_)) => {
+                if c.weight < 0.0 || c.weight.is_nan() {
+                    return Err(ConvertError::NegativeSoftWeight {
+                        constraint: c.id.clone(),
+                        weight: c.weight,
+                    });
+                }
+                set.minimize_break_spanning
+                    .push(MinimizeBreakSpanningInstance {
+                        id: c.id.clone(),
+                        kinds: c.applies_to_kinds.clone(),
+                        weight: c.weight,
+                    });
+            }
+
             // Staged schema-first (calendry-proto v0.14.0), evaluators not yet
             // built — see the solver repo's CLAUDE.md for what is actually
             // implemented.
-            Some(Params::MinimizeBreakSpanning(_)) => {
-                return Err(ConvertError::ConstraintTypeUnimplemented {
-                    constraint: c.id.clone(),
-                    constraint_type: "MinimizeBreakSpanning",
-                });
-            }
             Some(Params::MinimizeOfferingDistinctDays(_)) => {
                 return Err(ConvertError::ConstraintTypeUnimplemented {
                     constraint: c.id.clone(),

@@ -18,7 +18,7 @@ use crate::bitset::BitSet;
 use crate::groups::{GroupClosure, GroupCycle};
 use crate::ids::{GroupIdx, OfferingIdx, PersonIdx, PlacementIdx, RoomIdx, SlotIdx};
 use crate::preferences::{Preference, PreferenceInstance, PreferenceModel};
-use crate::slots::SlotTable;
+use crate::slots::{GridTime, SlotTable};
 use crate::soft::{SoftInstance, SoftModel};
 use crate::solution::{MAX_ADDITIONAL_ROOMS, MAX_LECTURERS, Placement};
 
@@ -380,6 +380,11 @@ pub struct ConstraintSet {
     /// distinct lecturer count never changes. See
     /// [`crate::aggregates::LecturerConsistencyInstance`].
     pub lecturer_consistency: Vec<LecturerConsistencyInstance>,
+    /// SOFT, per-placement exact delta. Discourages a Session's span from
+    /// crossing a `GridTime` gap — depends only on this placement's own day,
+    /// start block and duration, so it needs no state beyond `GridTime`
+    /// itself. See [`Problem::break_spanning_cost`].
+    pub minimize_break_spanning: Vec<MinimizeBreakSpanningInstance>,
 }
 
 /// One `ProtectedBlock` instance. The FIRST hard type whose values
@@ -415,6 +420,27 @@ pub struct CapacityWasteInstance {
     pub kinds: Vec<String>,
     pub weight: f64,
     pub waste_ratio_threshold: f64,
+}
+
+/// One `MinimizeBreakSpanning` instance. No parameters beyond id/kinds/
+/// weight — the cost depends only on the placement's own start block and
+/// duration against `Problem::grid_time`, already on the wire. Kept outside
+/// `SoftModel` for the same reason `CapacityWasteInstance` is: this needs no
+/// `(kind-profile, slot, room)` table at all, just [`Problem::grid_time`]
+/// and the placement's own span, so [`Problem::break_spanning_cost`] is a
+/// plain formula.
+#[derive(Clone, Debug)]
+pub struct MinimizeBreakSpanningInstance {
+    pub id: String,
+    pub kinds: Vec<String>,
+    pub weight: f64,
+}
+
+impl MinimizeBreakSpanningInstance {
+    #[inline]
+    pub fn covers(&self, kind: &str) -> bool {
+        self.kinds.is_empty() || self.kinds.iter().any(|k| k == kind)
+    }
 }
 
 impl CapacityWasteInstance {
@@ -932,6 +958,10 @@ pub struct ProblemSpec {
     /// targeted repair was not asked to touch" (in-scope) are different
     /// products sharing one mechanism. See [`Problem::movement_cost`].
     pub in_scope_movement_weight: f64,
+    /// The grid's wall-clock gap structure — see [`GridTime`]. Defaults to
+    /// no gaps anywhere, which is inert unless `MinimizeBreakSpanning` or
+    /// `Daybreak` is configured.
+    pub grid_time: GridTime,
 }
 
 impl ProblemSpec {
@@ -950,6 +980,7 @@ impl ProblemSpec {
             scope: ScopeSpec::All,
             movement_weight: 0.0,
             in_scope_movement_weight: 0.0,
+            grid_time: GridTime::default(),
         }
     }
 
@@ -1112,6 +1143,9 @@ pub struct PlacementVar {
 #[derive(Clone, Debug)]
 pub struct Problem {
     pub slots: SlotTable,
+    /// The grid's wall-clock gap structure — see [`GridTime`]. Only read by
+    /// `MinimizeBreakSpanning` and `Daybreak`.
+    pub grid_time: GridTime,
     pub rooms: Vec<Room>,
     pub groups: Vec<Group>,
     pub persons: Vec<Person>,
@@ -1249,6 +1283,7 @@ impl Problem {
             scope,
             movement_weight,
             in_scope_movement_weight,
+            grid_time,
         } = spec;
 
         let parent_of: Vec<Option<GroupIdx>> = groups.iter().map(|g| g.parent).collect();
@@ -1617,6 +1652,11 @@ impl Problem {
             .iter()
             .map(|i| i.weight)
             .sum();
+        let break_spanning_weight: f64 = constraints
+            .minimize_break_spanning
+            .iter()
+            .map(|i| i.weight)
+            .sum();
 
         // Built here rather than beside `SoftModel` above because it keys on
         // the PLACEMENT, so it needs the derived Offerings — a placement's
@@ -1668,6 +1708,13 @@ impl Problem {
          * instance's contribution at its own `weight`, so summing every
          * instance's weight is the per-placement ceiling, same shape as
          * `soft.total_weight`.
+         *
+         * THE BREAK-SPANNING TERM IS BOUNDED THE SAME WAY: `break_spanning_
+         * cost` charges each covering instance's flat `weight` at most once
+         * per placement (span crosses a gap, or it does not — no scaling by
+         * how many minutes or how many gaps), so summing every instance's
+         * weight is the per-placement ceiling, same shape as
+         * `capacity_waste_weight`.
          */
         let hard_penalty = soft.total_weight * placements.len() as f64
             + preferences.max_cost_per_placement() * placements.len() as f64
@@ -1675,6 +1722,7 @@ impl Problem {
             + movement_weight * placements.len() as f64
             + in_scope_movement_weight * placements.len() as f64
             + capacity_waste_weight * placements.len() as f64
+            + break_spanning_weight * placements.len() as f64
             // Read off `(group, day)` cell counts, exactly like day_mix_weight
             // above: neither is bounded by placements, since one placement can
             // touch several cells at once.
@@ -1713,6 +1761,7 @@ impl Problem {
 
         let problem = Self {
             slots,
+            grid_time,
             rooms,
             groups,
             persons,
@@ -1953,6 +2002,42 @@ impl Problem {
                 let excess = (ratio - i.waste_ratio_threshold).max(0.0);
                 i.weight * (excess / (excess + 1.0))
             })
+            .sum()
+    }
+
+    /// SOFT. Discourages a Session's span from crossing a `grid_time` gap —
+    /// starting before a break and resuming after it. Charges each covering
+    /// instance's flat `weight` once if the span crosses ANY gap at all,
+    /// never scaled by minutes or gap count: the bound `hard_penalty` relies
+    /// on is that this term's ceiling per placement is `weight` itself, the
+    /// same shape `capacity_waste_cost`'s saturating curve gives.
+    ///
+    /// Zero for any single-block Session — `gap_minutes_within_span` already
+    /// returns 0 for a span with no interior — and zero whenever no instance
+    /// is configured, so a constraint set without this type never even
+    /// resolves `slots.flags`.
+    #[inline]
+    pub fn break_spanning_cost(
+        &self,
+        offering: &Offering,
+        start: SlotIdx,
+        duration_blocks: u32,
+    ) -> f64 {
+        if self.constraints.minimize_break_spanning.is_empty() {
+            return 0.0;
+        }
+        let f = self.slots.flags(start);
+        let minutes =
+            self.grid_time
+                .gap_minutes_within_span(f.iso_weekday, f.block, duration_blocks);
+        if minutes == 0 {
+            return 0.0;
+        }
+        self.constraints
+            .minimize_break_spanning
+            .iter()
+            .filter(|i| i.covers(&offering.kind))
+            .map(|i| i.weight)
             .sum()
     }
 

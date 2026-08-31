@@ -301,6 +301,129 @@ impl SlotTable {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Wall-clock gap structure
+// ---------------------------------------------------------------------------
+
+/// A named gap that replaces `GridTime`'s default at one position. Mirrors
+/// the wire `TimeGridBreak` (and the app's `TimeGridBreak`,
+/// `shared/timeGrid.ts`) field-for-field.
+#[derive(Clone, Debug)]
+struct BreakOverride {
+    /// The gap FOLLOWS this 0-based block index.
+    after_block_index: u32,
+    duration_minutes: u32,
+    /// `None` applies on every active day. A row naming a specific ISO
+    /// weekday beats the universal one at the SAME `after_block_index` and
+    /// only there.
+    day_of_week: Option<u32>,
+}
+
+/// The tenant grid's WALL-CLOCK structure — block length, day start, and the
+/// gaps between consecutive blocks.
+///
+/// Split from [`SlotTable`] deliberately: every existing constraint reasons
+/// in block INDICES, where a gap's duration changes no adjacency, which is
+/// why the solver never carried this before (`toWireTimeGrid` sent no
+/// breaks). This exists only for the handful of constraints that price the
+/// ACTUAL elapsed time a Session's span or a day crosses —
+/// `MinimizeBreakSpanning` and `Daybreak` — so a constraint set with neither
+/// enabled never even builds a non-trivial one.
+#[derive(Clone, Debug, Default)]
+pub struct GridTime {
+    block_length_minutes: u32,
+    day_start_minute: u32,
+    /// The grid's UNNAMED default gap between every pair of consecutive
+    /// blocks, in minutes. 0 = no default gap.
+    default_gap_minutes: u32,
+    breaks: Vec<BreakOverride>,
+}
+
+impl GridTime {
+    pub fn new(
+        block_length_minutes: u32,
+        day_start_minute: u32,
+        default_gap_minutes: u32,
+        breaks: Vec<(u32, u32, Option<u32>)>,
+    ) -> Self {
+        Self {
+            block_length_minutes,
+            day_start_minute,
+            default_gap_minutes,
+            breaks: breaks
+                .into_iter()
+                .map(|(after_block_index, duration_minutes, day_of_week)| BreakOverride {
+                    after_block_index,
+                    duration_minutes,
+                    day_of_week,
+                })
+                .collect(),
+        }
+    }
+
+    #[inline]
+    pub fn block_length_minutes(&self) -> u32 {
+        self.block_length_minutes
+    }
+
+    #[inline]
+    pub fn day_start_minute(&self) -> u32 {
+        self.day_start_minute
+    }
+
+    /// The gap after `after_block_index` on `iso_weekday`, in minutes.
+    /// Precedence is day-specific → universal → grid default, resolved PER
+    /// POSITION — a Friday override at block 6 does not displace a
+    /// universal break at block 3. Mirrors the app's `gapAfter`
+    /// (`shared/timeGrid.ts`) exactly.
+    #[inline]
+    pub fn gap_after(&self, after_block_index: u32, iso_weekday: u32) -> u32 {
+        let at = self
+            .breaks
+            .iter()
+            .filter(|b| b.after_block_index == after_block_index);
+        let specific = at.clone().find(|b| b.day_of_week == Some(iso_weekday));
+        let universal = || at.clone().find(|b| b.day_of_week.is_none());
+        specific
+            .or_else(universal)
+            .map_or(self.default_gap_minutes, |b| b.duration_minutes)
+    }
+
+    /// Total minutes spanned by gaps strictly INSIDE `[start_block,
+    /// start_block + duration_blocks)` — the interior of a multi-block
+    /// Session's span, mirroring the app's `gapsWithinSpan`
+    /// (`shared/timeGrid.ts`). Zero for a span of 1: there is no interior.
+    #[inline]
+    pub fn gap_minutes_within_span(
+        &self,
+        iso_weekday: u32,
+        start_block: u32,
+        duration_blocks: u32,
+    ) -> u32 {
+        if duration_blocks < 2 {
+            return 0;
+        }
+        (start_block..start_block + duration_blocks - 1)
+            .map(|b| self.gap_after(b, iso_weekday))
+            .sum()
+    }
+
+    /// The minute teaching ends on `iso_weekday` — the start of the day plus
+    /// every block's length and every gap strictly between blocks (never the
+    /// gap after the FINAL block, which has no meaning). Mirrors the app's
+    /// `blockBoundaries` last entry (`shared/timeGrid.ts`).
+    pub fn day_end_minute(&self, iso_weekday: u32, blocks_per_day: u32) -> u32 {
+        let mut minute = self.day_start_minute;
+        for b in 0..blocks_per_day {
+            minute += self.block_length_minutes;
+            if b != blocks_per_day - 1 {
+                minute += self.gap_after(b, iso_weekday);
+            }
+        }
+        minute
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -463,5 +586,82 @@ mod tests {
         assert_eq!(err(SlotTable::build(1, &[], &weeks)), Some(GridError::NoActiveDays));
         assert_eq!(err(SlotTable::build(1, &[1], &[])), Some(GridError::NoWeeks));
         assert_eq!(err(SlotTable::build(1, &[9], &weeks)), Some(GridError::InvalidWeekday(9)));
+    }
+
+    // -----------------------------------------------------------------------
+    // GridTime — mirrors `tests/timegrid-span-breaks.test.ts`'s STANDARD grid
+    // in the calendry app, so a disagreement between the two implementations
+    // of the same walk would show up as one of these failing.
+    // -----------------------------------------------------------------------
+
+    fn standard_grid() -> GridTime {
+        // 8 x 45min, breakMinutes: 0, three named universal breaks.
+        GridTime::new(45, 8 * 60, 0, vec![(0, 45, None), (1, 15, None), (3, 30, None)])
+    }
+
+    #[test]
+    fn finds_the_named_break_a_two_block_span_crosses() {
+        let g = standard_grid();
+        assert_eq!(g.gap_minutes_within_span(1, 3, 2), 30);
+    }
+
+    #[test]
+    fn finds_nothing_for_a_two_block_span_that_crosses_no_gap() {
+        // Blocks 4-5 are back to back on this grid: no override, and the
+        // universal default is 0.
+        let g = standard_grid();
+        assert_eq!(g.gap_minutes_within_span(1, 4, 2), 0);
+    }
+
+    #[test]
+    fn sums_every_gap_a_wider_span_crosses() {
+        // Blocks 0-3 cross the break after 0, after 1, and after 3 is
+        // OUTSIDE a span of duration 4 starting at 0 (ends at block 3,
+        // inclusive) — only interior gaps count.
+        let g = standard_grid();
+        assert_eq!(g.gap_minutes_within_span(1, 0, 4), 45 + 15);
+    }
+
+    #[test]
+    fn a_span_of_one_has_no_interior() {
+        let g = standard_grid();
+        assert_eq!(g.gap_minutes_within_span(1, 3, 1), 0);
+    }
+
+    #[test]
+    fn a_uniform_grid_charges_the_default_gap_everywhere() {
+        // breakMinutes: 10, no named overrides — every position is the
+        // default.
+        let g = GridTime::new(60, 9 * 60, 10, vec![]);
+        assert_eq!(g.gap_minutes_within_span(1, 0, 3), 20);
+    }
+
+    #[test]
+    fn a_day_specific_override_beats_the_universal_one_only_at_its_position() {
+        // Friday (5) differs at block 3; every other position, and every
+        // other day at block 3, sees the universal 30.
+        let g = GridTime::new(
+            45,
+            8 * 60,
+            0,
+            vec![
+                (0, 45, None),
+                (1, 15, None),
+                (3, 30, None),
+                (3, 60, Some(5)),
+            ],
+        );
+        assert_eq!(g.gap_after(3, 5), 60, "Friday's override wins at its own position");
+        assert_eq!(g.gap_after(3, 1), 30, "Monday still sees the universal break");
+        assert_eq!(g.gap_after(0, 5), 45, "Friday's override does not displace block 0");
+    }
+
+    #[test]
+    fn day_end_minute_never_walks_the_gap_after_the_final_block() {
+        // A grid whose default gap would, if wrongly applied past the last
+        // block, add 10 minutes nothing teaches.
+        let g = GridTime::new(60, 9 * 60, 10, vec![]);
+        // 6 blocks x 60 + 5 internal gaps x 10 = 360 + 50 = 410, from 540.
+        assert_eq!(g.day_end_minute(1, 6), 540 + 410);
     }
 }

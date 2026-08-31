@@ -665,27 +665,9 @@ fn every_refusal_maps_to_invalid_argument_or_unimplemented_and_nothing_else() {
 // solver repo's CLAUDE.md for what is actually implemented.
 // ---------------------------------------------------------------------------
 
-#[test]
-fn minimize_break_spanning_is_unimplemented_not_invalid() {
-    let mut input = base_input();
-    input.constraints.push(enabled(
-        "c-break",
-        pb::constraint_config::Params::MinimizeBreakSpanning(pb::MinimizeBreakSpanning {}),
-    ));
-
-    let e = reject(&input, &scope(&[]));
-    assert!(
-        matches!(
-            &e,
-            ConvertError::ConstraintTypeUnimplemented {
-                constraint_type: "MinimizeBreakSpanning",
-                ..
-            }
-        ),
-        "{e}"
-    );
-    assert_eq!(code_of(&e), Code::Unimplemented);
-}
+// `MinimizeBreakSpanning` is now built — see
+// `crates/service/tests/minimize_break_spanning.rs` and
+// `crates/core/tests/minimize_break_spanning.rs` for its real behavior.
 
 #[test]
 fn minimize_offering_distinct_days_is_unimplemented_not_invalid() {
