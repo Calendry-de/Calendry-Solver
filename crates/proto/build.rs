@@ -3,7 +3,7 @@ use std::path::PathBuf;
 /// Where the schema comes from.
 ///
 /// The `.proto` files are NOT vendored into this repository. They are the
-/// contract, owned by github.com/MindCollaps/calendry-proto and shared with the
+/// contract, owned by github.com/Calendry-de/calendry-proto and shared with the
 /// Nuxt app, and they are consumed here through a git submodule pinned to an
 /// exact revision.
 ///
@@ -59,7 +59,7 @@ fn resolve_proto_root() -> Result<PathBuf, String> {
              git submodule update --init --recursive\n\
          \n\
          Or clone with submodules in the first place:\n\
-             git clone --recurse-submodules https://github.com/MindCollaps/calendry-solver.git\n\
+             git clone --recurse-submodules https://github.com/Calendry-de/calendry-solver.git\n\
          \n\
          To build against a checkout somewhere else, set CALENDRY_PROTO_DIR to a\n\
          directory containing {SENTINEL}.",

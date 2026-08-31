@@ -1,4 +1,4 @@
 [submodule "vendor/calendry-proto"]
 	path = vendor/calendry-proto
-	url = https://github.com/MindCollaps/calendry-proto.git
+	url = https://github.com/Calendry-de/calendry-proto.git
 	branch = main

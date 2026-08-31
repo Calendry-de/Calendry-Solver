@@ -1,7 +1,7 @@
 //! Generated protobuf and gRPC bindings for the Calendry solver contract.
 //!
 //! The `.proto` sources live in a separate, language-neutral repository
-//! (`github.com/MindCollaps/calendry-proto`) because the Nuxt app consumes the
+//! (`github.com/Calendry-de/calendry-proto`) because the Nuxt app consumes the
 //! same contract. They are never copied into this repo — see `build.rs` for how
 //! the checkout is located.
 

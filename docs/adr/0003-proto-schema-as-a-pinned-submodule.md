@@ -1,7 +1,7 @@
 # The protobuf schema lives in a separate repo, consumed as a pinned submodule
 
 The contract is shared with the Nuxt app, so it lives in a language-neutral
-repository (`github.com/MindCollaps/calendry-proto`) and is consumed here as a
+repository (`github.com/Calendry-de/calendry-proto`) and is consumed here as a
 git submodule at `vendor/calendry-proto`, pinned to an exact revision. `.proto`
 files are never copied into this repo.
 
