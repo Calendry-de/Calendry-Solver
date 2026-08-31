@@ -49,6 +49,13 @@ pub fn grid(blocks: u32, weeks: usize) -> SlotTable {
     SlotTable::build(blocks, &[1], &teaching_weeks(weeks)).unwrap()
 }
 
+/// `blocks` blocks on Mon-Fri of each of `weeks` weeks — for fixtures
+/// exercising a WEEK-granularity aggregate (`MaxDays`/`MaxConsecutiveDays`,
+/// `MinimizeWeekdayImbalance`) that `grid`'s single active day cannot.
+pub fn grid_5day(blocks: u32, weeks: usize) -> SlotTable {
+    SlotTable::build(blocks, &[1, 2, 3, 4, 5], &teaching_weeks(weeks)).unwrap()
+}
+
 pub fn room(id: &str) -> Room {
     Room {
         id: id.to_string(),
@@ -301,6 +308,8 @@ pub fn all_constraints() -> ConstraintSet {
         distributed_pattern_adherence: Vec::new(),
         block_pattern_adherence: Vec::new(),
         minimize_break_spanning: Vec::new(),
+        max_days: Vec::new(),
+        max_consecutive_days: Vec::new(),
     }
 }
 

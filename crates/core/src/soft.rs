@@ -336,6 +336,14 @@ pub struct Objective {
     /// Violated `MaxOnlineShare` cells. Joins `unplaced` on the hard side
     /// because it is an aggregate ratio that cannot be enforced as a filter.
     pub aggregate: u32,
+    /// Violated `MaxDays` `(Group-or-Person, week)` cells — the day-count
+    /// cap counterpart of `aggregate`, same "cannot be a construction
+    /// filter" reasoning (ADR-0025): a hard cap only fully known as
+    /// placements accumulate. See [`crate::aggregates::Aggregates::
+    /// max_days_violations`].
+    pub max_days_violations: u32,
+    /// The `MaxConsecutiveDays` counterpart of `max_days_violations`.
+    pub max_consecutive_days_violations: u32,
     pub soft: f64,
     /// Mixed `(group, day)` cells, already multiplied by the configured weight.
     ///
@@ -452,7 +460,10 @@ impl Objective {
     /// every reachable soft configuration.
     #[inline]
     pub fn hard(&self) -> u32 {
-        self.unplaced + self.aggregate
+        self.unplaced
+            + self.aggregate
+            + self.max_days_violations
+            + self.max_consecutive_days_violations
     }
 
     #[inline]
@@ -683,6 +694,8 @@ mod tests {
         let all_soft_bad = Objective {
             unplaced: 0,
             aggregate: 0,
+            max_days_violations: 0,
+            max_consecutive_days_violations: 0,
             soft: 7.0 * 4.0,
             day_mix_cost: 0.0,
             compactness_cost: 0.0,
@@ -706,6 +719,8 @@ mod tests {
         let one_unplaced = Objective {
             unplaced: 1,
             aggregate: 0,
+            max_days_violations: 0,
+            max_consecutive_days_violations: 0,
             soft: 0.0,
             day_mix_cost: 0.0,
             compactness_cost: 0.0,
@@ -746,6 +761,8 @@ mod tests {
         let everything_mixed = Objective {
             unplaced: 0,
             aggregate: 0,
+            max_days_violations: 0,
+            max_consecutive_days_violations: 0,
             soft: 7.0 * 4.0,
             day_mix_cost: day_mix_weight * cells,
             compactness_cost: 0.0,
@@ -769,6 +786,8 @@ mod tests {
         let one_unplaced = Objective {
             unplaced: 1,
             aggregate: 0,
+            max_days_violations: 0,
+            max_consecutive_days_violations: 0,
             soft: 0.0,
             day_mix_cost: 0.0,
             compactness_cost: 0.0,

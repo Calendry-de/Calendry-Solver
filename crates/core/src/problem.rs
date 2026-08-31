@@ -7,12 +7,12 @@
 
 use crate::aggregates::{
     Aggregates, CompactnessInstance, DayMixInstance, ExamSpacingSameDayInstance,
-    ExamSpacingWindowInstance, LecturerConsistencyInstance, MaxConsecutiveInstance,
-    MaxConsecutiveOfferingBlocksInstance, MaxDailySessionCountInstance, MaxDailySpanInstance,
-    MaxOfferingSessionsPerDayInstance, MaxWeeklyTeachingLoadInstance,
-    MinimizeLocationChangeInstance, MinimizeOfferingDaySplitInstance, MinimizeRoomChurnInstance,
-    MinimizeWeekdayImbalanceInstance, PatternAdherenceInstance, RoomConsistencyInstance,
-    RoomTurnaroundBufferInstance, ShareInstance,
+    ExamSpacingWindowInstance, LecturerConsistencyInstance, MaxConsecutiveDaysInstance,
+    MaxConsecutiveInstance, MaxConsecutiveOfferingBlocksInstance, MaxDailySessionCountInstance,
+    MaxDailySpanInstance, MaxDaysInstance, MaxOfferingSessionsPerDayInstance,
+    MaxWeeklyTeachingLoadInstance, MinimizeLocationChangeInstance,
+    MinimizeOfferingDaySplitInstance, MinimizeRoomChurnInstance, MinimizeWeekdayImbalanceInstance,
+    PatternAdherenceInstance, RoomConsistencyInstance, RoomTurnaroundBufferInstance, ShareInstance,
 };
 use crate::bitset::BitSet;
 use crate::groups::{GroupClosure, GroupCycle};
@@ -385,6 +385,14 @@ pub struct ConstraintSet {
     /// start block and duration, so it needs no state beyond `GridTime`
     /// itself. See [`Problem::break_spanning_cost`].
     pub minimize_break_spanning: Vec<MinimizeBreakSpanningInstance>,
+    /// HARD. Caps the number of distinct days a Group's or Person's
+    /// Sessions may use, per week — priced at `hard_penalty` rather than a
+    /// construction filter (ADR-0025). See
+    /// [`crate::aggregates::MaxDaysInstance`].
+    pub max_days: Vec<MaxDaysInstance>,
+    /// HARD, the consecutive-run counterpart of `max_days`. See
+    /// [`MaxConsecutiveDaysInstance`].
+    pub max_consecutive_days: Vec<MaxConsecutiveDaysInstance>,
 }
 
 /// One `ProtectedBlock` instance. The FIRST hard type whose values
@@ -507,6 +515,10 @@ pub struct Enforce {
     pub minimize_room_churn: bool,
     pub room_consistency: bool,
     pub lecturer_consistency: bool,
+    pub max_days_group: bool,
+    pub max_days_person: bool,
+    pub max_consecutive_days_group: bool,
+    pub max_consecutive_days_person: bool,
 }
 
 impl ConstraintSet {
@@ -584,6 +596,16 @@ impl ConstraintSet {
             minimize_room_churn: self.minimize_room_churn.iter().any(|c| c.covers(kind)),
             room_consistency: self.room_consistency.iter().any(|c| c.covers(kind)),
             lecturer_consistency: self.lecturer_consistency.iter().any(|c| c.covers(kind)),
+            max_days_group: self.max_days.iter().any(|c| c.group && c.covers(kind)),
+            max_days_person: self.max_days.iter().any(|c| c.person && c.covers(kind)),
+            max_consecutive_days_group: self
+                .max_consecutive_days
+                .iter()
+                .any(|c| c.group && c.covers(kind)),
+            max_consecutive_days_person: self
+                .max_consecutive_days
+                .iter()
+                .any(|c| c.person && c.covers(kind)),
         }
     }
 }
@@ -1500,6 +1522,8 @@ impl Problem {
             constraints.exam_spacing_window.clone(),
             constraints.minimize_weekday_imbalance.clone(),
             slots.active_days().len(),
+            constraints.max_days.clone(),
+            constraints.max_consecutive_days.clone(),
             constraints.minimize_location_change.clone(),
             n_locations,
             constraints.room_turnaround_buffer.clone(),

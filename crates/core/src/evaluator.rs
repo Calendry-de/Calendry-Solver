@@ -106,6 +106,22 @@ fn score_one(problem: &Problem, solution: &Solution, state: &SearchState, mv: &M
         0.0
     };
 
+    // Same ranking-signal contract as `share_penalty` — HARD, priced at
+    // `hard_penalty` rather than a construction filter (ADR-0025), so a
+    // candidate that would newly violate a day cap is heavily penalised but
+    // remains reachable.
+    let max_days_penalty = if state.would_worsen_max_days(problem, &candidate, &span) {
+        problem.hard_penalty
+    } else {
+        0.0
+    };
+    let max_consecutive_days_penalty =
+        if state.would_worsen_max_consecutive_days(problem, &candidate, &span) {
+            problem.hard_penalty
+        } else {
+            0.0
+        };
+
     /*
      * OnlineOnsiteSameDay is soft, so it is priced here at its CONFIGURED
      * WEIGHT rather than at `hard_penalty` like the share cap above. That
@@ -217,6 +233,8 @@ fn score_one(problem: &Problem, solution: &Solution, state: &SearchState, mv: &M
             + problem.capacity_waste_cost(offering, capacity)
             + problem.break_spanning_cost(offering, mv.to.start, offering.duration_blocks)
             + share_penalty
+            + max_days_penalty
+            + max_consecutive_days_penalty
             + day_mix_penalty
             + exam_same_day_penalty
             + exam_window_penalty

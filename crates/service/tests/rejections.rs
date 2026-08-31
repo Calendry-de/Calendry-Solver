@@ -718,43 +718,9 @@ fn travel_time_between_rooms_is_unimplemented_not_invalid() {
     assert_eq!(code_of(&e), Code::Unimplemented);
 }
 
-#[test]
-fn max_days_is_unimplemented_not_invalid() {
-    let mut input = base_input();
-    input.constraints.push(enabled(
-        "c-max-days",
-        pb::constraint_config::Params::MaxDays(pb::MaxDays { scope: vec![], max_days: 2 }),
-    ));
-
-    let e = reject(&input, &scope(&[]));
-    assert!(
-        matches!(&e, ConvertError::ConstraintTypeUnimplemented { constraint_type: "MaxDays", .. }),
-        "{e}"
-    );
-    assert_eq!(code_of(&e), Code::Unimplemented);
-}
-
-#[test]
-fn max_consecutive_days_is_unimplemented_not_invalid() {
-    let mut input = base_input();
-    input.constraints.push(enabled(
-        "c-max-consec-days",
-        pb::constraint_config::Params::MaxConsecutiveDays(pb::MaxConsecutiveDays {
-            scope: vec![],
-            max_consecutive_days: 5,
-        }),
-    ));
-
-    let e = reject(&input, &scope(&[]));
-    assert!(
-        matches!(
-            &e,
-            ConvertError::ConstraintTypeUnimplemented { constraint_type: "MaxConsecutiveDays", .. }
-        ),
-        "{e}"
-    );
-    assert_eq!(code_of(&e), Code::Unimplemented);
-}
+// `MaxDays` and `MaxConsecutiveDays` are now built — see
+// `crates/service/tests/max_days.rs` and
+// `crates/core/tests/max_days.rs` for their real behavior.
 
 #[test]
 fn daybreak_is_unimplemented_not_invalid() {

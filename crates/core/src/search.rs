@@ -195,6 +195,8 @@ impl<'p> Trial<'p> {
         Objective {
             unplaced: self.unplaced,
             aggregate: self.state.share_violations(),
+            max_days_violations: self.state.max_days_violations(),
+            max_consecutive_days_violations: self.state.max_consecutive_days_violations(),
             soft: self.soft,
             day_mix_cost: self.state.day_mix_cost(self.problem),
             compactness_cost: self.state.compactness_cost(self.problem),
@@ -927,6 +929,8 @@ pub fn recompute_objective(problem: &Problem, solution: &Solution) -> Objective 
     Objective {
         unplaced,
         aggregate: state.share_violations(),
+        max_days_violations: state.max_days_violations(),
+        max_consecutive_days_violations: state.max_consecutive_days_violations(),
         soft,
         day_mix_cost: state.day_mix_cost(problem),
         compactness_cost: state.compactness_cost(problem),
@@ -1079,6 +1083,8 @@ pub fn soft_breakdown(problem: &Problem, solution: &Solution) -> Vec<SoftCompone
 pub fn objectives_agree(a: Objective, b: Objective) -> bool {
     a.unplaced == b.unplaced
         && a.aggregate == b.aggregate
+        && a.max_days_violations == b.max_days_violations
+        && a.max_consecutive_days_violations == b.max_consecutive_days_violations
         && (a.soft - b.soft).abs() <= 1e-9 * (1.0 + a.soft.abs())
         && (a.day_mix_cost - b.day_mix_cost).abs() <= 1e-9 * (1.0 + a.day_mix_cost.abs())
         && (a.compactness_cost - b.compactness_cost).abs()

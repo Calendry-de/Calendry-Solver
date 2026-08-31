@@ -145,6 +145,13 @@ fn single(axis: fn(&mut Enforce), base: Enforce) -> Enforce {
         minimize_room_churn: false,
         room_consistency: false,
         lecturer_consistency: false,
+        // Same reasoning as Compactness above: no `would_worsen`-style
+        // predicate wired into this tool yet, even though one exists on
+        // `Aggregates` for the search's own ranking use.
+        max_days_group: false,
+        max_days_person: false,
+        max_consecutive_days_group: false,
+        max_consecutive_days_person: false,
     };
     axis(&mut e);
     axis(&mut probe);
@@ -187,6 +194,11 @@ fn single(axis: fn(&mut Enforce), base: Enforce) -> Enforce {
         minimize_room_churn: e.minimize_room_churn && base.minimize_room_churn,
         room_consistency: e.room_consistency && base.room_consistency,
         lecturer_consistency: e.lecturer_consistency && base.lecturer_consistency,
+        max_days_group: e.max_days_group && base.max_days_group,
+        max_days_person: e.max_days_person && base.max_days_person,
+        max_consecutive_days_group: e.max_consecutive_days_group && base.max_consecutive_days_group,
+        max_consecutive_days_person: e.max_consecutive_days_person
+            && base.max_consecutive_days_person,
     }
 }
 

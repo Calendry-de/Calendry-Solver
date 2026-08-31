@@ -253,6 +253,51 @@ impl MinimizeWeekdayImbalanceInstance {
     }
 }
 
+/// One configured `MaxDays` rule. HARD, priced at `hard_penalty` rather than
+/// used as a construction filter — the same ADR-0025 stance `MaxOnlineShare`
+/// takes. Same `group`/`person` axis split as `MaxConsecutiveInstance` and
+/// siblings; no `weight`, because hard-vs-soft is a property of the type and
+/// a HARD type's weight is meaningless. Shares its underlying day-occupancy
+/// substrate with `MaxConsecutiveDaysInstance` — see `Aggregates::
+/// day_cap_group`/`day_cap_person` — the same "worth building on the same
+/// accumulator" reasoning the tracking card gives for reusing
+/// `MinimizeWeekdayImbalance`'s shape.
+#[derive(Clone, Debug)]
+pub struct MaxDaysInstance {
+    pub id: String,
+    /// Empty means all kinds.
+    pub kinds: Vec<String>,
+    pub group: bool,
+    pub person: bool,
+    pub max_days: u32,
+}
+
+impl MaxDaysInstance {
+    #[inline]
+    pub fn covers(&self, kind: &str) -> bool {
+        self.kinds.is_empty() || self.kinds.iter().any(|k| k == kind)
+    }
+}
+
+/// One configured `MaxConsecutiveDays` rule — same shape as `MaxDaysInstance`,
+/// reducing the SAME day-occupancy cell by longest consecutive run instead of
+/// distinct count.
+#[derive(Clone, Debug)]
+pub struct MaxConsecutiveDaysInstance {
+    pub id: String,
+    pub kinds: Vec<String>,
+    pub group: bool,
+    pub person: bool,
+    pub max_consecutive_days: u32,
+}
+
+impl MaxConsecutiveDaysInstance {
+    #[inline]
+    pub fn covers(&self, kind: &str) -> bool {
+        self.kinds.is_empty() || self.kinds.iter().any(|k| k == kind)
+    }
+}
+
 /// One configured `MinimizeLocationChange` rule — same `group`/`person` axis
 /// split as `CompactnessInstance` and siblings, plus the distinct-location
 /// cap none of those have an equivalent of. A day counts as a violation once
@@ -689,6 +734,29 @@ pub struct Aggregates {
     active_days_count: usize,
     imbalance_rules: Vec<MinimizeWeekdayImbalanceInstance>,
 
+    /// `[entity * n_days + day_index]` — Sessions of that Group/Person on
+    /// that day. The shared day-occupancy substrate `MaxDays` and
+    /// `MaxConsecutiveDays` both reduce over one week's slice (width
+    /// `active_days_count`, same layout `imbalance_day` uses), one counting
+    /// DISTINCT days used and the other the longest CONSECUTIVE run. A
+    /// separate array from `imbalance_day` even though both are "Sessions
+    /// per (entity, day)": `MinimizeWeekdayImbalance` is Group-only and these
+    /// two need the Person axis too, and the three types are independently
+    /// switchable. Read fresh, like `imbalance_day` — see
+    /// `max_days_violations`/`max_consecutive_days_violations`.
+    day_cap_group: Vec<u32>,
+    day_cap_person: Vec<u32>,
+    /// Tightest `max_days` among every enabled instance covering each axis —
+    /// the "whichever binds hardest" convention `run_group_threshold` uses.
+    /// `u32::MAX` (never exceeded) when nothing configures that axis.
+    max_days_group_threshold: u32,
+    max_days_person_threshold: u32,
+    /// The `MaxConsecutiveDays` counterpart, same convention.
+    max_consecutive_days_group_threshold: u32,
+    max_consecutive_days_person_threshold: u32,
+    max_days_rules: Vec<MaxDaysInstance>,
+    max_consecutive_days_rules: Vec<MaxConsecutiveDaysInstance>,
+
     /// `[group * n_days * n_locations + day * n_locations + loc]` —
     /// occurrence count of Sessions this Group has in each distinct
     /// `Room.location` on each day. The inner axis is LOCATION rather than
@@ -828,6 +896,8 @@ impl Aggregates {
         exam_window_rules: Vec<ExamSpacingWindowInstance>,
         imbalance_rules: Vec<MinimizeWeekdayImbalanceInstance>,
         active_days_count: usize,
+        max_days_rules: Vec<MaxDaysInstance>,
+        max_consecutive_days_rules: Vec<MaxConsecutiveDaysInstance>,
         location_rules: Vec<MinimizeLocationChangeInstance>,
         n_locations: usize,
         turnaround_rules: Vec<RoomTurnaroundBufferInstance>,
@@ -933,6 +1003,37 @@ impl Aggregates {
             .unwrap_or(u32::MAX);
 
         let track_imbalance = !imbalance_rules.is_empty();
+
+        // Shared substrate: either type wanting an axis is enough to track
+        // it, since both reduce the SAME day-occupancy cell.
+        let track_day_cap_group = max_days_rules.iter().any(|r| r.group)
+            || max_consecutive_days_rules.iter().any(|r| r.group);
+        let track_day_cap_person = max_days_rules.iter().any(|r| r.person)
+            || max_consecutive_days_rules.iter().any(|r| r.person);
+        let max_days_group_threshold = max_days_rules
+            .iter()
+            .filter(|r| r.group)
+            .map(|r| r.max_days)
+            .min()
+            .unwrap_or(u32::MAX);
+        let max_days_person_threshold = max_days_rules
+            .iter()
+            .filter(|r| r.person)
+            .map(|r| r.max_days)
+            .min()
+            .unwrap_or(u32::MAX);
+        let max_consecutive_days_group_threshold = max_consecutive_days_rules
+            .iter()
+            .filter(|r| r.group)
+            .map(|r| r.max_consecutive_days)
+            .min()
+            .unwrap_or(u32::MAX);
+        let max_consecutive_days_person_threshold = max_consecutive_days_rules
+            .iter()
+            .filter(|r| r.person)
+            .map(|r| r.max_consecutive_days)
+            .min()
+            .unwrap_or(u32::MAX);
 
         let track_location_group = location_rules.iter().any(|r| r.group);
         let track_location_person = location_rules.iter().any(|r| r.person);
@@ -1091,6 +1192,22 @@ impl Aggregates {
             },
             active_days_count: active_days_count.max(1),
             imbalance_rules,
+            day_cap_group: if track_day_cap_group {
+                vec![0; groups * n_days.max(1)]
+            } else {
+                Vec::new()
+            },
+            day_cap_person: if track_day_cap_person {
+                vec![0; n_persons.max(1) * n_days.max(1)]
+            } else {
+                Vec::new()
+            },
+            max_days_group_threshold,
+            max_days_person_threshold,
+            max_consecutive_days_group_threshold,
+            max_consecutive_days_person_threshold,
+            max_days_rules,
+            max_consecutive_days_rules,
             location_group_loc: if track_location_group {
                 vec![0; groups * n_days.max(1) * locations]
             } else {
@@ -3046,6 +3163,345 @@ impl Aggregates {
         cost
     }
 
+    // -- max days / max consecutive days ----------------------------------------
+    //
+    // HARD, priced at `hard_penalty` rather than a construction filter — see
+    // `crate::problem::Problem::hard_penalty` and ADR-0025. Both reduce the
+    // SAME day-occupancy substrate (`day_cap_group`/`day_cap_person`), one
+    // by DISTINCT-day count, the other by longest CONSECUTIVE run — read
+    // fresh per (entity, week) cell, exactly like `imbalance_cost`, rather
+    // than maintained as a running total: entities x weeks is the same
+    // small scale `imbalance_cost`'s own doc already argues is safe to
+    // rescan.
+
+    pub fn max_days_rules(&self) -> &[MaxDaysInstance] {
+        &self.max_days_rules
+    }
+
+    pub fn max_consecutive_days_rules(&self) -> &[MaxConsecutiveDaysInstance] {
+        &self.max_consecutive_days_rules
+    }
+
+    pub fn add_group_day_cap(&mut self, groups: &[GroupIdx], day: u32) {
+        if self.day_cap_group.is_empty() {
+            return;
+        }
+        for &g in groups {
+            self.day_cap_group[g.get() * self.n_days + day as usize] += 1;
+        }
+    }
+
+    pub fn remove_group_day_cap(&mut self, groups: &[GroupIdx], day: u32) {
+        if self.day_cap_group.is_empty() {
+            return;
+        }
+        for &g in groups {
+            let c = g.get() * self.n_days + day as usize;
+            self.day_cap_group[c] = self.day_cap_group[c].saturating_sub(1);
+        }
+    }
+
+    pub fn add_person_day_cap(&mut self, persons: &[PersonIdx], day: u32) {
+        if self.day_cap_person.is_empty() {
+            return;
+        }
+        for &p in persons {
+            self.day_cap_person[p.get() * self.n_days + day as usize] += 1;
+        }
+    }
+
+    pub fn remove_person_day_cap(&mut self, persons: &[PersonIdx], day: u32) {
+        if self.day_cap_person.is_empty() {
+            return;
+        }
+        for &p in persons {
+            let c = p.get() * self.n_days + day as usize;
+            self.day_cap_person[c] = self.day_cap_person[c].saturating_sub(1);
+        }
+    }
+
+    /// Distinct nonzero cells in one week's slice — what `MaxDays` caps.
+    #[inline]
+    fn distinct_days_u32(week_cells: &[u32]) -> u32 {
+        week_cells.iter().filter(|&&c| c > 0).count() as u32
+    }
+
+    /// Whether one week's slice violates `threshold`, under either
+    /// reduction. `consecutive = true` selects the `MaxConsecutiveDays`
+    /// reading (`run_excess_u32 > 0`, i.e. some run exceeds the cap);
+    /// `false` selects the `MaxDays` reading (distinct-day count exceeds
+    /// it).
+    #[inline]
+    fn day_cap_violated(week_cells: &[u32], threshold: u32, consecutive: bool) -> bool {
+        if threshold == u32::MAX {
+            return false;
+        }
+        if consecutive {
+            Self::run_excess_u32(week_cells, threshold) > 0
+        } else {
+            Self::distinct_days_u32(week_cells) > threshold
+        }
+    }
+
+    /// Total currently-violating `(entity, week)` cells across BOTH axes,
+    /// for one reduction — the number that joins the objective's hard
+    /// component, the same role `share_violations` plays for
+    /// `MaxOnlineShare`.
+    fn day_cap_violations(
+        cells: &[u32],
+        n_days: usize,
+        active_days_count: usize,
+        threshold: u32,
+        consecutive: bool,
+    ) -> u32 {
+        if cells.is_empty() || threshold == u32::MAX {
+            return 0;
+        }
+        let entities = cells.len() / n_days;
+        let weeks = n_days / active_days_count;
+        let mut violated = 0u32;
+        for e in 0..entities {
+            let row = e * n_days;
+            for w in 0..weeks {
+                let start = row + w * active_days_count;
+                let week_cells = &cells[start..start + active_days_count];
+                if Self::day_cap_violated(week_cells, threshold, consecutive) {
+                    violated += 1;
+                }
+            }
+        }
+        violated
+    }
+
+    pub fn max_days_violations(&self) -> u32 {
+        Self::day_cap_violations(
+            &self.day_cap_group,
+            self.n_days,
+            self.active_days_count,
+            self.max_days_group_threshold,
+            false,
+        ) + Self::day_cap_violations(
+            &self.day_cap_person,
+            self.n_days,
+            self.active_days_count,
+            self.max_days_person_threshold,
+            false,
+        )
+    }
+
+    pub fn max_consecutive_days_violations(&self) -> u32 {
+        Self::day_cap_violations(
+            &self.day_cap_group,
+            self.n_days,
+            self.active_days_count,
+            self.max_consecutive_days_group_threshold,
+            true,
+        ) + Self::day_cap_violations(
+            &self.day_cap_person,
+            self.n_days,
+            self.active_days_count,
+            self.max_consecutive_days_person_threshold,
+            true,
+        )
+    }
+
+    /// The longest run of consecutive nonzero cells — what
+    /// `MaxConsecutiveDays` reports as `observed`, distinct from
+    /// `run_excess_u32`'s excess-over-threshold total (which sums every
+    /// run's excess, not the single longest one).
+    #[inline]
+    fn longest_run_u32(cells: &[u32]) -> u32 {
+        let mut longest = 0u32;
+        let mut run = 0u32;
+        for &c in cells {
+            if c > 0 {
+                run += 1;
+                longest = longest.max(run);
+            } else {
+                run = 0;
+            }
+        }
+        longest
+    }
+
+    /// Every currently-violating `(entity, week)` cell for one axis, under
+    /// `consecutive`'s reduction — for REPORTING, mirroring `violated_cells`'
+    /// role for `MaxOnlineShare`. `observed` is the distinct-day count
+    /// (`MaxDays`) or the longest run (`MaxConsecutiveDays`) that exceeded
+    /// the threshold.
+    fn day_cap_violated_cells(
+        cells: &[u32],
+        n_days: usize,
+        active_days_count: usize,
+        threshold: u32,
+        consecutive: bool,
+    ) -> Vec<(u32, u32, u32)> {
+        let mut out = Vec::new();
+        if cells.is_empty() || threshold == u32::MAX {
+            return out;
+        }
+        let entities = cells.len() / n_days;
+        let weeks = n_days / active_days_count;
+        for e in 0..entities {
+            let row = e * n_days;
+            for w in 0..weeks {
+                let start = row + w * active_days_count;
+                let week_cells = &cells[start..start + active_days_count];
+                if Self::day_cap_violated(week_cells, threshold, consecutive) {
+                    let observed = if consecutive {
+                        Self::longest_run_u32(week_cells)
+                    } else {
+                        Self::distinct_days_u32(week_cells)
+                    };
+                    out.push((e as u32, w as u32, observed));
+                }
+            }
+        }
+        out
+    }
+
+    /// `(is_person, entity_index, week, observed_distinct_days)` for every
+    /// currently-violating `MaxDays` cell, both axes combined.
+    pub fn max_days_violated_cells(&self) -> Vec<(bool, u32, u32, u32)> {
+        Self::day_cap_violated_cells(
+            &self.day_cap_group,
+            self.n_days,
+            self.active_days_count,
+            self.max_days_group_threshold,
+            false,
+        )
+        .into_iter()
+        .map(|(e, w, o)| (false, e, w, o))
+        .chain(
+            Self::day_cap_violated_cells(
+                &self.day_cap_person,
+                self.n_days,
+                self.active_days_count,
+                self.max_days_person_threshold,
+                false,
+            )
+            .into_iter()
+            .map(|(e, w, o)| (true, e, w, o)),
+        )
+        .collect()
+    }
+
+    /// The `MaxConsecutiveDays` counterpart of `max_days_violated_cells`.
+    pub fn max_consecutive_days_violated_cells(&self) -> Vec<(bool, u32, u32, u32)> {
+        Self::day_cap_violated_cells(
+            &self.day_cap_group,
+            self.n_days,
+            self.active_days_count,
+            self.max_consecutive_days_group_threshold,
+            true,
+        )
+        .into_iter()
+        .map(|(e, w, o)| (false, e, w, o))
+        .chain(
+            Self::day_cap_violated_cells(
+                &self.day_cap_person,
+                self.n_days,
+                self.active_days_count,
+                self.max_consecutive_days_person_threshold,
+                true,
+            )
+            .into_iter()
+            .map(|(e, w, o)| (true, e, w, o)),
+        )
+        .collect()
+    }
+
+    /// Would `day` newly push this entity's week over `threshold`, under
+    /// `consecutive`'s reduction? A ranking signal only — `false` whenever
+    /// `day` is already occupied (no change) or the week is already
+    /// violated (this candidate does not create the violation).
+    fn day_cap_would_worsen(
+        cells: &[u32],
+        entity_row: usize,
+        n_days: usize,
+        active_days_count: usize,
+        day: u32,
+        threshold: u32,
+        consecutive: bool,
+    ) -> bool {
+        if cells.is_empty() || threshold == u32::MAX {
+            return false;
+        }
+        let position = day as usize % active_days_count;
+        let week = day as usize / active_days_count;
+        let start = entity_row * n_days + week * active_days_count;
+        let week_cells = &cells[start..start + active_days_count];
+        if week_cells[position] > 0 {
+            return false;
+        }
+        if Self::day_cap_violated(week_cells, threshold, consecutive) {
+            return false;
+        }
+        let mut tmp: Vec<u32> = week_cells.to_vec();
+        tmp[position] = 1;
+        Self::day_cap_violated(&tmp, threshold, consecutive)
+    }
+
+    pub fn group_max_days_would_worsen(&self, groups: &[GroupIdx], day: u32) -> bool {
+        groups.iter().any(|g| {
+            Self::day_cap_would_worsen(
+                &self.day_cap_group,
+                g.get(),
+                self.n_days,
+                self.active_days_count,
+                day,
+                self.max_days_group_threshold,
+                false,
+            )
+        })
+    }
+
+    pub fn person_max_days_would_worsen(&self, persons: &[PersonIdx], day: u32) -> bool {
+        persons.iter().any(|p| {
+            Self::day_cap_would_worsen(
+                &self.day_cap_person,
+                p.get(),
+                self.n_days,
+                self.active_days_count,
+                day,
+                self.max_days_person_threshold,
+                false,
+            )
+        })
+    }
+
+    pub fn group_max_consecutive_days_would_worsen(&self, groups: &[GroupIdx], day: u32) -> bool {
+        groups.iter().any(|g| {
+            Self::day_cap_would_worsen(
+                &self.day_cap_group,
+                g.get(),
+                self.n_days,
+                self.active_days_count,
+                day,
+                self.max_consecutive_days_group_threshold,
+                true,
+            )
+        })
+    }
+
+    pub fn person_max_consecutive_days_would_worsen(
+        &self,
+        persons: &[PersonIdx],
+        day: u32,
+    ) -> bool {
+        persons.iter().any(|p| {
+            Self::day_cap_would_worsen(
+                &self.day_cap_person,
+                p.get(),
+                self.n_days,
+                self.active_days_count,
+                day,
+                self.max_consecutive_days_person_threshold,
+                true,
+            )
+        })
+    }
+
     // -- location change -------------------------------------------------------
 
     pub fn location_rules(&self) -> &[MinimizeLocationChangeInstance] {
@@ -4057,6 +4513,8 @@ mod tests {
             vec![],
             1,
             vec![],
+            vec![],
+            vec![],
             1,
             vec![],
             1,
@@ -4106,6 +4564,8 @@ mod tests {
             vec![],
             vec![],
             1,
+            vec![],
+            vec![],
             vec![],
             1,
             vec![],
@@ -4166,6 +4626,8 @@ mod tests {
             vec![],
             1,
             vec![],
+            vec![],
+            vec![],
             1,
             vec![],
             1,
@@ -4201,6 +4663,8 @@ mod tests {
             vec![],
             vec![],
             1,
+            vec![],
+            vec![],
             vec![],
             1,
             vec![],
@@ -4244,6 +4708,8 @@ mod tests {
             vec![],
             vec![],
             1,
+            vec![],
+            vec![],
             vec![],
             1,
             vec![],
@@ -4295,6 +4761,8 @@ mod tests {
             vec![],
             vec![],
             1,
+            vec![],
+            vec![],
             vec![],
             1,
             vec![],
@@ -4351,6 +4819,8 @@ mod tests {
             vec![],
             1,
             vec![],
+            vec![],
+            vec![],
             1,
             vec![],
             1,
@@ -4398,6 +4868,8 @@ mod tests {
             vec![],
             vec![],
             1,
+            vec![],
+            vec![],
             vec![],
             1,
             vec![],
@@ -4453,6 +4925,8 @@ mod tests {
             vec![],
             1,
             vec![],
+            vec![],
+            vec![],
             1,
             vec![],
             1,
@@ -4506,6 +4980,8 @@ mod tests {
             vec![],
             1,
             vec![],
+            vec![],
+            vec![],
             1,
             vec![],
             1,
@@ -4545,6 +5021,8 @@ mod tests {
             vec![],
             vec![],
             1,
+            vec![],
+            vec![],
             vec![],
             1,
             vec![],
@@ -4592,6 +5070,8 @@ mod tests {
             vec![],
             1,
             vec![],
+            vec![],
+            vec![],
             1,
             vec![],
             1,
@@ -4633,6 +5113,8 @@ mod tests {
             vec![],
             vec![],
             1,
+            vec![],
+            vec![],
             vec![],
             1,
             vec![],
@@ -4682,6 +5164,8 @@ mod tests {
             vec![],
             vec![],
             1,
+            vec![],
+            vec![],
             vec![],
             1,
             vec![],
@@ -4739,6 +5223,8 @@ mod tests {
             vec![],
             1,
             vec![],
+            vec![],
+            vec![],
             1,
             vec![],
             1,
@@ -4779,6 +5265,8 @@ mod tests {
             vec![],
             vec![],
             1,
+            vec![],
+            vec![],
             vec![],
             1,
             vec![],
@@ -4824,6 +5312,8 @@ mod tests {
             vec![],
             1,
             vec![],
+            vec![],
+            vec![],
             1,
             vec![],
             1,
@@ -4868,6 +5358,8 @@ mod tests {
             vec![],
             1,
             vec![],
+            vec![],
+            vec![],
             1,
             vec![],
             1,
@@ -4909,6 +5401,8 @@ mod tests {
             vec![],
             vec![],
             1,
+            vec![],
+            vec![],
             vec![],
             1,
             vec![],
@@ -4958,6 +5452,8 @@ mod tests {
             vec![],
             1,
             vec![],
+            vec![],
+            vec![],
             1,
             vec![],
             1,
@@ -5003,6 +5499,8 @@ mod tests {
             vec![],
             vec![],
             1,
+            vec![],
+            vec![],
             vec![],
             1,
             vec![],

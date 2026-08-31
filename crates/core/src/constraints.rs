@@ -50,6 +50,8 @@ pub enum ConstraintType {
     GroupSizeFitsRoom,
     MaxConcurrentOnlineSessions,
     DifferentTimeRelation,
+    MaxDays,
+    MaxConsecutiveDays,
 }
 
 impl ConstraintType {
@@ -69,6 +71,8 @@ impl ConstraintType {
             Self::GroupSizeFitsRoom => "GroupSizeFitsRoom",
             Self::MaxConcurrentOnlineSessions => "MaxConcurrentOnlineSessions",
             Self::DifferentTimeRelation => "DifferentTimeRelation",
+            Self::MaxDays => "MaxDays",
+            Self::MaxConsecutiveDays => "MaxConsecutiveDays",
         }
     }
 }
@@ -165,6 +169,8 @@ pub fn evaluate_hard(problem: &Problem, solution: &Solution) -> Vec<Violation> {
     group_size_fits_room(problem, solution, &mut out);
     max_concurrent_online_sessions(problem, solution, &mut out);
     aggregates(problem, solution, &mut out);
+    max_days(problem, solution, &mut out);
+    max_consecutive_days(problem, solution, &mut out);
     out
 }
 
@@ -424,6 +430,80 @@ pub fn aggregates(problem: &Problem, solution: &Solution, out: &mut Vec<Violatio
                 problem.groups[group.get()].id,
                 rule.max_ratio * 100.0,
                 rule.allowance(total)
+            ),
+        });
+    }
+}
+
+/// HARD, priced at `hard_penalty` rather than a construction filter
+/// (ADR-0025) — same stance as `MaxOnlineShare`, and reported the same way:
+/// a run can succeed while still reporting a violated day cap.
+pub fn max_days(problem: &Problem, solution: &Solution, out: &mut Vec<Violation>) {
+    if problem.constraints.max_days.is_empty() {
+        return;
+    }
+    let state = SearchState::replay(problem, solution);
+    for (is_person, entity, week, observed) in state.aggregates.max_days_violated_cells() {
+        let Some(rule) = problem
+            .constraints
+            .max_days
+            .iter()
+            .find(|r| if is_person { r.person } else { r.group })
+        else {
+            continue;
+        };
+        let name = if is_person {
+            &problem.persons[entity as usize].id
+        } else {
+            &problem.groups[entity as usize].id
+        };
+        out.push(Violation {
+            constraint_id: rule.id.clone(),
+            constraint_type: ConstraintType::MaxDays,
+            session_ids: Vec::new(),
+            offering_ids: Vec::new(),
+            detail: format!(
+                "{} '{name}' uses {observed} distinct day(s) in week {week}, above the cap of \
+                 {}",
+                if is_person { "person" } else { "group" },
+                rule.max_days
+            ),
+        });
+    }
+}
+
+/// The `MaxConsecutiveDays` counterpart of `max_days`.
+pub fn max_consecutive_days(problem: &Problem, solution: &Solution, out: &mut Vec<Violation>) {
+    if problem.constraints.max_consecutive_days.is_empty() {
+        return;
+    }
+    let state = SearchState::replay(problem, solution);
+    for (is_person, entity, week, observed) in
+        state.aggregates.max_consecutive_days_violated_cells()
+    {
+        let Some(rule) = problem
+            .constraints
+            .max_consecutive_days
+            .iter()
+            .find(|r| if is_person { r.person } else { r.group })
+        else {
+            continue;
+        };
+        let name = if is_person {
+            &problem.persons[entity as usize].id
+        } else {
+            &problem.groups[entity as usize].id
+        };
+        out.push(Violation {
+            constraint_id: rule.id.clone(),
+            constraint_type: ConstraintType::MaxConsecutiveDays,
+            session_ids: Vec::new(),
+            offering_ids: Vec::new(),
+            detail: format!(
+                "{} '{name}' has a run of {observed} consecutive day(s) in week {week}, above \
+                 the cap of {}",
+                if is_person { "person" } else { "group" },
+                rule.max_consecutive_days
             ),
         });
     }

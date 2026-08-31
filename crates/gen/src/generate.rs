@@ -827,6 +827,11 @@ fn build_constraints(params: &InstanceParams, slots: &SlotTable) -> ConstraintSe
         // OFF: the generator's grid carries no break structure
         // (`grid_time` defaults to no gaps), so this rule could never fire.
         minimize_break_spanning: Vec::new(),
+        // OFF: a HARD day cap that could make an otherwise-feasible
+        // generated instance infeasible is not a signal this baseline wants
+        // to assert on.
+        max_days: Vec::new(),
+        max_consecutive_days: Vec::new(),
         // Weight 5 mirrors the app catalogue's `defaultWeight`, so generated
         // benchmark instances price a mixed day the way a real tenant does.
         online_onsite_same_day: vec![DayMixInstance {

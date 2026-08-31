@@ -27,12 +27,12 @@ use std::collections::{HashMap, HashSet};
 
 use calendry_solver_core::aggregates::{
     CompactnessInstance, DayMixInstance, ExamSpacingSameDayInstance, ExamSpacingWindowInstance,
-    LecturerConsistencyInstance, MaxConsecutiveInstance, MaxConsecutiveOfferingBlocksInstance,
-    MaxDailySessionCountInstance, MaxDailySpanInstance, MaxOfferingSessionsPerDayInstance,
-    MaxWeeklyTeachingLoadInstance, MinimizeLocationChangeInstance,
-    MinimizeOfferingDaySplitInstance, MinimizeRoomChurnInstance, MinimizeWeekdayImbalanceInstance,
-    PatternAdherenceInstance, RoomConsistencyInstance, RoomTurnaroundBufferInstance, ShareInstance,
-    ShareWindow,
+    LecturerConsistencyInstance, MaxConsecutiveDaysInstance, MaxConsecutiveInstance,
+    MaxConsecutiveOfferingBlocksInstance, MaxDailySessionCountInstance, MaxDailySpanInstance,
+    MaxDaysInstance, MaxOfferingSessionsPerDayInstance, MaxWeeklyTeachingLoadInstance,
+    MinimizeLocationChangeInstance, MinimizeOfferingDaySplitInstance, MinimizeRoomChurnInstance,
+    MinimizeWeekdayImbalanceInstance, PatternAdherenceInstance, RoomConsistencyInstance,
+    RoomTurnaroundBufferInstance, ShareInstance, ShareWindow,
 };
 use calendry_solver_core::ids::{GroupIdx, OfferingIdx, PersonIdx, RoomIdx, SlotIdx};
 use calendry_solver_core::preferences::{Preference, PreferenceInstance};
@@ -1754,16 +1754,50 @@ fn build_constraints(input: &pb::SolverInput) -> Result<ConstraintSet, ConvertEr
                     constraint_type: "TravelTimeBetweenRooms",
                 });
             }
-            Some(Params::MaxDays(_)) => {
-                return Err(ConvertError::ConstraintTypeUnimplemented {
-                    constraint: c.id.clone(),
-                    constraint_type: "MaxDays",
+            // Built — see `crate::aggregates::MaxDaysInstance`. HARD: no
+            // weight validation, the same reason `MaxConcurrentOnlineSessions`
+            // skips it. Same `CompactnessScope` parsing as `MaxConsecutiveBlocks`.
+            Some(Params::MaxDays(p)) => {
+                let (mut group, mut person) = (false, false);
+                for &s in &p.scope {
+                    match pb::CompactnessScope::try_from(s) {
+                        Ok(pb::CompactnessScope::Group) => group = true,
+                        Ok(pb::CompactnessScope::Person) => person = true,
+                        _ => {}
+                    }
+                }
+                if p.scope.is_empty() {
+                    group = true;
+                    person = true;
+                }
+                set.max_days.push(MaxDaysInstance {
+                    id: c.id.clone(),
+                    kinds: c.applies_to_kinds.clone(),
+                    group,
+                    person,
+                    max_days: p.max_days,
                 });
             }
-            Some(Params::MaxConsecutiveDays(_)) => {
-                return Err(ConvertError::ConstraintTypeUnimplemented {
-                    constraint: c.id.clone(),
-                    constraint_type: "MaxConsecutiveDays",
+            // Built — see `crate::aggregates::MaxConsecutiveDaysInstance`.
+            Some(Params::MaxConsecutiveDays(p)) => {
+                let (mut group, mut person) = (false, false);
+                for &s in &p.scope {
+                    match pb::CompactnessScope::try_from(s) {
+                        Ok(pb::CompactnessScope::Group) => group = true,
+                        Ok(pb::CompactnessScope::Person) => person = true,
+                        _ => {}
+                    }
+                }
+                if p.scope.is_empty() {
+                    group = true;
+                    person = true;
+                }
+                set.max_consecutive_days.push(MaxConsecutiveDaysInstance {
+                    id: c.id.clone(),
+                    kinds: c.applies_to_kinds.clone(),
+                    group,
+                    person,
+                    max_consecutive_days: p.max_consecutive_days,
                 });
             }
             Some(Params::Daybreak(_)) => {

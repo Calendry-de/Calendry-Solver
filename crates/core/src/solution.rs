@@ -1280,6 +1280,26 @@ impl SearchState {
                     .remove_person_daily_count(who.attendees, day);
             }
         }
+        // Shared substrate: either type wanting this axis is enough to
+        // maintain it, since both `MaxDays` and `MaxConsecutiveDays` reduce
+        // the SAME day-occupancy cell (see `Aggregates::day_cap_group`/
+        // `day_cap_person`) — calling both add functions here would
+        // double-count.
+        if who.enforce.max_days_group || who.enforce.max_consecutive_days_group {
+            if add {
+                self.aggregates.add_group_day_cap(who.subtree_groups, day);
+            } else {
+                self.aggregates
+                    .remove_group_day_cap(who.subtree_groups, day);
+            }
+        }
+        if who.enforce.max_days_person || who.enforce.max_consecutive_days_person {
+            if add {
+                self.aggregates.add_person_day_cap(who.attendees, day);
+            } else {
+                self.aggregates.remove_person_day_cap(who.attendees, day);
+            }
+        }
         if who.enforce.max_weekly_teaching_load {
             let week = problem.slots.flags(span[0]).week;
             if add {
@@ -1463,6 +1483,16 @@ impl SearchState {
     #[inline]
     pub fn share_violations(&self) -> u32 {
         self.aggregates.share_violations()
+    }
+
+    #[inline]
+    pub fn max_days_violations(&self) -> u32 {
+        self.aggregates.max_days_violations()
+    }
+
+    #[inline]
+    pub fn max_consecutive_days_violations(&self) -> u32 {
+        self.aggregates.max_consecutive_days_violations()
     }
 
     /// What `ruin_worst` should charge this occupant for the currently
@@ -1889,6 +1919,75 @@ impl SearchState {
             who.subtree_groups,
             week,
             Self::is_online(problem, who.room),
+        )
+    }
+
+    /// HARD, like `would_worsen_share`: a ranking signal only, `false`
+    /// whenever neither axis is enforced for `who`'s kind. `MaxDays` and
+    /// `MaxConsecutiveDays` share this one preview because a caller wanting
+    /// either always wants the newly-occupied day checked the same way —
+    /// each reduction (`consecutive`) reads its own threshold.
+    fn would_worsen_day_cap(
+        &self,
+        problem: &Problem,
+        who: &Occupant<'_>,
+        span: &[SlotIdx],
+        group_enforced: bool,
+        person_enforced: bool,
+        consecutive: bool,
+    ) -> bool {
+        if span.is_empty() || (!group_enforced && !person_enforced) {
+            return false;
+        }
+        let day = problem.slots.flags(span[0]).day_index;
+        let worsens_group = group_enforced
+            && (if consecutive {
+                self.aggregates
+                    .group_max_consecutive_days_would_worsen(who.subtree_groups, day)
+            } else {
+                self.aggregates
+                    .group_max_days_would_worsen(who.subtree_groups, day)
+            });
+        let worsens_person = person_enforced
+            && (if consecutive {
+                self.aggregates
+                    .person_max_consecutive_days_would_worsen(who.attendees, day)
+            } else {
+                self.aggregates
+                    .person_max_days_would_worsen(who.attendees, day)
+            });
+        worsens_group || worsens_person
+    }
+
+    pub fn would_worsen_max_days(
+        &self,
+        problem: &Problem,
+        who: &Occupant<'_>,
+        span: &[SlotIdx],
+    ) -> bool {
+        self.would_worsen_day_cap(
+            problem,
+            who,
+            span,
+            who.enforce.max_days_group,
+            who.enforce.max_days_person,
+            false,
+        )
+    }
+
+    pub fn would_worsen_max_consecutive_days(
+        &self,
+        problem: &Problem,
+        who: &Occupant<'_>,
+        span: &[SlotIdx],
+    ) -> bool {
+        self.would_worsen_day_cap(
+            problem,
+            who,
+            span,
+            who.enforce.max_consecutive_days_group,
+            who.enforce.max_consecutive_days_person,
+            true,
         )
     }
 }
