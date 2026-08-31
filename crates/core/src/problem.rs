@@ -208,6 +208,25 @@ pub enum RelationKind {
     /// the same shape as `RoomDoubleBooking`, just keyed by relation instead
     /// of Room. Symmetric: member order is irrelevant.
     DifferentTime,
+    /// HARD, but PRICED at `hard_penalty` rather than enforced as an
+    /// occupancy filter (unlike `DifferentTime`) — see the module doc on
+    /// [`crate::constraints::same_relation_violations`] for why a live
+    /// filter cannot check SET equality against a still-incomplete week.
+    /// For each week where 2+ members have a placed Session, those members'
+    /// SETS of `(day, block)` pairs used that week must be exactly equal —
+    /// the strict reading, combining `SameDays` and `SameStart`. Per-week,
+    /// best-effort: a week where fewer than 2 members have a placed Session
+    /// imposes no constraint, so this never requires members to share
+    /// `required_session_count`.
+    SameTime,
+    /// HARD, same pricing stance as `SameTime`. For each week where 2+
+    /// members have a placed Session, those members' SETS of days used
+    /// that week must be exactly equal — blocks may differ.
+    SameDays,
+    /// HARD, same pricing stance as `SameTime`. For each week where 2+
+    /// members have a placed Session, those members' SETS of start blocks
+    /// used that week must be exactly equal — days may differ.
+    SameStart,
 }
 
 /// One configured Offering relation — an ordered set of Offering references
@@ -1334,6 +1353,14 @@ pub struct Problem {
     /// `different_time_relations` entry names. Its length is the row count
     /// the solution module's relation occupancy matrix is sized against.
     pub different_time_relation_ids: Vec<String>,
+    /// Every configured `SameTime`/`SameDays`/`SameStart` relation, kept
+    /// whole (unlike `DifferentTime`, which is fully consumed into the
+    /// per-Offering `different_time_relations` row indices at build time):
+    /// these are read fresh by [`crate::constraints::same_relation_violations`]
+    /// rather than maintained as an occupancy bit, so the raw member list is
+    /// what every rescan needs. `DifferentTime` relations are never present
+    /// here.
+    pub relations: Vec<RelationSpec>,
 
     /// Whether each Offering is being actively placed by this run, indexed by
     /// [`OfferingIdx`]. Read it through [`Problem::in_scope`].
@@ -1477,11 +1504,13 @@ impl Problem {
         // `DifferentTime` relations, resolved to a dense row index (parallel
         // to `different_time_relation_ids`) and a per-Offering membership
         // list — the same "precompute once per Offering, read on every
-        // mark/unmark" shape `veto_mask` above uses. Other `RelationKind`
-        // variants would get their own membership table here; there is only
-        // one today.
+        // mark/unmark" shape `veto_mask` above uses. `SameTime`/`SameDays`/
+        // `SameStart` need no such precomputation: they are read fresh by
+        // `constraints::same_relation_violations`, which wants the raw
+        // member list kept whole on `Problem::relations` instead.
         let mut different_time_relation_ids: Vec<String> = Vec::new();
         let mut different_time_membership: Vec<Vec<u32>> = vec![Vec::new(); offerings.len()];
+        let mut retained_relations: Vec<RelationSpec> = Vec::new();
         for r in &relations {
             match r.kind {
                 RelationKind::DifferentTime => {
@@ -1492,6 +1521,9 @@ impl Problem {
                             row.push(ri);
                         }
                     }
+                }
+                RelationKind::SameTime | RelationKind::SameDays | RelationKind::SameStart => {
+                    retained_relations.push(r.clone());
                 }
             }
         }
@@ -1923,6 +1955,7 @@ impl Problem {
             lecturer_consistency_weight,
             room_location,
             different_time_relation_ids,
+            relations: retained_relations,
             in_scope,
             placement_counts,
             immovable_counts,

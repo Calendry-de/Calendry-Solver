@@ -14,7 +14,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::ids::{GroupIdx, OfferingIdx, PersonIdx, RoomIdx, SlotIdx};
-use crate::problem::{ConstraintInstance, Problem};
+use crate::problem::{ConstraintInstance, Problem, RelationKind};
 use crate::solution::{MAX_ADDITIONAL_ROOMS, MAX_LECTURERS, SearchState, Solution};
 
 /// Which catalogue type a report belongs to.
@@ -52,6 +52,9 @@ pub enum ConstraintType {
     DifferentTimeRelation,
     MaxDays,
     MaxConsecutiveDays,
+    SameTimeRelation,
+    SameDaysRelation,
+    SameStartRelation,
 }
 
 impl ConstraintType {
@@ -73,6 +76,9 @@ impl ConstraintType {
             Self::DifferentTimeRelation => "DifferentTimeRelation",
             Self::MaxDays => "MaxDays",
             Self::MaxConsecutiveDays => "MaxConsecutiveDays",
+            Self::SameTimeRelation => "SameTimeRelation",
+            Self::SameDaysRelation => "SameDaysRelation",
+            Self::SameStartRelation => "SameStartRelation",
         }
     }
 }
@@ -171,6 +177,7 @@ pub fn evaluate_hard(problem: &Problem, solution: &Solution) -> Vec<Violation> {
     aggregates(problem, solution, &mut out);
     max_days(problem, solution, &mut out);
     max_consecutive_days(problem, solution, &mut out);
+    same_relations(problem, solution, &mut out);
     out
 }
 
@@ -506,6 +513,206 @@ pub fn max_consecutive_days(problem: &Problem, solution: &Solution, out: &mut Ve
                 rule.max_consecutive_days
             ),
         });
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SameTime / SameDays / SameStart — parallel Offering relations (issue #54)
+//
+// The opposite of `DifferentTime`: instead of no two members ever sharing a
+// slot, every member's SAME-WEEK Sessions must agree on a SET (of days, of
+// start blocks, or of `(day, block)` pairs, depending on kind). HARD, but
+// PRICED at `hard_penalty` rather than enforced as an occupancy filter like
+// `DifferentTime` — deliberately, not an oversight. A live `is_free`-style
+// filter can only ever see PARTIAL state (a member's Sessions for a shared
+// week accumulate one placement at a time, in whatever order construction
+// or repair happens to try them), so "these two members' day-SETS are
+// equal" is not decidable until both members' Sessions for that week are
+// fully committed — there is no well-defined moment mid-search to check it
+// as a filter without either rejecting on incomplete information or never
+// refusing a genuine mismatch. Read fresh over every relation, the same
+// "small enough to rescan" reasoning `imbalance_cost`/`max_days_violations`
+// already rely on: relations and their members are few.
+//
+// PER-WEEK, BEST-EFFORT (RelationKind's own doc): a week where fewer than
+// 2 members have a placed Session imposes no constraint, so this never
+// requires members to share `required_session_count` — sidesteps the
+// frequency-mismatch ill-definedness the tracking card itself flagged.
+// ---------------------------------------------------------------------------
+
+/// Every member's per-week key-SET, from PLACED Sessions only. `key_of`
+/// picks the reduction: `iso_weekday` for `SameDays`, `block` for
+/// `SameStart`, `(iso_weekday, block)` for `SameTime`. A week absent from
+/// the result had fewer than 2 members with a placed Session — nothing to
+/// compare, per the per-week-best-effort stance above.
+fn member_week_sets<K: Eq + std::hash::Hash + Clone>(
+    problem: &Problem,
+    solution: &Solution,
+    members: &[OfferingIdx],
+    key_of: impl Fn(&crate::slots::SlotFlags) -> K,
+) -> HashMap<u32, HashMap<OfferingIdx, HashSet<K>>> {
+    let mut by_week: HashMap<u32, HashMap<OfferingIdx, HashSet<K>>> = HashMap::new();
+    for p in problem.placement_ids() {
+        let Some(pl) = solution.get(p) else { continue };
+        let m = problem.placement(p).offering;
+        if !members.contains(&m) {
+            continue;
+        }
+        let f = problem.slots.flags(pl.start);
+        by_week
+            .entry(f.week)
+            .or_default()
+            .entry(m)
+            .or_default()
+            .insert(key_of(f));
+    }
+    by_week
+}
+
+/// Weeks where 2+ members have a placed Session AND their key-sets are not
+/// all equal.
+fn violated_weeks<K: Eq + std::hash::Hash>(
+    sets: &HashMap<u32, HashMap<OfferingIdx, HashSet<K>>>,
+) -> Vec<u32> {
+    sets.iter()
+        .filter(|(_, members_sets)| members_sets.len() >= 2)
+        .filter(|(_, members_sets)| {
+            let mut iter = members_sets.values();
+            let first = iter.next().expect("filtered to len >= 2");
+            iter.any(|s| s != first)
+        })
+        .map(|(&week, _)| week)
+        .collect()
+}
+
+fn sorted<T: Ord + Copy>(s: &HashSet<T>) -> Vec<T> {
+    let mut v: Vec<T> = s.iter().copied().collect();
+    v.sort_unstable();
+    v
+}
+
+pub fn same_time_violations(problem: &Problem, solution: &Solution) -> u32 {
+    problem
+        .relations
+        .iter()
+        .filter(|r| r.kind == RelationKind::SameTime)
+        .map(|r| {
+            let sets =
+                member_week_sets(problem, solution, &r.members, |f| (f.iso_weekday, f.block));
+            violated_weeks(&sets).len() as u32
+        })
+        .sum()
+}
+
+pub fn same_days_violations(problem: &Problem, solution: &Solution) -> u32 {
+    problem
+        .relations
+        .iter()
+        .filter(|r| r.kind == RelationKind::SameDays)
+        .map(|r| {
+            let sets = member_week_sets(problem, solution, &r.members, |f| f.iso_weekday);
+            violated_weeks(&sets).len() as u32
+        })
+        .sum()
+}
+
+pub fn same_start_violations(problem: &Problem, solution: &Solution) -> u32 {
+    problem
+        .relations
+        .iter()
+        .filter(|r| r.kind == RelationKind::SameStart)
+        .map(|r| {
+            let sets = member_week_sets(problem, solution, &r.members, |f| f.block);
+            violated_weeks(&sets).len() as u32
+        })
+        .sum()
+}
+
+/// Reports every currently-disagreeing `(relation, week)` for all three
+/// kinds — a run can succeed while still naming which relation's week is
+/// mismatched, the same "HARD but not filtered, so it must be reported"
+/// stance `max_days`/`max_consecutive_days` already take.
+pub fn same_relations(problem: &Problem, solution: &Solution, out: &mut Vec<Violation>) {
+    for r in problem
+        .relations
+        .iter()
+        .filter(|r| r.kind == RelationKind::SameTime)
+    {
+        let sets = member_week_sets(problem, solution, &r.members, |f| (f.iso_weekday, f.block));
+        for week in violated_weeks(&sets) {
+            let members_sets = &sets[&week];
+            let detail = members_sets
+                .iter()
+                .map(|(&o, s)| format!("'{}': {:?}", problem.offerings[o.get()].id, sorted(s)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            out.push(Violation {
+                constraint_id: r.id.clone(),
+                constraint_type: ConstraintType::SameTimeRelation,
+                session_ids: Vec::new(),
+                offering_ids: members_sets
+                    .keys()
+                    .map(|&o| problem.offerings[o.get()].id.clone())
+                    .collect(),
+                detail: format!(
+                    "relation '{}' disagrees on (day, block) in week {week}: {detail}",
+                    r.id
+                ),
+            });
+        }
+    }
+    for r in problem
+        .relations
+        .iter()
+        .filter(|r| r.kind == RelationKind::SameDays)
+    {
+        let sets = member_week_sets(problem, solution, &r.members, |f| f.iso_weekday);
+        for week in violated_weeks(&sets) {
+            let members_sets = &sets[&week];
+            let detail = members_sets
+                .iter()
+                .map(|(&o, s)| format!("'{}': {:?}", problem.offerings[o.get()].id, sorted(s)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            out.push(Violation {
+                constraint_id: r.id.clone(),
+                constraint_type: ConstraintType::SameDaysRelation,
+                session_ids: Vec::new(),
+                offering_ids: members_sets
+                    .keys()
+                    .map(|&o| problem.offerings[o.get()].id.clone())
+                    .collect(),
+                detail: format!("relation '{}' disagrees on days in week {week}: {detail}", r.id),
+            });
+        }
+    }
+    for r in problem
+        .relations
+        .iter()
+        .filter(|r| r.kind == RelationKind::SameStart)
+    {
+        let sets = member_week_sets(problem, solution, &r.members, |f| f.block);
+        for week in violated_weeks(&sets) {
+            let members_sets = &sets[&week];
+            let detail = members_sets
+                .iter()
+                .map(|(&o, s)| format!("'{}': {:?}", problem.offerings[o.get()].id, sorted(s)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            out.push(Violation {
+                constraint_id: r.id.clone(),
+                constraint_type: ConstraintType::SameStartRelation,
+                session_ids: Vec::new(),
+                offering_ids: members_sets
+                    .keys()
+                    .map(|&o| problem.offerings[o.get()].id.clone())
+                    .collect(),
+                detail: format!(
+                    "relation '{}' disagrees on start blocks in week {week}: {detail}",
+                    r.id
+                ),
+            });
+        }
     }
 }
 

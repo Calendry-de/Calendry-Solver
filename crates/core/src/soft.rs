@@ -344,6 +344,16 @@ pub struct Objective {
     pub max_days_violations: u32,
     /// The `MaxConsecutiveDays` counterpart of `max_days_violations`.
     pub max_consecutive_days_violations: u32,
+    /// Violated `(relation, week)` cells for every `SameTime` relation —
+    /// same "cannot be a construction filter" reasoning as `max_days_
+    /// violations`, but for the opposite direction: members must AGREE on
+    /// a slot SET, which is only decidable once a shared week is fully
+    /// committed. See [`crate::constraints::same_time_violations`].
+    pub same_time_violations: u32,
+    /// The `SameDays` counterpart of `same_time_violations`.
+    pub same_days_violations: u32,
+    /// The `SameStart` counterpart of `same_time_violations`.
+    pub same_start_violations: u32,
     pub soft: f64,
     /// Mixed `(group, day)` cells, already multiplied by the configured weight.
     ///
@@ -483,6 +493,9 @@ impl Objective {
             + self.aggregate
             + self.max_days_violations
             + self.max_consecutive_days_violations
+            + self.same_time_violations
+            + self.same_days_violations
+            + self.same_start_violations
     }
 
     #[inline]
@@ -718,6 +731,9 @@ mod tests {
             aggregate: 0,
             max_days_violations: 0,
             max_consecutive_days_violations: 0,
+            same_time_violations: 0,
+            same_days_violations: 0,
+            same_start_violations: 0,
             soft: 7.0 * 4.0,
             day_mix_cost: 0.0,
             compactness_cost: 0.0,
@@ -746,6 +762,9 @@ mod tests {
             aggregate: 0,
             max_days_violations: 0,
             max_consecutive_days_violations: 0,
+            same_time_violations: 0,
+            same_days_violations: 0,
+            same_start_violations: 0,
             soft: 0.0,
             day_mix_cost: 0.0,
             compactness_cost: 0.0,
@@ -791,6 +810,9 @@ mod tests {
             aggregate: 0,
             max_days_violations: 0,
             max_consecutive_days_violations: 0,
+            same_time_violations: 0,
+            same_days_violations: 0,
+            same_start_violations: 0,
             soft: 7.0 * 4.0,
             day_mix_cost: day_mix_weight * cells,
             compactness_cost: 0.0,
@@ -819,6 +841,9 @@ mod tests {
             aggregate: 0,
             max_days_violations: 0,
             max_consecutive_days_violations: 0,
+            same_time_violations: 0,
+            same_days_violations: 0,
+            same_start_violations: 0,
             soft: 0.0,
             day_mix_cost: 0.0,
             compactness_cost: 0.0,

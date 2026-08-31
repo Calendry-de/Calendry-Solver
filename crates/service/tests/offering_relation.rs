@@ -80,13 +80,14 @@ fn a_relation_without_params_is_refused() {
 }
 
 // ---------------------------------------------------------------------------
-// Staged schema-first (calendry-proto v0.14.0), evaluators not yet built.
-// Each of these is replaced by a real behavior test as its own ticket lands
-// — see the solver repo's CLAUDE.md for what is actually implemented.
+// SameTime / SameDays / SameStart (issue #54) are built: wire params resolve
+// to the matching `RelationKind`, same membership-resolution path as
+// `DifferentTime` above. The evaluator itself (full day/block-set equality,
+// HARD but priced) is exercised in `crates/core`'s own tests, not here.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn same_time_is_unimplemented_not_invalid() {
+fn same_time_resolves_to_same_time_kind() {
     let mut input = base_input();
     two_related_offerings(&mut input);
     input.offering_relations = vec![pb::OfferingRelation {
@@ -94,12 +95,13 @@ fn same_time_is_unimplemented_not_invalid() {
         ..relation("rel-1", &["o1", "o2"])
     }];
 
-    let e = convert(&input, &scope(&["o1", "o2"])).expect_err("not yet built");
-    assert!(matches!(e, ConvertError::RelationKindUnimplemented { relation_kind: "SameTime", .. }));
+    let problem = convert(&input, &scope(&["o1", "o2"])).expect("valid input");
+    assert_eq!(problem.relations.len(), 1);
+    assert_eq!(problem.relations[0].kind, calendry_solver_core::problem::RelationKind::SameTime);
 }
 
 #[test]
-fn same_days_is_unimplemented_not_invalid() {
+fn same_days_resolves_to_same_days_kind() {
     let mut input = base_input();
     two_related_offerings(&mut input);
     input.offering_relations = vec![pb::OfferingRelation {
@@ -107,12 +109,13 @@ fn same_days_is_unimplemented_not_invalid() {
         ..relation("rel-1", &["o1", "o2"])
     }];
 
-    let e = convert(&input, &scope(&["o1", "o2"])).expect_err("not yet built");
-    assert!(matches!(e, ConvertError::RelationKindUnimplemented { relation_kind: "SameDays", .. }));
+    let problem = convert(&input, &scope(&["o1", "o2"])).expect("valid input");
+    assert_eq!(problem.relations.len(), 1);
+    assert_eq!(problem.relations[0].kind, calendry_solver_core::problem::RelationKind::SameDays);
 }
 
 #[test]
-fn same_start_is_unimplemented_not_invalid() {
+fn same_start_resolves_to_same_start_kind() {
     let mut input = base_input();
     two_related_offerings(&mut input);
     input.offering_relations = vec![pb::OfferingRelation {
@@ -120,12 +123,15 @@ fn same_start_is_unimplemented_not_invalid() {
         ..relation("rel-1", &["o1", "o2"])
     }];
 
-    let e = convert(&input, &scope(&["o1", "o2"])).expect_err("not yet built");
-    assert!(matches!(
-        e,
-        ConvertError::RelationKindUnimplemented { relation_kind: "SameStart", .. }
-    ));
+    let problem = convert(&input, &scope(&["o1", "o2"])).expect("valid input");
+    assert_eq!(problem.relations.len(), 1);
+    assert_eq!(problem.relations[0].kind, calendry_solver_core::problem::RelationKind::SameStart);
 }
+
+// ---------------------------------------------------------------------------
+// MeetTogether (issue #55) is staged schema-first, evaluator not yet built
+// — see the solver repo's CLAUDE.md for what is actually implemented.
+// ---------------------------------------------------------------------------
 
 #[test]
 fn meet_together_is_unimplemented_not_invalid() {

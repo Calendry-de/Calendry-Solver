@@ -194,27 +194,12 @@ fn build_relations(
 
         let kind = match &r.params {
             Some(Params::DifferentTime(_)) => RelationKind::DifferentTime,
-            // Staged schema-first (calendry-proto v0.14.0), evaluator not yet
-            // built — see the solver repo's CLAUDE.md for what is actually
-            // implemented.
-            Some(Params::SameTime(_)) => {
-                return Err(ConvertError::RelationKindUnimplemented {
-                    relation: r.id.clone(),
-                    relation_kind: "SameTime",
-                });
-            }
-            Some(Params::SameDays(_)) => {
-                return Err(ConvertError::RelationKindUnimplemented {
-                    relation: r.id.clone(),
-                    relation_kind: "SameDays",
-                });
-            }
-            Some(Params::SameStart(_)) => {
-                return Err(ConvertError::RelationKindUnimplemented {
-                    relation: r.id.clone(),
-                    relation_kind: "SameStart",
-                });
-            }
+            // Built — see `crate::constraints::same_time_violations` for
+            // why these are HARD but priced, not occupancy filters like
+            // `DifferentTime`.
+            Some(Params::SameTime(_)) => RelationKind::SameTime,
+            Some(Params::SameDays(_)) => RelationKind::SameDays,
+            Some(Params::SameStart(_)) => RelationKind::SameStart,
             Some(Params::MeetTogether(_)) => {
                 return Err(ConvertError::RelationKindUnimplemented {
                     relation: r.id.clone(),
