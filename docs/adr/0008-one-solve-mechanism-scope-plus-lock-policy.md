@@ -193,3 +193,79 @@ outrank an unplaced one.
 `LOCK_POLICY_HARD` an out-of-scope Session is `FixedSpec` occupancy with no
 `PlacementVar` at all, so there is nothing for an override to charge.
 Movability stays the lock policy's question; an override only prices it.
+
+## The spare bank: a Session with no `start_slot` (issue #22)
+
+Issue #22 ("Cancel-to-spare-bank") wants a cancelled Session moved to a bank —
+unplaced but still tracked, so the teaching owed is not silently forgotten. It
+names its solver dependency as v2 minimize-movement, which the addenda above
+already delivered. But building the app half surfaces a second, unnamed
+dependency: **`partition_sessions` refused every Session with no
+`start_slot`** (`ConvertError::SessionWithoutStart`), so a banked Session could
+not cross the wire at all. Any caller that snapshots "the tenant's Sessions"
+into a `SolverInput` — which is what issue #24 made it do — would have failed
+the whole run with `INVALID_ARGUMENT` the moment one bank row existed.
+
+**No new wire field was needed, and no new core concept.** `start_slot` is a
+message field, so absent is already representable. And `PlacementVar` already
+separates the two questions a banked Session answers differently:
+
+| | |
+|---|---|
+| `existing_session_id` | *which Session id this occurrence realizes* |
+| `original` | *where it already sat* — an `Option`, whose `None` already meant "a brand-new Session, nothing to be charged for leaving a place it never held" |
+
+A banked Session is exactly `Some(id)` with a `None` original. Every downstream
+consumer already handles that combination, because it is the shape a
+newly-invented Session has for `original` and the shape a reused Session has
+for the id. So the change is that `reusable` now carries
+`Option<(SlotIdx, Option<RoomIdx>)>` instead of a bare pair, and the two fields
+are set independently (`.and_then`, not `.map`) rather than both keyed on
+"was a Session reused".
+
+**The consequence that matters: a banked Session is placed free.** It has no
+`original`, so `movement_cost` returns `0.0` for every candidate — no
+`minimize_inscope_movement_weight` charge anywhere. That is not incidental; it
+is required. Charging it would bias the search away from rescheduling exactly
+the Session the bank exists to get rescheduled.
+
+**A banked Session does not add demand.** It IS one of its Offering's
+`required_session_count`, not an extra one, so it claims one of the outstanding
+occurrences the count already produces. `ExactFrequency` accounting is
+untouched.
+
+### The reuse tiebreak is load-bearing
+
+`reusable` was sorted by session id, for determinism. With banked Sessions in
+the same list that is no longer sufficient: when an Offering has more reusable
+Sessions than outstanding occurrences the surplus is dropped, and **a placed
+Session has strictly more to lose than a banked one** — it forfeits not just
+its id but its `original`, which seeds construction back at its existing slot
+and spares it the movement charge. A banked Session has no `original` to
+forfeit.
+
+So the sort is now *placed before banked, then by id*. Sorting by id alone
+would let one banked entry displace a placed one purely on how its id happened
+to sort, silently churning a Session nobody asked to move — the same class of
+regression issue #58 existed to fix, reintroduced through a different door.
+
+### Four cases, because "slotless" alone does not say enough
+
+| Slotless Session | Answer | Why |
+|---|---|---|
+| Offering resolves, in scope | **Banked** — reuse id, no `original` | The genuine case |
+| Offering resolves, out of scope | **Ignored** | This run is not placing that Offering, and an unplaced Session is not occupancy either. Refusing would fail every repair scoped elsewhere that happens to coexist with a bank row |
+| Offering id set but unresolvable | **Ignored** | The same "warn and allow" tolerance a *placed* Session gets, minus the occupancy that made a placed one still matter |
+| No Offering at all | **Refused** (`SessionWithoutStart`) | Unlike an ad-hoc *placed* Session (a `staff_meeting`, which is real occupancy), this owes teaching to nothing and no run under any scope or policy could ever place it |
+
+### `is_locked` on an unplaced Session is refused, not guessed
+
+The one genuinely ambiguous input, and it gets a new typed error
+(`BankedSessionIsLocked`) rather than a default. "Locked" and "unplaced"
+together have two **opposite** readings — *"cancelled, never reschedule it"*
+and *"meaningless, there is nothing to lock"* — and either could be what a
+caller meant. Picking one silently is the failure
+[ADR-0007](0007-fourteen-typed-constraint-types-no-dsl.md) exists to prevent,
+and the second reading would drop a lock, which is the dangerous direction.
+If "banked and never reschedule" turns out to be a real requirement, it is a
+deliberate decision with its own semantics, not a fallback.

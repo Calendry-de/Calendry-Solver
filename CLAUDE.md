@@ -96,7 +96,7 @@ the behaviour they exercise, and kept separate from the generator on purpose
 ```bash
 git clone --recurse-submodules …     # or: git submodule update --init --recursive
 
-cargo test --workspace               # 603 tests
+cargo test --workspace               # 612 tests
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo fmt --all --check
 
@@ -216,6 +216,19 @@ Session now ALSO carries an `original`, charged by the independent
 scope. Closes the measured gap (36–100% churn on a targeted repair) without
 the larger, session-level-scope redesign the tracking card also considered;
 see ADR-0008's "In-scope stay-put pressure, landed" addendum for why.
+
+**The spare bank crosses the wire (issue #22).** A Session with no
+`start_slot` is no longer refused: it is teaching that is OWED but unplaced,
+after a cancellation. It reuses its Session id and carries **no** `original`,
+so it claims one of its Offering's outstanding occurrences, keeps its
+identity, and is placed **free of any movement charge** — charging it would
+bias the search away from rescheduling the very Session the bank exists to
+reschedule. It adds no demand: it IS one of `required_session_count`, not an
+extra. `reusable` now sorts **placed before banked**, then by id, because a
+placed Session forfeits its `original` too when occurrences are scarce. Four
+cases, not one: in-scope resolves → banked; out-of-scope or unresolvable →
+ignored; no Offering at all → still refused. `is_locked` on an unplaced
+Session is refused rather than guessed — see ADR-0008's "spare bank" addendum.
 
 **Per-entity movement overrides are built (issue #70).** Both weights above
 are run-wide; `SolveScope.movement_overrides` is the per-entity exception —

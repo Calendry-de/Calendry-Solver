@@ -68,7 +68,18 @@ pub enum ConvertError {
     GroupCycle(#[from] GroupCycle),
 
     // -- sessions ------------------------------------------------------------
-    #[error("session '{session}' has no start_slot")]
+    /// A slotless Session realizing NO Offering.
+    ///
+    /// Slotless is legitimate on its own — that is the spare bank (issue #22),
+    /// teaching that is owed but unplaced. What cannot be interpreted is
+    /// slotless AND ownerless: unlike an ad-hoc PLACED Session (a
+    /// `staff_meeting`, which is real occupancy), this one owes teaching to
+    /// nothing and no run under any scope or policy could ever place it.
+    #[error(
+        "session '{session}' has no start_slot and no offering_id; an unplaced Session is the \
+         spare bank, which only means something for a Session that realizes an Offering — this \
+         one owes teaching to nothing and no run could place it"
+    )]
     SessionWithoutStart { session: String },
     #[error(
         "session '{session}' sits at week {week} day {day} block {block}, which is not a slot \
@@ -190,6 +201,13 @@ pub enum ConvertError {
          respecting a protection it never had"
     )]
     MovementOverrideWithoutTarget { index: usize },
+    #[error(
+        "session '{session}' has no start_slot and is_locked; a lock on an unplaced Session has \
+         two opposite readings — 'cancelled, never reschedule it' and 'meaningless, there is \
+         nothing to lock' — so it is refused rather than guessed. Send it unlocked to bank the \
+         teaching as owed, or keep it out of existing_sessions to drop the obligation"
+    )]
+    BankedSessionIsLocked { session: String },
 
     // -- deliberately not built yet ------------------------------------------
     //

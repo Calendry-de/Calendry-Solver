@@ -883,7 +883,11 @@ fn partition_sessions(
     // (start, room) — the same `original` a movable out-of-scope Session
     // carries below — so a `PlacementVar` reusing it can be charged by
     // `minimize_inscope_movement_weight` (issue #58) for leaving it.
-    let mut reusable: HashMap<String, Vec<(String, SlotIdx, Option<RoomIdx>)>> = HashMap::new();
+    // The inner `Option` is what a SPARE-BANK Session (issue #22) needs: `Some`
+    // for a Session that currently sits somewhere, `None` for one that is owed
+    // but unplaced. It maps straight onto `PlacementVar::original`.
+    type Reuse = (String, Option<(SlotIdx, Option<RoomIdx>)>);
+    let mut reusable: HashMap<String, Vec<Reuse>> = HashMap::new();
     // Existing out-of-scope Sessions made movable by
     // `LOCK_POLICY_MINIMIZE_MOVEMENT`, one `PlacementVar` per Session, carrying
     // `original` so the search can be charged for leaving it. Kept separate
@@ -894,10 +898,58 @@ fn partition_sessions(
     let mut movable_occurrence: HashMap<usize, u32> = HashMap::new();
 
     for s in &input.existing_sessions {
-        let sr = s
-            .start_slot
-            .as_ref()
-            .ok_or_else(|| ConvertError::SessionWithoutStart { session: s.id.clone() })?;
+        // A Session with no `start_slot` is the SPARE BANK (issue #22):
+        // teaching that is owed but currently unplaced, after a cancellation.
+        // It is not malformed input, and it is not a Session that does not
+        // exist — the whole point of the bank is that what is owed is not
+        // silently forgotten, which means keeping the Session's IDENTITY.
+        //
+        // Nothing new is needed to represent it: a `PlacementVar` already
+        // distinguishes "which Session id this occurrence realizes"
+        // (`existing_session_id`) from "where it already sat" (`original`,
+        // an `Option`, whose `None` already means "nothing to be charged for
+        // leaving a place it never held"). A banked Session is exactly
+        // `Some(id)` with `None` original, so it claims one of its Offering's
+        // outstanding occurrences, keeps its id, and is placed with no
+        // movement charge — there is nowhere it is being moved FROM.
+        let Some(sr) = s.start_slot.as_ref() else {
+            // `is_locked` with no placement has two plausible readings —
+            // "cancelled, never reschedule it" and "meaningless, there is
+            // nothing to lock" — and they are opposites. Refused rather than
+            // guessed, the same stance ADR-0007 takes toward inferring intent.
+            if s.is_locked {
+                return Err(ConvertError::BankedSessionIsLocked { session: s.id.clone() });
+            }
+            match ix.offerings.optional(&s.offering_id, OfferingIdx) {
+                // In scope and realizing a real Offering: a genuine bank
+                // entry, and the only case that produces anything.
+                Some(_) if scope_offerings.contains(&s.offering_id) => {
+                    reusable
+                        .entry(s.offering_id.clone())
+                        .or_default()
+                        .push((s.id.clone(), None));
+                }
+                // Out of scope: this run is not placing that Offering, and an
+                // unplaced Session is not occupancy either, so it is
+                // genuinely nothing to this run. Ignored rather than refused
+                // — a repair scoped to one Offering must not fail because
+                // some OTHER Offering has a banked Session.
+                Some(_) => {}
+                // Naming an Offering absent from this snapshot: the same
+                // "warn and allow" tolerance a placed Session gets a few
+                // lines below, minus the occupancy that made a placed one
+                // still matter. Nothing to owe the teaching to here.
+                None if !s.offering_id.is_empty() => {}
+                // No Offering at all. Unlike an ad-hoc PLACED Session (a
+                // `staff_meeting`, which is real occupancy), this is
+                // incoherent under every scope and every policy: it owes
+                // teaching to nothing and no run could ever place it.
+                None => {
+                    return Err(ConvertError::SessionWithoutStart { session: s.id.clone() });
+                }
+            }
+            continue;
+        };
 
         let start = slots.resolve(sr.week, sr.day, sr.block).ok_or_else(|| {
             ConvertError::SessionOffGrid {
@@ -1029,19 +1081,33 @@ fn partition_sessions(
                         ConvertError::UnknownRoom { context: format!("session '{}'", s.id), room }
                     })?)
                 };
-                reusable.entry(s.offering_id.clone()).or_default().push((
-                    s.id.clone(),
-                    start,
-                    room,
-                ));
+                reusable
+                    .entry(s.offering_id.clone())
+                    .or_default()
+                    .push((s.id.clone(), Some((start, room))));
             }
         }
     }
 
     // Deterministic id reuse: sort by session id so that the mapping does not
     // depend on the caller's ordering of existing_sessions.
+    //
+    // PLACED Sessions sort ahead of BANKED ones (issue #22), and that tiebreak
+    // is load-bearing rather than cosmetic. When an Offering has more reusable
+    // Sessions than outstanding occurrences, the surplus is dropped — and a
+    // placed Session has strictly more to lose than a banked one: it would
+    // forfeit not just its id but its `original`, which is what seeds
+    // construction back at its existing slot and spares it the
+    // `minimize_inscope_movement_weight` charge. A banked Session has no
+    // `original` to forfeit. Sorting by id alone would let one banked entry
+    // displace a placed one purely on how its id happened to sort, silently
+    // churning a Session nobody asked to move.
     for ids in reusable.values_mut() {
-        ids.sort_by(|a, b| a.0.cmp(&b.0));
+        ids.sort_by(|a, b| {
+            a.1.is_none()
+                .cmp(&b.1.is_none())
+                .then_with(|| a.0.cmp(&b.0))
+        });
     }
 
     // Immovable Sessions already realizing each in-scope Offering. These are
@@ -1075,7 +1141,7 @@ fn partition_sessions(
             placements.push(PlacementVar {
                 offering: OfferingIdx(i as u32),
                 occurrence,
-                existing_session_id: reused.map(|(id, _, _)| id.clone()),
+                existing_session_id: reused.map(|(id, _)| id.clone()),
                 // Charged by `minimize_inscope_movement_weight`, not
                 // `minimize_movement_weight` — this Offering IS in scope, so
                 // `Problem::movement_cost` reads the other weight. Set
@@ -1085,7 +1151,11 @@ fn partition_sessions(
                 // first, the same free win `movable_out_of_scope` already
                 // gets above (search.rs's "try the original first" fast
                 // path) — issue #58's whole point.
-                original: reused.map(|&(_, start, room)| (start, room)),
+                // `.and_then`, not `.map`: a BANKED Session (issue #22) reuses
+                // its id but has no `original` at all, so the two fields are
+                // genuinely independent here rather than both keyed on
+                // "was a Session reused".
+                original: reused.and_then(|&(_, at)| at),
             });
         }
     }

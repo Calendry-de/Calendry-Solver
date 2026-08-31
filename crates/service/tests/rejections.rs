@@ -239,14 +239,42 @@ fn a_session_with_no_room_at_all_is_still_accepted() {
 }
 
 #[test]
-fn a_session_with_no_start_slot_is_refused() {
+fn a_session_with_no_start_slot_and_no_offering_is_refused() {
+    // Slotless ALONE is no longer a refusal — that is the spare bank (issue
+    // #22), and `tests/spare_bank.rs` covers it. Slotless AND ownerless still
+    // is: unlike an ad-hoc PLACED Session (a `staff_meeting`, which is real
+    // occupancy), this one owes teaching to nothing, holds no room, and no
+    // run under any scope or policy could ever place it.
     let mut input = base_input();
     input.offerings = vec![offering("o1", 1)];
-    input.existing_sessions =
-        vec![pb::Session { start_slot: None, ..session("s1", "o1", slot(0, 1, 1)) }];
+    input.existing_sessions = vec![pb::Session {
+        start_slot: None,
+        offering_id: String::new(),
+        ..session("s1", "o1", slot(0, 1, 1))
+    }];
 
     let e = reject(&input, &scope(&["o1"]));
     assert!(matches!(&e, ConvertError::SessionWithoutStart { session } if session == "s1"), "{e}");
+}
+
+#[test]
+fn a_banked_session_claiming_to_be_locked_is_refused() {
+    // "Locked" and "unplaced" together have two OPPOSITE readings —
+    // "cancelled, never reschedule it" and "meaningless, there is nothing to
+    // lock". Refused rather than guessed.
+    let mut input = base_input();
+    input.offerings = vec![offering("o1", 1)];
+    input.existing_sessions = vec![pb::Session {
+        start_slot: None,
+        is_locked: true,
+        ..session("s1", "o1", slot(0, 1, 1))
+    }];
+
+    let e = reject(&input, &scope(&["o1"]));
+    assert!(
+        matches!(&e, ConvertError::BankedSessionIsLocked { session } if session == "s1"),
+        "{e}"
+    );
 }
 
 #[test]
