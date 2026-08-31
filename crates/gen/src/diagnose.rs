@@ -156,6 +156,7 @@ fn single(axis: fn(&mut Enforce), base: Enforce) -> Enforce {
         daybreak_person: false,
         travel_group: false,
         travel_person: false,
+        minimize_offering_distinct_days: false,
     };
     axis(&mut e);
     axis(&mut probe);
@@ -207,6 +208,8 @@ fn single(axis: fn(&mut Enforce), base: Enforce) -> Enforce {
         daybreak_person: e.daybreak_person && base.daybreak_person,
         travel_group: e.travel_group && base.travel_group,
         travel_person: e.travel_person && base.travel_person,
+        minimize_offering_distinct_days: e.minimize_offering_distinct_days
+            && base.minimize_offering_distinct_days,
     }
 }
 

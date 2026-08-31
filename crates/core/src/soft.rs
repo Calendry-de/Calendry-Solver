@@ -424,6 +424,13 @@ pub struct Objective {
     /// outside `soft`. See
     /// [`crate::solution::SearchState::travel_cost`].
     pub travel_cost: f64,
+    /// Distinct-day count over one for every `prefer_fuller_days` Offering,
+    /// already multiplied by the configured weight — the same shape
+    /// `distributed_pattern_cost`/`block_pattern_cost` (folded into
+    /// `scheduling_pattern_cost`) use, reduced by DAY instead of weekly
+    /// cell or week. See
+    /// [`crate::solution::SearchState::offering_distinct_days_cost`].
+    pub offering_distinct_days_cost: f64,
     /// Distinct-Room excess over the configured weekly cap, summed over every
     /// currently-occupied `(Group, week)` cell and already multiplied by the
     /// configured weight — the "home room" cap, at WEEK granularity rather
@@ -495,6 +502,7 @@ impl Objective {
             + self.room_turnaround_cost
             + self.daybreak_cost
             + self.travel_cost
+            + self.offering_distinct_days_cost
             + self.room_churn_cost
             + self.room_consistency_cost
             + self.lecturer_consistency_cost
@@ -731,6 +739,7 @@ mod tests {
             scheduling_pattern_cost: 0.0,
             daybreak_cost: 0.0,
             travel_cost: 0.0,
+            offering_distinct_days_cost: 0.0,
         };
         let one_unplaced = Objective {
             unplaced: 1,
@@ -758,6 +767,7 @@ mod tests {
             scheduling_pattern_cost: 0.0,
             daybreak_cost: 0.0,
             travel_cost: 0.0,
+            offering_distinct_days_cost: 0.0,
         };
         assert!(one_unplaced.total(hard_penalty) > all_soft_bad.total(hard_penalty));
     }
@@ -802,6 +812,7 @@ mod tests {
             scheduling_pattern_cost: 0.0,
             daybreak_cost: 0.0,
             travel_cost: 0.0,
+            offering_distinct_days_cost: 0.0,
         };
         let one_unplaced = Objective {
             unplaced: 1,
@@ -829,6 +840,7 @@ mod tests {
             scheduling_pattern_cost: 0.0,
             daybreak_cost: 0.0,
             travel_cost: 0.0,
+            offering_distinct_days_cost: 0.0,
         };
 
         assert!(one_unplaced.total(hard_penalty) > everything_mixed.total(hard_penalty));

@@ -402,6 +402,14 @@ pub struct ConstraintSet {
     /// same-day placements are in Rooms whose `Room.location` differs. See
     /// [`TravelTimeInstance`].
     pub travel_time_between_rooms: Vec<TravelTimeInstance>,
+    /// SOFT, aggregate over an Offering's placed Sessions across the WHOLE
+    /// TERM. Prices an Offering with `Offering.prefer_fuller_days` set for
+    /// spreading across more than one distinct day — independent of
+    /// `scheduling_pattern` (WHEN in the term). Same shape as
+    /// `distributed_pattern_adherence`/`block_pattern_adherence`
+    /// (`PatternAdherenceInstance` has no params beyond id/kinds/weight),
+    /// reduced by DAY instead of weekly cell or week.
+    pub minimize_offering_distinct_days: Vec<PatternAdherenceInstance>,
 }
 
 /// One `ProtectedBlock` instance. The FIRST hard type whose values
@@ -532,6 +540,7 @@ pub struct Enforce {
     pub daybreak_person: bool,
     pub travel_group: bool,
     pub travel_person: bool,
+    pub minimize_offering_distinct_days: bool,
 }
 
 impl ConstraintSet {
@@ -629,6 +638,10 @@ impl ConstraintSet {
                 .travel_time_between_rooms
                 .iter()
                 .any(|c| c.person && c.covers(kind)),
+            minimize_offering_distinct_days: self
+                .minimize_offering_distinct_days
+                .iter()
+                .any(|c| c.covers(kind)),
         }
     }
 }
@@ -691,6 +704,11 @@ pub struct OfferingSpec {
     /// unless `required_room_count > 1`.
     pub eligible_room_combinations: Vec<(RoomIdx, [Option<RoomIdx>; MAX_ADDITIONAL_ROOMS])>,
     pub scheduling_pattern: SchedulingPattern,
+    /// Independent of `scheduling_pattern` (WHEN in the term): prefer this
+    /// Offering's Sessions land on fewer distinct days across the term
+    /// (fuller days) rather than one per day. See
+    /// `MinimizeOfferingDistinctDays`.
+    pub prefer_fuller_days: bool,
     /// The tenant-declared minimum, already spent as a HARD eligibility
     /// filter in `convert::build_offerings` (`eligible_rooms`/
     /// `eligible_room_combinations` never contain a Room too small for it).
@@ -781,6 +799,8 @@ pub struct Offering {
     /// cohort.
     pub subtree_groups: Vec<GroupIdx>,
     pub scheduling_pattern: SchedulingPattern,
+    /// See `OfferingSpec::prefer_fuller_days`.
+    pub prefer_fuller_days: bool,
     /// Dense row indices into the problem's `DifferentTime` relations this
     /// Offering is a member of — empty for every Offering not named in one,
     /// which is the overwhelming majority. Precomputed the same way
@@ -1294,6 +1314,9 @@ pub struct Problem {
     pub travel_group_weight: f64,
     /// The Person-axis counterpart of `travel_group_weight`.
     pub travel_person_weight: f64,
+    /// Summed weight of every configured `MinimizeOfferingDistinctDays`
+    /// instance.
+    pub minimize_offering_distinct_days_weight: f64,
     /// Summed weight of every configured `MinimizeRoomChurn` instance. Zero
     /// when not configured.
     pub room_churn_weight: f64,
@@ -1499,6 +1522,7 @@ impl Problem {
                 eligible_room_combinations: o.eligible_room_combinations,
                 min_capacity: o.min_capacity,
                 scheduling_pattern: o.scheduling_pattern,
+                prefer_fuller_days: o.prefer_fuller_days,
             })
             .collect();
 
@@ -1568,6 +1592,7 @@ impl Problem {
             constraints.lecturer_consistency.clone(),
             constraints.daybreak.clone(),
             constraints.travel_time_between_rooms.clone(),
+            constraints.minimize_offering_distinct_days.clone(),
         );
 
         let day_mix_weight: f64 = constraints
@@ -1708,6 +1733,11 @@ impl Problem {
             .travel_time_between_rooms
             .iter()
             .filter(|i| i.person)
+            .map(|i| i.weight)
+            .sum();
+        let minimize_offering_distinct_days_weight: f64 = constraints
+            .minimize_offering_distinct_days
+            .iter()
             .map(|i| i.weight)
             .sum();
         let room_churn_weight: f64 = constraints
@@ -1887,6 +1917,7 @@ impl Problem {
             daybreak_person_weight,
             travel_group_weight,
             travel_person_weight,
+            minimize_offering_distinct_days_weight,
             room_churn_weight,
             room_consistency_weight,
             lecturer_consistency_weight,
@@ -2214,6 +2245,7 @@ mod tests {
                 eligible_room_combinations: vec![],
                 min_capacity: 0,
                 scheduling_pattern: SchedulingPattern::Unspecified,
+                prefer_fuller_days: false,
             },
             OfferingSpec {
                 id: "leaf".into(),
@@ -2229,6 +2261,7 @@ mod tests {
                 eligible_room_combinations: vec![],
                 min_capacity: 0,
                 scheduling_pattern: SchedulingPattern::Unspecified,
+                prefer_fuller_days: false,
             },
         ];
 
@@ -2267,6 +2300,7 @@ mod tests {
             eligible_room_combinations: vec![],
             min_capacity: 0,
             scheduling_pattern: SchedulingPattern::Unspecified,
+            prefer_fuller_days: false,
         }
     }
 

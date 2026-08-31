@@ -244,6 +244,12 @@ fn score_one(problem: &Problem, solution: &Solution, state: &SearchState, mv: &M
     // comment above — for the Offering-scoped counterpart.
     let scheduling_pattern_delta = state.scheduling_pattern_delta(problem, &candidate, &span);
 
+    // Same ranking-signal contract, over an Offering's distinct-day count
+    // instead of its modal pattern — independent axis, same `who.offering`
+    // gate.
+    let offering_distinct_days_delta =
+        state.offering_distinct_days_delta(problem, &candidate, &span);
+
     let capacity = problem.exclusive_capacity(mv.to.all_rooms());
 
     Score(
@@ -285,7 +291,8 @@ fn score_one(problem: &Problem, solution: &Solution, state: &SearchState, mv: &M
             + offering_daily_count_delta
             + offering_run_delta
             + offering_split_delta
-            + scheduling_pattern_delta,
+            + scheduling_pattern_delta
+            + offering_distinct_days_delta,
     )
 }
 

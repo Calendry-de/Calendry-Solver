@@ -643,6 +643,7 @@ fn build_offerings(
                 Ok(pb::SchedulingPattern::Block) => SchedulingPattern::Block,
                 _ => SchedulingPattern::Unspecified,
             },
+            prefer_fuller_days: o.prefer_fuller_days,
         });
     }
 
@@ -1741,13 +1742,23 @@ fn build_constraints(input: &pb::SolverInput) -> Result<ConstraintSet, ConvertEr
             }
 
             // Staged schema-first (calendry-proto v0.14.0), evaluators not yet
-            // built — see the solver repo's CLAUDE.md for what is actually
-            // implemented.
+            // Built — see `crate::aggregates::Aggregates::
+            // offering_distinct_days_cost`. Same empty-message shape as
+            // `DistributedPatternAdherence`/`BlockPatternAdherence`, and
+            // reuses their `PatternAdherenceInstance`.
             Some(Params::MinimizeOfferingDistinctDays(_)) => {
-                return Err(ConvertError::ConstraintTypeUnimplemented {
-                    constraint: c.id.clone(),
-                    constraint_type: "MinimizeOfferingDistinctDays",
-                });
+                if c.weight < 0.0 || c.weight.is_nan() {
+                    return Err(ConvertError::NegativeSoftWeight {
+                        constraint: c.id.clone(),
+                        weight: c.weight,
+                    });
+                }
+                set.minimize_offering_distinct_days
+                    .push(PatternAdherenceInstance {
+                        id: c.id.clone(),
+                        kinds: c.applies_to_kinds.clone(),
+                        weight: c.weight,
+                    });
             }
             // Built — see `crate::aggregates::TravelTimeInstance`. SOFT,
             // like `RoomTurnaroundBuffer`/`Daybreak`, so weight IS

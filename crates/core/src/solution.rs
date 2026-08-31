@@ -1167,6 +1167,29 @@ impl SearchState {
             * problem.minimize_offering_day_split_weight
     }
 
+    /// The `MinimizeOfferingDistinctDays` cost DELTA of placing `who` at
+    /// `span` — inert unless `who`'s Offering is tagged
+    /// `prefer_fuller_days`, the same gate `apply_aggregates` uses.
+    pub fn offering_distinct_days_delta(
+        &self,
+        problem: &Problem,
+        who: &Occupant<'_>,
+        span: &[SlotIdx],
+    ) -> f64 {
+        if span.is_empty() || !who.enforce.minimize_offering_distinct_days {
+            return 0.0;
+        }
+        let Some(offering) = who.offering else {
+            return 0.0;
+        };
+        if !problem.offerings[offering.get()].prefer_fuller_days {
+            return 0.0;
+        }
+        let day = problem.slots.flags(span[0]).day_index;
+        self.aggregates.offering_distinct_days_delta(offering, day) as f64
+            * problem.minimize_offering_distinct_days_weight
+    }
+
     /// The `MaxWeeklyTeachingLoad` cost DELTA of placing `who` at `span` —
     /// the read-only preview, mirroring [`Self::max_daily_span_delta`].
     /// Keyed by `who.all_lecturers()` and the WEEK `span` falls in, not by
@@ -1452,6 +1475,15 @@ impl SearchState {
                     self.aggregates.remove_offering_split(offering, day, span);
                 }
             }
+            if who.enforce.minimize_offering_distinct_days
+                && problem.offerings[offering.get()].prefer_fuller_days
+            {
+                if add {
+                    self.aggregates.add_offering_distinct_days(offering, day);
+                } else {
+                    self.aggregates.remove_offering_distinct_days(offering, day);
+                }
+            }
         }
 
         if who.subtree_groups.is_empty() {
@@ -1687,6 +1719,14 @@ impl SearchState {
                     offering,
                     day,
                     problem.minimize_offering_day_split_weight,
+                );
+            }
+            if who.enforce.minimize_offering_distinct_days
+                && problem.offerings[offering.get()].prefer_fuller_days
+            {
+                score += self.aggregates.offering_distinct_days_ruin_cost(
+                    offering,
+                    problem.minimize_offering_distinct_days_weight,
                 );
             }
         }
@@ -2242,6 +2282,16 @@ impl SearchState {
         }
         self.aggregates
             .offering_split_cost(problem.minimize_offering_day_split_weight)
+    }
+
+    /// What every `prefer_fuller_days` Offering's distinct-day count over
+    /// one currently costs, at the configured weight.
+    pub fn offering_distinct_days_cost(&self, problem: &Problem) -> f64 {
+        if problem.minimize_offering_distinct_days_weight == 0.0 {
+            return 0.0;
+        }
+        self.aggregates
+            .offering_distinct_days_cost(problem.minimize_offering_distinct_days_weight)
     }
 
     /// What the currently over-cap weekly teaching loads cost, at the

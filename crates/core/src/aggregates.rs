@@ -652,6 +652,21 @@ pub struct Aggregates {
     distributed_rules: Vec<PatternAdherenceInstance>,
     block_rules: Vec<PatternAdherenceInstance>,
 
+    /// `[offering * n_days + day_index]` — the `MinimizeOfferingDistinctDays`
+    /// counterpart of `distributed_cell`, at absolute DAY granularity
+    /// (spanning the whole term, not the "no week axis" weekly-cell
+    /// collapse `distributed_cell` uses) instead of weekly-cell. Empty
+    /// unless some Offering has `prefer_fuller_days` AND some instance
+    /// covers its kind.
+    offering_distinct_days_cell: Vec<u32>,
+    /// `[offering]` — how many DISTINCT days are currently nonzero for that
+    /// Offering. `offering_distinct_days_total` is the sum of `nonzero - 1`
+    /// (floored at 0), maintained as a delta exactly like `distributed_total`.
+    offering_distinct_days_nonzero: Vec<u32>,
+    offering_distinct_days_total: u32,
+
+    minimize_offering_distinct_days_rules: Vec<PatternAdherenceInstance>,
+
     /// `[group * n_slots + slot]` — the `MaxConsecutiveBlocks` counterpart of
     /// `group_slot`: same shape, same reason it is a count rather than a
     /// bitset, but read by `run_excess_u32` (longest RUN of consecutive
@@ -995,6 +1010,7 @@ impl Aggregates {
         lecturer_consistency_rules: Vec<LecturerConsistencyInstance>,
         daybreak_rules: Vec<DaybreakInstance>,
         travel_rules: Vec<TravelTimeInstance>,
+        minimize_offering_distinct_days_rules: Vec<PatternAdherenceInstance>,
     ) -> Self {
         let groups = n_groups.max(1);
         let counters = rules
@@ -1158,6 +1174,8 @@ impl Aggregates {
             .map(|r| r.min_minutes_between_sites)
             .max()
             .unwrap_or(0);
+
+        let track_offering_distinct_days = !minimize_offering_distinct_days_rules.is_empty();
 
         let track_location_group = location_rules.iter().any(|r| r.group);
         let track_location_person = location_rules.iter().any(|r| r.person);
@@ -1358,6 +1376,18 @@ impl Aggregates {
             travel_group_threshold_minutes,
             travel_person_threshold_minutes,
             travel_rules,
+            offering_distinct_days_cell: if track_offering_distinct_days {
+                vec![0; offerings * n_days.max(1)]
+            } else {
+                Vec::new()
+            },
+            offering_distinct_days_nonzero: if track_offering_distinct_days {
+                vec![0; offerings]
+            } else {
+                Vec::new()
+            },
+            offering_distinct_days_total: 0,
+            minimize_offering_distinct_days_rules,
             location_group_loc: if track_location_group {
                 vec![0; groups * n_days.max(1) * locations]
             } else {
@@ -4571,6 +4601,93 @@ impl Aggregates {
         if self.distributed_nonzero[offering.get()] > 1 { weight } else { 0.0 }
     }
 
+    // -- minimize offering distinct days ----------------------------------
+    //
+    // SOFT, the same "distinct nonzero cells minus one" shape
+    // `DistributedPatternAdherence` uses, at DAY granularity across the
+    // whole term instead of weekly-cell. Only ever nonzero for an Offering
+    // with `Offering.prefer_fuller_days` set — the caller decides that, not
+    // this module.
+
+    pub fn minimize_offering_distinct_days_rules(&self) -> &[PatternAdherenceInstance] {
+        &self.minimize_offering_distinct_days_rules
+    }
+
+    #[inline]
+    fn offering_distinct_days_index(&self, offering: OfferingIdx, day: u32) -> usize {
+        offering.get() * self.n_days + day as usize
+    }
+
+    /// Mark one Session of `offering` occupying `day`, updating
+    /// `offering_distinct_days_total` by the exact delta. A no-op when
+    /// `MinimizeOfferingDistinctDays` is not configured for any kind.
+    pub fn add_offering_distinct_days(&mut self, offering: OfferingIdx, day: u32) {
+        if self.offering_distinct_days_cell.is_empty() {
+            return;
+        }
+        let idx = self.offering_distinct_days_index(offering, day);
+        self.offering_distinct_days_cell[idx] += 1;
+        if self.offering_distinct_days_cell[idx] == 1 {
+            let o = offering.get();
+            let before = self.offering_distinct_days_nonzero[o].saturating_sub(1);
+            self.offering_distinct_days_nonzero[o] += 1;
+            let after = self.offering_distinct_days_nonzero[o].saturating_sub(1);
+            self.offering_distinct_days_total += after - before;
+        }
+    }
+
+    pub fn remove_offering_distinct_days(&mut self, offering: OfferingIdx, day: u32) {
+        if self.offering_distinct_days_cell.is_empty() {
+            return;
+        }
+        let idx = self.offering_distinct_days_index(offering, day);
+        self.offering_distinct_days_cell[idx] =
+            self.offering_distinct_days_cell[idx].saturating_sub(1);
+        if self.offering_distinct_days_cell[idx] == 0 {
+            let o = offering.get();
+            let before = self.offering_distinct_days_nonzero[o].saturating_sub(1);
+            self.offering_distinct_days_nonzero[o] =
+                self.offering_distinct_days_nonzero[o].saturating_sub(1);
+            let after = self.offering_distinct_days_nonzero[o].saturating_sub(1);
+            self.offering_distinct_days_total -= before - after;
+        }
+    }
+
+    /// What every Offering's distinct-day count over one currently costs,
+    /// at the configured weight. O(1), read off `offering_distinct_days_total`.
+    pub fn offering_distinct_days_cost(&self, weight: f64) -> f64 {
+        self.offering_distinct_days_total as f64 * weight
+    }
+
+    /// Read-only preview of `add_offering_distinct_days`'s delta, mirroring
+    /// `distributed_delta`'s exact same contract.
+    pub fn offering_distinct_days_delta(&self, offering: OfferingIdx, day: u32) -> i64 {
+        if self.offering_distinct_days_cell.is_empty() {
+            return 0;
+        }
+        let idx = self.offering_distinct_days_index(offering, day);
+        if self.offering_distinct_days_cell[idx] > 0 {
+            return 0; // this day is already in use; one more Session there adds nothing new
+        }
+        let o = offering.get();
+        let before = self.offering_distinct_days_nonzero[o].saturating_sub(1);
+        let after = (self.offering_distinct_days_nonzero[o] + 1).saturating_sub(1);
+        (after - before) as i64
+    }
+
+    /// For `ruin_worst`: every placement of an Offering currently using more
+    /// than one distinct day is charged, mirroring `distributed_ruin_cost`.
+    pub fn offering_distinct_days_ruin_cost(&self, offering: OfferingIdx, weight: f64) -> f64 {
+        if weight == 0.0 || self.offering_distinct_days_nonzero.is_empty() {
+            return 0.0;
+        }
+        if self.offering_distinct_days_nonzero[offering.get()] > 1 {
+            weight
+        } else {
+            0.0
+        }
+    }
+
     #[inline]
     fn block_row(&self, offering: OfferingIdx) -> usize {
         offering.get() * self.n_weeks
@@ -4887,6 +5004,7 @@ mod tests {
             vec![], // lecturer_consistency_rules
             vec![], // daybreak_rules
             vec![], // travel_rules
+            vec![], // minimize_offering_distinct_days_rules
         );
         let g = [GroupIdx(0)];
 
@@ -4941,6 +5059,7 @@ mod tests {
             vec![], // lecturer_consistency_rules
             vec![], // daybreak_rules
             vec![], // travel_rules
+            vec![], // minimize_offering_distinct_days_rules
         );
         let g = [GroupIdx(0)];
 
@@ -5004,6 +5123,7 @@ mod tests {
             vec![], // lecturer_consistency_rules
             vec![], // daybreak_rules
             vec![], // travel_rules
+            vec![], // minimize_offering_distinct_days_rules
         );
         load(&mut term);
         assert_eq!(term.share_violations(), 0);
@@ -5044,6 +5164,7 @@ mod tests {
             vec![], // lecturer_consistency_rules
             vec![], // daybreak_rules
             vec![], // travel_rules
+            vec![], // minimize_offering_distinct_days_rules
         );
         load(&mut week);
         assert_eq!(week.share_violations(), 1);
@@ -5091,6 +5212,7 @@ mod tests {
             vec![], // lecturer_consistency_rules
             vec![], // daybreak_rules
             vec![], // travel_rules
+            vec![], // minimize_offering_distinct_days_rules
         );
         a.apply_share("staff_meeting", &[GroupIdx(0)], 0, true, true);
         assert_eq!(a.share_violations(), 0, "out-of-scope kind must not count");
@@ -5146,6 +5268,7 @@ mod tests {
             vec![], // lecturer_consistency_rules
             vec![], // daybreak_rules
             vec![], // travel_rules
+            vec![], // minimize_offering_distinct_days_rules
         );
         let g = [GroupIdx(0)];
         // 2 online of 2 total = 100% > 50%: violated.
@@ -5205,6 +5328,7 @@ mod tests {
             vec![], // lecturer_consistency_rules
             vec![], // daybreak_rules
             vec![], // travel_rules
+            vec![], // minimize_offering_distinct_days_rules
         );
         let g = [GroupIdx(0)];
         a.apply_share("lecture", &g, 0, true, true);
@@ -5257,6 +5381,7 @@ mod tests {
             vec![], // lecturer_consistency_rules
             vec![], // daybreak_rules
             vec![], // travel_rules
+            vec![], // minimize_offering_distinct_days_rules
         );
         let g = [GroupIdx(0)];
         a.add_day_mode(&g, &[0], true);
@@ -5315,6 +5440,7 @@ mod tests {
             vec![], // lecturer_consistency_rules
             vec![], // daybreak_rules
             vec![], // travel_rules
+            vec![], // minimize_offering_distinct_days_rules
         );
         let g = [GroupIdx(0)];
 
@@ -5372,6 +5498,7 @@ mod tests {
             vec![], // lecturer_consistency_rules
             vec![], // daybreak_rules
             vec![], // travel_rules
+            vec![], // minimize_offering_distinct_days_rules
         );
         let g = [GroupIdx(0)];
         a.add_group_compactness(&g, 0, &[SlotIdx(0)]);
@@ -5416,6 +5543,7 @@ mod tests {
             vec![], // lecturer_consistency_rules
             vec![], // daybreak_rules
             vec![], // travel_rules
+            vec![], // minimize_offering_distinct_days_rules
         );
         let p = [PersonIdx(0)];
 
@@ -5466,6 +5594,7 @@ mod tests {
             vec![], // lecturer_consistency_rules
             vec![], // daybreak_rules
             vec![], // travel_rules
+            vec![], // minimize_offering_distinct_days_rules
         );
         a.add_person_compactness(&[PersonIdx(0)], 0, &[SlotIdx(0), SlotIdx(3)]);
         assert_eq!(a.compactness_cost(0.0, 1.0), 0.0, "Person axis was never configured");
@@ -5512,6 +5641,7 @@ mod tests {
             vec![], // lecturer_consistency_rules
             vec![], // daybreak_rules
             vec![], // travel_rules
+            vec![], // minimize_offering_distinct_days_rules
         );
         let g = [GroupIdx(0)];
         a.add_group_compactness(&g, 0, &[SlotIdx(0)]);
@@ -5565,6 +5695,7 @@ mod tests {
             vec![], // lecturer_consistency_rules
             vec![], // daybreak_rules
             vec![], // travel_rules
+            vec![], // minimize_offering_distinct_days_rules
         );
         let g = [GroupIdx(0)];
         a.add_group_compactness(&g, 0, &[SlotIdx(0)]);
@@ -5625,6 +5756,7 @@ mod tests {
             vec![], // lecturer_consistency_rules
             vec![], // daybreak_rules
             vec![], // travel_rules
+            vec![], // minimize_offering_distinct_days_rules
         );
         let o = OfferingIdx(0);
         a.add_distributed(o, 0);
@@ -5670,6 +5802,7 @@ mod tests {
             vec![], // lecturer_consistency_rules
             vec![], // daybreak_rules
             vec![], // travel_rules
+            vec![], // minimize_offering_distinct_days_rules
         );
         let o = OfferingIdx(0);
         a.add_distributed(o, 0);
@@ -5718,6 +5851,7 @@ mod tests {
             vec![], // lecturer_consistency_rules
             vec![], // daybreak_rules
             vec![], // travel_rules
+            vec![], // minimize_offering_distinct_days_rules
         );
         let o = OfferingIdx(0);
         a.add_distributed(o, 0);
@@ -5766,6 +5900,7 @@ mod tests {
             vec![], // lecturer_consistency_rules
             vec![], // daybreak_rules
             vec![], // travel_rules
+            vec![], // minimize_offering_distinct_days_rules
         );
         a.add_distributed(OfferingIdx(0), 0);
         a.add_distributed(OfferingIdx(0), 1);
@@ -5812,6 +5947,7 @@ mod tests {
             vec![], // lecturer_consistency_rules
             vec![], // daybreak_rules
             vec![], // travel_rules
+            vec![], // minimize_offering_distinct_days_rules
         );
         let o = OfferingIdx(0);
         a.add_block(o, 0);
@@ -5864,6 +6000,7 @@ mod tests {
             vec![], // lecturer_consistency_rules
             vec![], // daybreak_rules
             vec![], // travel_rules
+            vec![], // minimize_offering_distinct_days_rules
         );
         let o = OfferingIdx(0);
         a.add_block(o, 0);
@@ -5914,6 +6051,7 @@ mod tests {
             vec![], // lecturer_consistency_rules
             vec![], // daybreak_rules
             vec![], // travel_rules
+            vec![], // minimize_offering_distinct_days_rules
         );
         a.add_distributed(OfferingIdx(0), 0);
         a.add_distributed(OfferingIdx(0), 1);

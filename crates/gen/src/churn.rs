@@ -143,6 +143,7 @@ pub fn measure(
         eligible_room_combinations: target_offering.eligible_room_combinations.clone(),
         min_capacity: target_offering.min_capacity,
         scheduling_pattern: target_offering.scheduling_pattern,
+        prefer_fuller_days: target_offering.prefer_fuller_days,
     }];
 
     let placements: Vec<PlacementVar> = (0..target_placements.len())

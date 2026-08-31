@@ -218,6 +218,7 @@ impl<'p> Trial<'p> {
             scheduling_pattern_cost: self.state.scheduling_pattern_cost(self.problem),
             daybreak_cost: self.state.daybreak_cost(self.problem),
             travel_cost: self.state.travel_cost(self.problem),
+            offering_distinct_days_cost: self.state.offering_distinct_days_cost(self.problem),
         }
     }
 
@@ -954,6 +955,7 @@ pub fn recompute_objective(problem: &Problem, solution: &Solution) -> Objective 
         scheduling_pattern_cost: state.scheduling_pattern_cost(problem),
         daybreak_cost: state.daybreak_cost(problem),
         travel_cost: state.travel_cost(problem),
+        offering_distinct_days_cost: state.offering_distinct_days_cost(problem),
     }
 }
 
@@ -1112,6 +1114,8 @@ pub fn objectives_agree(a: Objective, b: Objective) -> bool {
             <= 1e-9 * (1.0 + a.room_turnaround_cost.abs())
         && (a.daybreak_cost - b.daybreak_cost).abs() <= 1e-9 * (1.0 + a.daybreak_cost.abs())
         && (a.travel_cost - b.travel_cost).abs() <= 1e-9 * (1.0 + a.travel_cost.abs())
+        && (a.offering_distinct_days_cost - b.offering_distinct_days_cost).abs()
+            <= 1e-9 * (1.0 + a.offering_distinct_days_cost.abs())
         && (a.room_churn_cost - b.room_churn_cost).abs() <= 1e-9 * (1.0 + a.room_churn_cost.abs())
         && (a.room_consistency_cost - b.room_consistency_cost).abs()
             <= 1e-9 * (1.0 + a.room_consistency_cost.abs())

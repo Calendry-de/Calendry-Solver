@@ -295,6 +295,7 @@ fn overlapping_problem(offerings: u32, sessions: u32, shared: usize) -> Problem 
             eligible_room_combinations: vec![],
             min_capacity: 0,
             scheduling_pattern: SchedulingPattern::Unspecified,
+            prefer_fuller_days: false,
         });
     }
 

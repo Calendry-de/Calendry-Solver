@@ -669,29 +669,10 @@ fn every_refusal_maps_to_invalid_argument_or_unimplemented_and_nothing_else() {
 // `crates/service/tests/minimize_break_spanning.rs` and
 // `crates/core/tests/minimize_break_spanning.rs` for its real behavior.
 
-#[test]
-fn minimize_offering_distinct_days_is_unimplemented_not_invalid() {
-    let mut input = base_input();
-    input.constraints.push(enabled(
-        "c-days",
-        pb::constraint_config::Params::MinimizeOfferingDistinctDays(
-            pb::MinimizeOfferingDistinctDays {},
-        ),
-    ));
-
-    let e = reject(&input, &scope(&[]));
-    assert!(
-        matches!(
-            &e,
-            ConvertError::ConstraintTypeUnimplemented {
-                constraint_type: "MinimizeOfferingDistinctDays",
-                ..
-            }
-        ),
-        "{e}"
-    );
-    assert_eq!(code_of(&e), Code::Unimplemented);
-}
+// `MinimizeOfferingDistinctDays` is now built — see
+// `crates/service/tests/minimize_offering_distinct_days.rs` and
+// `crates/core/tests/minimize_offering_distinct_days.rs` for its real
+// behavior.
 
 // `TravelTimeBetweenRooms` is now built — see
 // `crates/service/tests/travel_time_between_rooms.rs` and

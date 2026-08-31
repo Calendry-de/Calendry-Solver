@@ -121,6 +121,7 @@ pub fn offering(id: &str, count: u32, eligible: &[u32]) -> OfferingSpec {
         eligible_room_combinations: vec![],
         min_capacity: 0,
         scheduling_pattern: SchedulingPattern::Unspecified,
+        prefer_fuller_days: false,
     }
 }
 
@@ -189,6 +190,12 @@ pub fn with_groups(mut o: OfferingSpec, groups: &[u32]) -> OfferingSpec {
 
 pub fn with_lecturers(mut o: OfferingSpec, lecturers: &[u32]) -> OfferingSpec {
     o.lecturers = lecturers.iter().map(|&p| PersonIdx(p)).collect();
+    o
+}
+
+/// `offering`, tagged for `MinimizeOfferingDistinctDays`.
+pub fn with_fuller_days(mut o: OfferingSpec) -> OfferingSpec {
+    o.prefer_fuller_days = true;
     o
 }
 
@@ -312,6 +319,7 @@ pub fn all_constraints() -> ConstraintSet {
         max_consecutive_days: Vec::new(),
         daybreak: Vec::new(),
         travel_time_between_rooms: Vec::new(),
+        minimize_offering_distinct_days: Vec::new(),
     }
 }
 

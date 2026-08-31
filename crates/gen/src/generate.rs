@@ -559,6 +559,7 @@ fn build_offerings(
             eligible_room_combinations: vec![],
             min_capacity: 0,
             scheduling_pattern: SchedulingPattern::Unspecified,
+            prefer_fuller_days: false,
         });
 
         for n in 0..params.sessions_per_offering {
@@ -613,6 +614,7 @@ fn build_offerings(
                 eligible_room_combinations: vec![],
                 min_capacity: 0,
                 scheduling_pattern: SchedulingPattern::Unspecified,
+                prefer_fuller_days: false,
             });
 
             for n in 0..params.sessions_per_offering {
@@ -837,6 +839,9 @@ fn build_constraints(params: &InstanceParams, slots: &SlotTable) -> ConstraintSe
         // generator does not assign `Room.location`, so every Room reads
         // as co-located and this could never fire.
         travel_time_between_rooms: Vec::new(),
+        // OFF: the generator never tags an Offering
+        // `prefer_fuller_days`, so this rule could never fire.
+        minimize_offering_distinct_days: Vec::new(),
         // Weight 5 mirrors the app catalogue's `defaultWeight`, so generated
         // benchmark instances price a mixed day the way a real tenant does.
         online_onsite_same_day: vec![DayMixInstance {
