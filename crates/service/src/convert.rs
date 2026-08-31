@@ -26,13 +26,14 @@
 use std::collections::{HashMap, HashSet};
 
 use calendry_solver_core::aggregates::{
-    CompactnessInstance, DayMixInstance, ExamSpacingSameDayInstance, ExamSpacingWindowInstance,
-    LecturerConsistencyInstance, MaxConsecutiveDaysInstance, MaxConsecutiveInstance,
-    MaxConsecutiveOfferingBlocksInstance, MaxDailySessionCountInstance, MaxDailySpanInstance,
-    MaxDaysInstance, MaxOfferingSessionsPerDayInstance, MaxWeeklyTeachingLoadInstance,
-    MinimizeLocationChangeInstance, MinimizeOfferingDaySplitInstance, MinimizeRoomChurnInstance,
-    MinimizeWeekdayImbalanceInstance, PatternAdherenceInstance, RoomConsistencyInstance,
-    RoomTurnaroundBufferInstance, ShareInstance, ShareWindow,
+    CompactnessInstance, DayMixInstance, DaybreakInstance, ExamSpacingSameDayInstance,
+    ExamSpacingWindowInstance, LecturerConsistencyInstance, MaxConsecutiveDaysInstance,
+    MaxConsecutiveInstance, MaxConsecutiveOfferingBlocksInstance, MaxDailySessionCountInstance,
+    MaxDailySpanInstance, MaxDaysInstance, MaxOfferingSessionsPerDayInstance,
+    MaxWeeklyTeachingLoadInstance, MinimizeLocationChangeInstance,
+    MinimizeOfferingDaySplitInstance, MinimizeRoomChurnInstance, MinimizeWeekdayImbalanceInstance,
+    PatternAdherenceInstance, RoomConsistencyInstance, RoomTurnaroundBufferInstance, ShareInstance,
+    ShareWindow,
 };
 use calendry_solver_core::ids::{GroupIdx, OfferingIdx, PersonIdx, RoomIdx, SlotIdx};
 use calendry_solver_core::preferences::{Preference, PreferenceInstance};
@@ -1800,10 +1801,35 @@ fn build_constraints(input: &pb::SolverInput) -> Result<ConstraintSet, ConvertEr
                     max_consecutive_days: p.max_consecutive_days,
                 });
             }
-            Some(Params::Daybreak(_)) => {
-                return Err(ConvertError::ConstraintTypeUnimplemented {
-                    constraint: c.id.clone(),
-                    constraint_type: "Daybreak",
+            // Built — see `crate::aggregates::DaybreakInstance`. SOFT, like
+            // `RoomTurnaroundBuffer`, so weight is validated. Same
+            // `CompactnessScope` parsing as `MaxConsecutiveBlocks` above.
+            Some(Params::Daybreak(p)) => {
+                if c.weight < 0.0 || c.weight.is_nan() {
+                    return Err(ConvertError::NegativeSoftWeight {
+                        constraint: c.id.clone(),
+                        weight: c.weight,
+                    });
+                }
+                let (mut group, mut person) = (false, false);
+                for &s in &p.scope {
+                    match pb::CompactnessScope::try_from(s) {
+                        Ok(pb::CompactnessScope::Group) => group = true,
+                        Ok(pb::CompactnessScope::Person) => person = true,
+                        _ => {}
+                    }
+                }
+                if p.scope.is_empty() {
+                    group = true;
+                    person = true;
+                }
+                set.daybreak.push(DaybreakInstance {
+                    id: c.id.clone(),
+                    kinds: c.applies_to_kinds.clone(),
+                    weight: c.weight,
+                    group,
+                    person,
+                    min_rest_minutes: p.min_rest_minutes,
                 });
             }
 

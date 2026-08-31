@@ -832,6 +832,7 @@ fn build_constraints(params: &InstanceParams, slots: &SlotTable) -> ConstraintSe
         // to assert on.
         max_days: Vec::new(),
         max_consecutive_days: Vec::new(),
+        daybreak: Vec::new(),
         // Weight 5 mirrors the app catalogue's `defaultWeight`, so generated
         // benchmark instances price a mixed day the way a real tenant does.
         online_onsite_same_day: vec![DayMixInstance {

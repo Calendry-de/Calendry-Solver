@@ -412,6 +412,12 @@ pub struct Objective {
     /// like every other aggregate cost above; see
     /// [`crate::aggregates::RoomTurnaroundBufferInstance`].
     pub room_turnaround_cost: f64,
+    /// Violated consecutive-teaching-day rest requirements, already
+    /// multiplied by each axis's configured weight — read fresh over every
+    /// (entity, day-pair), like `imbalance_cost`: the gap belongs to a PAIR
+    /// of days, not to either day's placements alone. See
+    /// [`crate::solution::SearchState::daybreak_cost`].
+    pub daybreak_cost: f64,
     /// Distinct-Room excess over the configured weekly cap, summed over every
     /// currently-occupied `(Group, week)` cell and already multiplied by the
     /// configured weight — the "home room" cap, at WEEK granularity rather
@@ -481,6 +487,7 @@ impl Objective {
             + self.imbalance_cost
             + self.location_change_cost
             + self.room_turnaround_cost
+            + self.daybreak_cost
             + self.room_churn_cost
             + self.room_consistency_cost
             + self.lecturer_consistency_cost
@@ -715,6 +722,7 @@ mod tests {
             offering_run_cost: 0.0,
             offering_split_cost: 0.0,
             scheduling_pattern_cost: 0.0,
+            daybreak_cost: 0.0,
         };
         let one_unplaced = Objective {
             unplaced: 1,
@@ -740,6 +748,7 @@ mod tests {
             offering_run_cost: 0.0,
             offering_split_cost: 0.0,
             scheduling_pattern_cost: 0.0,
+            daybreak_cost: 0.0,
         };
         assert!(one_unplaced.total(hard_penalty) > all_soft_bad.total(hard_penalty));
     }
@@ -782,6 +791,7 @@ mod tests {
             offering_run_cost: 0.0,
             offering_split_cost: 0.0,
             scheduling_pattern_cost: 0.0,
+            daybreak_cost: 0.0,
         };
         let one_unplaced = Objective {
             unplaced: 1,
@@ -807,6 +817,7 @@ mod tests {
             offering_run_cost: 0.0,
             offering_split_cost: 0.0,
             scheduling_pattern_cost: 0.0,
+            daybreak_cost: 0.0,
         };
 
         assert!(one_unplaced.total(hard_penalty) > everything_mixed.total(hard_penalty));

@@ -298,6 +298,31 @@ impl MaxConsecutiveDaysInstance {
     }
 }
 
+/// One configured `Daybreak` rule. SOFT, priced like `RoomTurnaroundBuffer`
+/// (a minimum-gap requirement rather than a cap) — HARD would risk making
+/// an instance needlessly harder to solve for a welfare preference. Same
+/// `group`/`person` axis split as `MaxDailySpanInstance` and siblings.
+/// Composes as "whichever binds HARDEST", which for a MINIMUM requirement
+/// is the LARGEST configured `min_rest_minutes` — the opposite direction
+/// `run_group_threshold`'s "tightest cap = smallest" convention takes,
+/// because this is a floor, not a ceiling.
+#[derive(Clone, Debug)]
+pub struct DaybreakInstance {
+    pub id: String,
+    pub kinds: Vec<String>,
+    pub weight: f64,
+    pub group: bool,
+    pub person: bool,
+    pub min_rest_minutes: u32,
+}
+
+impl DaybreakInstance {
+    #[inline]
+    pub fn covers(&self, kind: &str) -> bool {
+        self.kinds.is_empty() || self.kinds.iter().any(|k| k == kind)
+    }
+}
+
 /// One configured `MinimizeLocationChange` rule — same `group`/`person` axis
 /// split as `CompactnessInstance` and siblings, plus the distinct-location
 /// cap none of those have an equivalent of. A day counts as a violation once
@@ -757,6 +782,24 @@ pub struct Aggregates {
     max_days_rules: Vec<MaxDaysInstance>,
     max_consecutive_days_rules: Vec<MaxConsecutiveDaysInstance>,
 
+    /// `[entity * n_slots + slot]` — the `Daybreak` counterpart of
+    /// `span_group_slot`/`span_person_slot`: same per-block occupancy
+    /// shape, but read across a DAY BOUNDARY (this day's last occupied
+    /// block against the next teaching day's first) rather than within one
+    /// day, so no within-day excess total is maintained here — the cost
+    /// belongs to a PAIR of days, not to any one placement, and is read
+    /// fresh like `imbalance_day`.
+    daybreak_group_slot: Vec<u32>,
+    daybreak_person_slot: Vec<u8>,
+    /// Tightest (LARGEST) `min_rest_minutes` among every enabled instance
+    /// covering each axis. Unlike a CAP's "tightest = smallest" convention
+    /// (`run_group_threshold`), this is a FLOOR: the hardest-to-satisfy
+    /// requirement is the longest rest demanded. `0` (never binding) when
+    /// nothing configures that axis.
+    daybreak_group_threshold_minutes: u32,
+    daybreak_person_threshold_minutes: u32,
+    daybreak_rules: Vec<DaybreakInstance>,
+
     /// `[group * n_days * n_locations + day * n_locations + loc]` —
     /// occurrence count of Sessions this Group has in each distinct
     /// `Room.location` on each day. The inner axis is LOCATION rather than
@@ -905,6 +948,7 @@ impl Aggregates {
         churn_rules: Vec<MinimizeRoomChurnInstance>,
         consistency_rules: Vec<RoomConsistencyInstance>,
         lecturer_consistency_rules: Vec<LecturerConsistencyInstance>,
+        daybreak_rules: Vec<DaybreakInstance>,
     ) -> Self {
         let groups = n_groups.max(1);
         let counters = rules
@@ -1034,6 +1078,25 @@ impl Aggregates {
             .map(|r| r.max_consecutive_days)
             .min()
             .unwrap_or(u32::MAX);
+
+        let track_daybreak_group = daybreak_rules.iter().any(|r| r.group);
+        let track_daybreak_person = daybreak_rules.iter().any(|r| r.person);
+        // A FLOOR, not a cap: the hardest-to-satisfy requirement is the
+        // LONGEST rest demanded, so this is `max`, not `min` like every
+        // cap-threshold above. `0` (never binding) when nothing configures
+        // that axis.
+        let daybreak_group_threshold_minutes = daybreak_rules
+            .iter()
+            .filter(|r| r.group)
+            .map(|r| r.min_rest_minutes)
+            .max()
+            .unwrap_or(0);
+        let daybreak_person_threshold_minutes = daybreak_rules
+            .iter()
+            .filter(|r| r.person)
+            .map(|r| r.min_rest_minutes)
+            .max()
+            .unwrap_or(0);
 
         let track_location_group = location_rules.iter().any(|r| r.group);
         let track_location_person = location_rules.iter().any(|r| r.person);
@@ -1208,6 +1271,19 @@ impl Aggregates {
             max_consecutive_days_person_threshold,
             max_days_rules,
             max_consecutive_days_rules,
+            daybreak_group_slot: if track_daybreak_group {
+                vec![0; groups * slots]
+            } else {
+                Vec::new()
+            },
+            daybreak_person_slot: if track_daybreak_person {
+                vec![0; n_persons.max(1) * slots]
+            } else {
+                Vec::new()
+            },
+            daybreak_group_threshold_minutes,
+            daybreak_person_threshold_minutes,
+            daybreak_rules,
             location_group_loc: if track_location_group {
                 vec![0; groups * n_days.max(1) * locations]
             } else {
@@ -3502,6 +3578,128 @@ impl Aggregates {
         })
     }
 
+    // -- daybreak ----------------------------------------------------------
+    //
+    // SOFT, priced like `RoomTurnaroundBuffer` — a minimum-gap welfare
+    // preference, not a structural rule, so HARD would risk making an
+    // instance needlessly harder to solve. Occupancy only (no within-day
+    // excess total): the cost belongs to a PAIR of consecutive teaching
+    // days, not to either day's placements alone, so it is read fresh —
+    // see `crate::solution::SearchState::daybreak_cost`, which combines
+    // this occupancy with `Problem::grid_time` for the actual wall-clock
+    // arithmetic (this module has no knowledge of `GridTime`).
+
+    pub fn daybreak_rules(&self) -> &[DaybreakInstance] {
+        &self.daybreak_rules
+    }
+
+    pub fn daybreak_group_threshold_minutes(&self) -> u32 {
+        self.daybreak_group_threshold_minutes
+    }
+
+    pub fn daybreak_person_threshold_minutes(&self) -> u32 {
+        self.daybreak_person_threshold_minutes
+    }
+
+    pub fn add_group_daybreak(&mut self, groups: &[GroupIdx], span: &[SlotIdx]) {
+        if self.daybreak_group_slot.is_empty() || span.is_empty() {
+            return;
+        }
+        for &g in groups {
+            let row = g.get() * self.n_slots;
+            for &s in span {
+                self.daybreak_group_slot[row + s.get()] += 1;
+            }
+        }
+    }
+
+    pub fn remove_group_daybreak(&mut self, groups: &[GroupIdx], span: &[SlotIdx]) {
+        if self.daybreak_group_slot.is_empty() || span.is_empty() {
+            return;
+        }
+        for &g in groups {
+            let row = g.get() * self.n_slots;
+            for &s in span {
+                let c = row + s.get();
+                self.daybreak_group_slot[c] = self.daybreak_group_slot[c].saturating_sub(1);
+            }
+        }
+    }
+
+    pub fn add_person_daybreak(&mut self, persons: &[PersonIdx], span: &[SlotIdx]) {
+        if self.daybreak_person_slot.is_empty() || span.is_empty() {
+            return;
+        }
+        for &p in persons {
+            let row = p.get() * self.n_slots;
+            for &s in span {
+                let c = row + s.get();
+                self.daybreak_person_slot[c] = self.daybreak_person_slot[c].saturating_add(1);
+            }
+        }
+    }
+
+    pub fn remove_person_daybreak(&mut self, persons: &[PersonIdx], span: &[SlotIdx]) {
+        if self.daybreak_person_slot.is_empty() || span.is_empty() {
+            return;
+        }
+        for &p in persons {
+            let row = p.get() * self.n_slots;
+            for &s in span {
+                let c = row + s.get();
+                self.daybreak_person_slot[c] = self.daybreak_person_slot[c].saturating_sub(1);
+            }
+        }
+    }
+
+    #[inline]
+    fn occupied_range_u32(day_cells: &[u32]) -> Option<(u32, u32)> {
+        let mut first = None;
+        let mut last = 0usize;
+        for (i, &c) in day_cells.iter().enumerate() {
+            if c > 0 {
+                first.get_or_insert(i);
+                last = i;
+            }
+        }
+        first.map(|f| (f as u32, last as u32))
+    }
+
+    #[inline]
+    fn occupied_range_u8(day_cells: &[u8]) -> Option<(u32, u32)> {
+        let mut first = None;
+        let mut last = 0usize;
+        for (i, &c) in day_cells.iter().enumerate() {
+            if c > 0 {
+                first.get_or_insert(i);
+                last = i;
+            }
+        }
+        first.map(|f| (f as u32, last as u32))
+    }
+
+    /// The first and last occupied block index for `group` on `day`, or
+    /// `None` if unoccupied — what `Daybreak` compares across a day
+    /// boundary.
+    pub fn group_occupied_range(&self, group: GroupIdx, day: u32) -> Option<(u32, u32)> {
+        if self.daybreak_group_slot.is_empty() {
+            return None;
+        }
+        let (start, end) = self.day_range(day);
+        let row = group.get() * self.n_slots;
+        Self::occupied_range_u32(&self.daybreak_group_slot[row + start..row + end])
+    }
+
+    /// See [`Self::group_occupied_range`]; the Person counterpart.
+    pub fn person_occupied_range(&self, person: PersonIdx, day: u32) -> Option<(u32, u32)> {
+        if self.daybreak_person_slot.is_empty() {
+            return None;
+        }
+        let (start, end) = self.day_range(day);
+        let row = person.get() * self.n_slots;
+        Self::occupied_range_u8(&self.daybreak_person_slot[row + start..row + end])
+    }
+
     // -- location change -------------------------------------------------------
 
     pub fn location_rules(&self) -> &[MinimizeLocationChangeInstance] {
@@ -4521,6 +4719,7 @@ mod tests {
             vec![],
             vec![],
             vec![], // lecturer_consistency_rules
+            vec![], // daybreak_rules
         );
         let g = [GroupIdx(0)];
 
@@ -4573,6 +4772,7 @@ mod tests {
             vec![],
             vec![],
             vec![], // lecturer_consistency_rules
+            vec![], // daybreak_rules
         );
         let g = [GroupIdx(0)];
 
@@ -4634,6 +4834,7 @@ mod tests {
             vec![],
             vec![],
             vec![], // lecturer_consistency_rules
+            vec![], // daybreak_rules
         );
         load(&mut term);
         assert_eq!(term.share_violations(), 0);
@@ -4672,6 +4873,7 @@ mod tests {
             vec![],
             vec![],
             vec![], // lecturer_consistency_rules
+            vec![], // daybreak_rules
         );
         load(&mut week);
         assert_eq!(week.share_violations(), 1);
@@ -4717,6 +4919,7 @@ mod tests {
             vec![],
             vec![],
             vec![], // lecturer_consistency_rules
+            vec![], // daybreak_rules
         );
         a.apply_share("staff_meeting", &[GroupIdx(0)], 0, true, true);
         assert_eq!(a.share_violations(), 0, "out-of-scope kind must not count");
@@ -4770,6 +4973,7 @@ mod tests {
             vec![],
             vec![],
             vec![], // lecturer_consistency_rules
+            vec![], // daybreak_rules
         );
         let g = [GroupIdx(0)];
         // 2 online of 2 total = 100% > 50%: violated.
@@ -4827,6 +5031,7 @@ mod tests {
             vec![],
             vec![],
             vec![], // lecturer_consistency_rules
+            vec![], // daybreak_rules
         );
         let g = [GroupIdx(0)];
         a.apply_share("lecture", &g, 0, true, true);
@@ -4877,6 +5082,7 @@ mod tests {
             vec![],
             vec![],
             vec![], // lecturer_consistency_rules
+            vec![], // daybreak_rules
         );
         let g = [GroupIdx(0)];
         a.add_day_mode(&g, &[0], true);
@@ -4933,6 +5139,7 @@ mod tests {
             vec![],
             vec![],
             vec![], // lecturer_consistency_rules
+            vec![], // daybreak_rules
         );
         let g = [GroupIdx(0)];
 
@@ -4988,6 +5195,7 @@ mod tests {
             vec![],
             vec![],
             vec![], // lecturer_consistency_rules
+            vec![], // daybreak_rules
         );
         let g = [GroupIdx(0)];
         a.add_group_compactness(&g, 0, &[SlotIdx(0)]);
@@ -5030,6 +5238,7 @@ mod tests {
             vec![],
             vec![],
             vec![], // lecturer_consistency_rules
+            vec![], // daybreak_rules
         );
         let p = [PersonIdx(0)];
 
@@ -5078,6 +5287,7 @@ mod tests {
             vec![],
             vec![],
             vec![], // lecturer_consistency_rules
+            vec![], // daybreak_rules
         );
         a.add_person_compactness(&[PersonIdx(0)], 0, &[SlotIdx(0), SlotIdx(3)]);
         assert_eq!(a.compactness_cost(0.0, 1.0), 0.0, "Person axis was never configured");
@@ -5122,6 +5332,7 @@ mod tests {
             vec![],
             vec![],
             vec![], // lecturer_consistency_rules
+            vec![], // daybreak_rules
         );
         let g = [GroupIdx(0)];
         a.add_group_compactness(&g, 0, &[SlotIdx(0)]);
@@ -5173,6 +5384,7 @@ mod tests {
             vec![],
             vec![],
             vec![], // lecturer_consistency_rules
+            vec![], // daybreak_rules
         );
         let g = [GroupIdx(0)];
         a.add_group_compactness(&g, 0, &[SlotIdx(0)]);
@@ -5231,6 +5443,7 @@ mod tests {
             vec![],
             vec![],
             vec![], // lecturer_consistency_rules
+            vec![], // daybreak_rules
         );
         let o = OfferingIdx(0);
         a.add_distributed(o, 0);
@@ -5274,6 +5487,7 @@ mod tests {
             vec![],
             vec![],
             vec![], // lecturer_consistency_rules
+            vec![], // daybreak_rules
         );
         let o = OfferingIdx(0);
         a.add_distributed(o, 0);
@@ -5320,6 +5534,7 @@ mod tests {
             vec![],
             vec![],
             vec![], // lecturer_consistency_rules
+            vec![], // daybreak_rules
         );
         let o = OfferingIdx(0);
         a.add_distributed(o, 0);
@@ -5366,6 +5581,7 @@ mod tests {
             vec![],
             vec![],
             vec![], // lecturer_consistency_rules
+            vec![], // daybreak_rules
         );
         a.add_distributed(OfferingIdx(0), 0);
         a.add_distributed(OfferingIdx(0), 1);
@@ -5410,6 +5626,7 @@ mod tests {
             vec![],
             vec![],
             vec![], // lecturer_consistency_rules
+            vec![], // daybreak_rules
         );
         let o = OfferingIdx(0);
         a.add_block(o, 0);
@@ -5460,6 +5677,7 @@ mod tests {
             vec![],
             vec![],
             vec![], // lecturer_consistency_rules
+            vec![], // daybreak_rules
         );
         let o = OfferingIdx(0);
         a.add_block(o, 0);
@@ -5508,6 +5726,7 @@ mod tests {
             vec![],
             vec![],
             vec![], // lecturer_consistency_rules
+            vec![], // daybreak_rules
         );
         a.add_distributed(OfferingIdx(0), 0);
         a.add_distributed(OfferingIdx(0), 1);

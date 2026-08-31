@@ -152,6 +152,8 @@ fn single(axis: fn(&mut Enforce), base: Enforce) -> Enforce {
         max_days_person: false,
         max_consecutive_days_group: false,
         max_consecutive_days_person: false,
+        daybreak_group: false,
+        daybreak_person: false,
     };
     axis(&mut e);
     axis(&mut probe);
@@ -199,6 +201,8 @@ fn single(axis: fn(&mut Enforce), base: Enforce) -> Enforce {
         max_consecutive_days_group: e.max_consecutive_days_group && base.max_consecutive_days_group,
         max_consecutive_days_person: e.max_consecutive_days_person
             && base.max_consecutive_days_person,
+        daybreak_group: e.daybreak_group && base.daybreak_group,
+        daybreak_person: e.daybreak_person && base.daybreak_person,
     }
 }
 

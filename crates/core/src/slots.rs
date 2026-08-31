@@ -413,14 +413,30 @@ impl GridTime {
     /// gap after the FINAL block, which has no meaning). Mirrors the app's
     /// `blockBoundaries` last entry (`shared/timeGrid.ts`).
     pub fn day_end_minute(&self, iso_weekday: u32, blocks_per_day: u32) -> u32 {
+        if blocks_per_day == 0 {
+            return self.day_start_minute;
+        }
+        self.block_end_minute(iso_weekday, blocks_per_day - 1)
+    }
+
+    /// The minute `block_index` (0-based) BEGINS on `iso_weekday` — the
+    /// day's start plus every EARLIER block's length and gap. Only
+    /// `Daybreak` reads this: every other constraint reasons in block
+    /// indices, where a gap changes no adjacency.
+    pub fn block_start_minute(&self, iso_weekday: u32, block_index: u32) -> u32 {
         let mut minute = self.day_start_minute;
-        for b in 0..blocks_per_day {
-            minute += self.block_length_minutes;
-            if b != blocks_per_day - 1 {
-                minute += self.gap_after(b, iso_weekday);
-            }
+        for b in 0..block_index {
+            minute += self.block_length_minutes + self.gap_after(b, iso_weekday);
         }
         minute
+    }
+
+    /// The minute `block_index` ENDS on `iso_weekday` — `block_start_minute`
+    /// plus the block's own length. No gap added: the gap AFTER this block
+    /// is outside its own span, the same boundary `gap_minutes_within_span`
+    /// refuses to walk.
+    pub fn block_end_minute(&self, iso_weekday: u32, block_index: u32) -> u32 {
+        self.block_start_minute(iso_weekday, block_index) + self.block_length_minutes
     }
 }
 
@@ -663,5 +679,34 @@ mod tests {
         let g = GridTime::new(60, 9 * 60, 10, vec![]);
         // 6 blocks x 60 + 5 internal gaps x 10 = 360 + 50 = 410, from 540.
         assert_eq!(g.day_end_minute(1, 6), 540 + 410);
+    }
+
+    #[test]
+    fn block_start_and_end_minute_agree_with_day_end_minute() {
+        let g = standard_grid();
+        // Block 0 starts at the day's own start; block 4 (after the break
+        // at 0, 1 and 3) starts at 8:00 + 45+45 + 15+45 + 45 + 30+45 = ...
+        assert_eq!(g.block_start_minute(1, 0), 8 * 60);
+        assert_eq!(g.block_end_minute(1, 0), 8 * 60 + 45);
+        // Last block (7) ends exactly where day_end_minute says it does.
+        assert_eq!(g.block_end_minute(1, 7), g.day_end_minute(1, 8));
+    }
+
+    #[test]
+    fn a_day_specific_gap_shifts_only_that_days_later_blocks() {
+        let g = GridTime::new(
+            45,
+            8 * 60,
+            0,
+            vec![
+                (0, 45, None),
+                (1, 15, None),
+                (3, 30, None),
+                (3, 60, Some(5)),
+            ],
+        );
+        // Friday's override at block 3 is 30 minutes longer than every
+        // other day's, so block 4 starts 30 minutes later on Friday alone.
+        assert_eq!(g.block_start_minute(5, 4) - g.block_start_minute(1, 4), 30);
     }
 }

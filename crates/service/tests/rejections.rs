@@ -722,21 +722,5 @@ fn travel_time_between_rooms_is_unimplemented_not_invalid() {
 // `crates/service/tests/max_days.rs` and
 // `crates/core/tests/max_days.rs` for their real behavior.
 
-#[test]
-fn daybreak_is_unimplemented_not_invalid() {
-    let mut input = base_input();
-    input.constraints.push(enabled(
-        "c-daybreak",
-        pb::constraint_config::Params::Daybreak(pb::Daybreak {
-            scope: vec![],
-            min_rest_minutes: 600,
-        }),
-    ));
-
-    let e = reject(&input, &scope(&[]));
-    assert!(
-        matches!(&e, ConvertError::ConstraintTypeUnimplemented { constraint_type: "Daybreak", .. }),
-        "{e}"
-    );
-    assert_eq!(code_of(&e), Code::Unimplemented);
-}
+// `Daybreak` is now built — see `crates/service/tests/daybreak.rs` and
+// `crates/core/tests/daybreak.rs` for its real behavior.

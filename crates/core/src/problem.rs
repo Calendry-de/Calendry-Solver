@@ -6,7 +6,7 @@
 //! loop.
 
 use crate::aggregates::{
-    Aggregates, CompactnessInstance, DayMixInstance, ExamSpacingSameDayInstance,
+    Aggregates, CompactnessInstance, DayMixInstance, DaybreakInstance, ExamSpacingSameDayInstance,
     ExamSpacingWindowInstance, LecturerConsistencyInstance, MaxConsecutiveDaysInstance,
     MaxConsecutiveInstance, MaxConsecutiveOfferingBlocksInstance, MaxDailySessionCountInstance,
     MaxDailySpanInstance, MaxDaysInstance, MaxOfferingSessionsPerDayInstance,
@@ -393,6 +393,10 @@ pub struct ConstraintSet {
     /// HARD, the consecutive-run counterpart of `max_days`. See
     /// [`MaxConsecutiveDaysInstance`].
     pub max_consecutive_days: Vec<MaxConsecutiveDaysInstance>,
+    /// SOFT. Requires minimum wall-clock rest between a Group's or Person's
+    /// last occupied block of one teaching day and their first of the next.
+    /// See [`DaybreakInstance`].
+    pub daybreak: Vec<DaybreakInstance>,
 }
 
 /// One `ProtectedBlock` instance. The FIRST hard type whose values
@@ -519,6 +523,8 @@ pub struct Enforce {
     pub max_days_person: bool,
     pub max_consecutive_days_group: bool,
     pub max_consecutive_days_person: bool,
+    pub daybreak_group: bool,
+    pub daybreak_person: bool,
 }
 
 impl ConstraintSet {
@@ -606,6 +612,8 @@ impl ConstraintSet {
                 .max_consecutive_days
                 .iter()
                 .any(|c| c.person && c.covers(kind)),
+            daybreak_group: self.daybreak.iter().any(|c| c.group && c.covers(kind)),
+            daybreak_person: self.daybreak.iter().any(|c| c.person && c.covers(kind)),
         }
     }
 }
@@ -1259,6 +1267,12 @@ pub struct Problem {
     /// Summed weight of every configured `RoomTurnaroundBuffer` instance.
     /// Zero when not configured.
     pub room_turnaround_weight: f64,
+    /// Summed weight of every configured `Daybreak` instance covering the
+    /// Group axis. Zero when not configured, or when no instance selects
+    /// it.
+    pub daybreak_group_weight: f64,
+    /// The Person-axis counterpart of `daybreak_group_weight`.
+    pub daybreak_person_weight: f64,
     /// Summed weight of every configured `MinimizeRoomChurn` instance. Zero
     /// when not configured.
     pub room_churn_weight: f64,
@@ -1531,6 +1545,7 @@ impl Problem {
             constraints.minimize_room_churn.clone(),
             constraints.room_consistency.clone(),
             constraints.lecturer_consistency.clone(),
+            constraints.daybreak.clone(),
         );
 
         let day_mix_weight: f64 = constraints
@@ -1647,6 +1662,18 @@ impl Problem {
         let room_turnaround_weight: f64 = constraints
             .room_turnaround_buffer
             .iter()
+            .map(|i| i.weight)
+            .sum();
+        let daybreak_group_weight: f64 = constraints
+            .daybreak
+            .iter()
+            .filter(|i| i.group)
+            .map(|i| i.weight)
+            .sum();
+        let daybreak_person_weight: f64 = constraints
+            .daybreak
+            .iter()
+            .filter(|i| i.person)
             .map(|i| i.weight)
             .sum();
         let room_churn_weight: f64 = constraints
@@ -1822,6 +1849,8 @@ impl Problem {
             location_change_group_weight,
             location_change_person_weight,
             room_turnaround_weight,
+            daybreak_group_weight,
+            daybreak_person_weight,
             room_churn_weight,
             room_consistency_weight,
             lecturer_consistency_weight,

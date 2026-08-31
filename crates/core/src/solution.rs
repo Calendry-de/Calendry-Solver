@@ -1343,6 +1343,21 @@ impl SearchState {
                 }
             }
         }
+        if who.enforce.daybreak_group {
+            if add {
+                self.aggregates.add_group_daybreak(who.subtree_groups, span);
+            } else {
+                self.aggregates
+                    .remove_group_daybreak(who.subtree_groups, span);
+            }
+        }
+        if who.enforce.daybreak_person {
+            if add {
+                self.aggregates.add_person_daybreak(who.attendees, span);
+            } else {
+                self.aggregates.remove_person_daybreak(who.attendees, span);
+            }
+        }
 
         // Scheduling pattern: keyed by Offering, so unlike every axis above it
         // needs `who.offering` — `None` for an ad-hoc Session, which has
@@ -1790,6 +1805,216 @@ impl SearchState {
         }
         self.aggregates
             .room_turnaround_cost(problem.room_turnaround_weight)
+    }
+
+    /// Wall-clock rest between `end_a` (minutes since day A's OWN
+    /// midnight) and `start_b` (minutes since day B's OWN midnight), where
+    /// B is the very next teaching day — crossing exactly one midnight.
+    /// `block_start_minute`/`block_end_minute` return minute-of-day, not a
+    /// running total across days, so a plain subtraction would silently
+    /// treat "ends late, starts early" as a NEGATIVE (saturated-to-zero,
+    /// i.e. "no rest") gap instead of the true overnight one. Saturates
+    /// `end_a` at zero rather than panicking if a grid's blocks run past
+    /// midnight (`end_a > MINUTES_PER_DAY`), matching `blockBoundaries`'
+    /// own "not wrapped at 24h" convention.
+    #[inline]
+    fn overnight_rest_minutes(end_a: u32, start_b: u32) -> u32 {
+        const MINUTES_PER_DAY: u32 = 24 * 60;
+        MINUTES_PER_DAY.saturating_sub(end_a) + start_b
+    }
+
+    /// SOFT. Requires minimum wall-clock rest between one teaching day's
+    /// last occupied block and the next teaching day's first, per Group
+    /// and/or Person. Charges each covering axis's weight ONCE per violated
+    /// consecutive-day pair — flat, not scaled by how short the rest is,
+    /// the same shape `MinimizeOfferingDaySplit` uses. Read fresh over
+    /// every (entity, day) pair, like [`Self::imbalance_cost`]: the gap
+    /// belongs to a PAIR of days, not to either day's placements alone, so
+    /// entities x days is rescanned rather than maintained as a running
+    /// total. `Aggregates` has no knowledge of `GridTime`, so the wall-
+    /// clock arithmetic lives here, combining its raw occupancy with
+    /// `problem.grid_time`.
+    pub fn daybreak_cost(&self, problem: &Problem) -> f64 {
+        if self.aggregates.daybreak_rules().is_empty() {
+            return 0.0;
+        }
+        let day_count = problem.slots.day_count() as u32;
+        if day_count < 2 {
+            return 0.0;
+        }
+        let blocks_per_day = problem.slots.blocks_per_day();
+        let weekday_of = |d: u32| problem.slots.flags(SlotIdx(d * blocks_per_day)).iso_weekday;
+        let group_threshold = self.aggregates.daybreak_group_threshold_minutes();
+        let person_threshold = self.aggregates.daybreak_person_threshold_minutes();
+
+        let mut total = 0.0;
+        if group_threshold > 0 && problem.daybreak_group_weight != 0.0 {
+            for g in 0..problem.groups.len() as u32 {
+                for d in 0..day_count - 1 {
+                    if let (Some((_, last_a)), Some((first_b, _))) = (
+                        self.aggregates.group_occupied_range(GroupIdx(g), d),
+                        self.aggregates.group_occupied_range(GroupIdx(g), d + 1),
+                    ) {
+                        let end_a = problem.grid_time.block_end_minute(weekday_of(d), last_a);
+                        let start_b = problem
+                            .grid_time
+                            .block_start_minute(weekday_of(d + 1), first_b);
+                        if Self::overnight_rest_minutes(end_a, start_b) < group_threshold {
+                            total += problem.daybreak_group_weight;
+                        }
+                    }
+                }
+            }
+        }
+        if person_threshold > 0 && problem.daybreak_person_weight != 0.0 {
+            for p in 0..problem.persons.len() as u32 {
+                for d in 0..day_count - 1 {
+                    if let (Some((_, last_a)), Some((first_b, _))) = (
+                        self.aggregates.person_occupied_range(PersonIdx(p), d),
+                        self.aggregates.person_occupied_range(PersonIdx(p), d + 1),
+                    ) {
+                        let end_a = problem.grid_time.block_end_minute(weekday_of(d), last_a);
+                        let start_b = problem
+                            .grid_time
+                            .block_start_minute(weekday_of(d + 1), first_b);
+                        if Self::overnight_rest_minutes(end_a, start_b) < person_threshold {
+                            total += problem.daybreak_person_weight;
+                        }
+                    }
+                }
+            }
+        }
+        total
+    }
+
+    /// Would placing `who` at `span` newly violate `Daybreak`'s rest
+    /// requirement with either teaching-day neighbor? A ranking signal
+    /// only, mirroring `would_worsen_share`'s role for a HARD aggregate —
+    /// here for a SOFT one, the same shape `day_mix_penalty` already uses
+    /// (a boolean worsening check priced at the type's own weight, rather
+    /// than an exact delta).
+    pub fn would_worsen_daybreak(
+        &self,
+        problem: &Problem,
+        who: &Occupant<'_>,
+        span: &[SlotIdx],
+    ) -> bool {
+        if span.is_empty() || (!who.enforce.daybreak_group && !who.enforce.daybreak_person) {
+            return false;
+        }
+        let day = problem.slots.flags(span[0]).day_index;
+        let day_count = problem.slots.day_count() as u32;
+        let blocks_per_day = problem.slots.blocks_per_day();
+        let weekday_of = |d: u32| problem.slots.flags(SlotIdx(d * blocks_per_day)).iso_weekday;
+        let cand_first = span
+            .iter()
+            .map(|s| s.get() as u32 % blocks_per_day)
+            .min()
+            .unwrap();
+        let cand_last = span
+            .iter()
+            .map(|s| s.get() as u32 % blocks_per_day)
+            .max()
+            .unwrap();
+
+        // `current` is this axis's occupied range on `day` BEFORE `who` is
+        // added — combined with the candidate's own span to get the range
+        // AFTER, without touching `Aggregates`. `threshold` is 0 when this
+        // axis has no configured minimum, in which case nothing can worsen.
+        let worsens_this_day = |current: Option<(u32, u32)>,
+                                prev_day: Option<(u32, u32)>,
+                                next_day: Option<(u32, u32)>,
+                                threshold: u32|
+         -> bool {
+            if threshold == 0 {
+                return false;
+            }
+            let (new_first, new_last) = match current {
+                Some((f, l)) => (f.min(cand_first), l.max(cand_last)),
+                None => (cand_first, cand_last),
+            };
+            let worsens_prev = day > 0
+                && prev_day.is_some_and(|(_, prev_last)| {
+                    let end_prev = problem
+                        .grid_time
+                        .block_end_minute(weekday_of(day - 1), prev_last);
+                    let start_new = problem
+                        .grid_time
+                        .block_start_minute(weekday_of(day), new_first);
+                    Self::overnight_rest_minutes(end_prev, start_new) < threshold
+                });
+            let worsens_next = day + 1 < day_count
+                && next_day.is_some_and(|(next_first, _)| {
+                    let end_new = problem
+                        .grid_time
+                        .block_end_minute(weekday_of(day), new_last);
+                    let start_next = problem
+                        .grid_time
+                        .block_start_minute(weekday_of(day + 1), next_first);
+                    Self::overnight_rest_minutes(end_new, start_next) < threshold
+                });
+            worsens_prev || worsens_next
+        };
+
+        if who.enforce.daybreak_group {
+            let current = who
+                .subtree_groups
+                .iter()
+                .filter_map(|&g| self.aggregates.group_occupied_range(g, day))
+                .reduce(|(af, al), (f, l)| (af.min(f), al.max(l)));
+            let prev_day = day.checked_sub(1).and_then(|d| {
+                who.subtree_groups
+                    .iter()
+                    .filter_map(|&g| self.aggregates.group_occupied_range(g, d))
+                    .reduce(|(af, al), (f, l)| (af.min(f), al.max(l)))
+            });
+            let next_day = (day + 1 < day_count)
+                .then(|| {
+                    who.subtree_groups
+                        .iter()
+                        .filter_map(|&g| self.aggregates.group_occupied_range(g, day + 1))
+                        .reduce(|(af, al), (f, l)| (af.min(f), al.max(l)))
+                })
+                .flatten();
+            if worsens_this_day(
+                current,
+                prev_day,
+                next_day,
+                self.aggregates.daybreak_group_threshold_minutes(),
+            ) {
+                return true;
+            }
+        }
+        if who.enforce.daybreak_person {
+            let current = who
+                .attendees
+                .iter()
+                .filter_map(|&p| self.aggregates.person_occupied_range(p, day))
+                .reduce(|(af, al), (f, l)| (af.min(f), al.max(l)));
+            let prev_day = day.checked_sub(1).and_then(|d| {
+                who.attendees
+                    .iter()
+                    .filter_map(|&p| self.aggregates.person_occupied_range(p, d))
+                    .reduce(|(af, al), (f, l)| (af.min(f), al.max(l)))
+            });
+            let next_day = (day + 1 < day_count)
+                .then(|| {
+                    who.attendees
+                        .iter()
+                        .filter_map(|&p| self.aggregates.person_occupied_range(p, day + 1))
+                        .reduce(|(af, al), (f, l)| (af.min(f), al.max(l)))
+                })
+                .flatten();
+            if worsens_this_day(
+                current,
+                prev_day,
+                next_day,
+                self.aggregates.daybreak_person_threshold_minutes(),
+            ) {
+                return true;
+            }
+        }
+        false
     }
 
     /// What the currently over-cap distinct-Room weeks cost, at the

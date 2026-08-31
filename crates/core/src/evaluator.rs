@@ -122,6 +122,23 @@ fn score_one(problem: &Problem, solution: &Solution, state: &SearchState, mv: &M
             0.0
         };
 
+    // SOFT, unlike the two HARD penalties above: priced at the type's own
+    // weight (whichever axis actually enforces it), the same
+    // ranking-signal contract `day_mix_penalty` uses — a boolean worsening
+    // check, not an exact delta.
+    let daybreak_penalty = if state.would_worsen_daybreak(problem, &candidate, &span) {
+        let mut w = 0.0;
+        if candidate.enforce.daybreak_group {
+            w += problem.daybreak_group_weight;
+        }
+        if candidate.enforce.daybreak_person {
+            w += problem.daybreak_person_weight;
+        }
+        w
+    } else {
+        0.0
+    };
+
     /*
      * OnlineOnsiteSameDay is soft, so it is priced here at its CONFIGURED
      * WEIGHT rather than at `hard_penalty` like the share cap above. That
@@ -235,6 +252,7 @@ fn score_one(problem: &Problem, solution: &Solution, state: &SearchState, mv: &M
             + share_penalty
             + max_days_penalty
             + max_consecutive_days_penalty
+            + daybreak_penalty
             + day_mix_penalty
             + exam_same_day_penalty
             + exam_window_penalty

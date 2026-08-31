@@ -310,6 +310,7 @@ pub fn all_constraints() -> ConstraintSet {
         minimize_break_spanning: Vec::new(),
         max_days: Vec::new(),
         max_consecutive_days: Vec::new(),
+        daybreak: Vec::new(),
     }
 }
 
