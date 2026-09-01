@@ -2168,5 +2168,50 @@ pub fn build_output(
         // DRAFT field, not wired: see its comment in model.proto. The search
         // produces one result; there is nothing to put here yet.
         candidates: Vec::new(),
+        unplaced_offerings: unplaced_offerings(problem, outcome),
     }
+}
+
+/// Offerings this solution left short — see `SolverOutput.unplaced_offerings`
+/// in model.proto for why this exists: `hard_violations` cannot report a
+/// placement that never got created, so without this a run that silently
+/// drops Sessions is indistinguishable from one that placed everything.
+///
+/// `problem.placement_count(o)` is already `required_session_count` minus
+/// whatever locked/immovable Sessions realize it — the OUTSTANDING variables
+/// this run actually tried to place — so an Offering fully covered by locked
+/// Sessions has nothing to count here and is correctly never reported short.
+///
+/// Iterates `offering_ids()` in index order rather than building a `HashMap`
+/// keyed by id: this is part of `SolverOutput`, and a run's output is
+/// supposed to be reproducible for a fixed `(input, seed, move budget)` — an
+/// unordered map would make the FIELD ORDER of a byte-identical comparison
+/// depend on hash iteration, silently breaking that guarantee for the one
+/// field this function owns.
+fn unplaced_offerings(
+    problem: &Problem,
+    outcome: &calendry_solver_core::SolveOutcome,
+) -> Vec<pb::UnplacedOffering> {
+    let mut placed_counts = vec![0u32; problem.offerings.len()];
+
+    for p in problem.placement_ids() {
+        if outcome.solution.get(p).is_some() {
+            placed_counts[problem.placement(p).offering.get()] += 1;
+        }
+    }
+
+    problem
+        .offering_ids()
+        .filter(|&o| problem.in_scope(o))
+        .filter_map(|o| {
+            let requested = problem.placement_count(o);
+            let placed = placed_counts[o.get()];
+
+            (placed < requested).then(|| pb::UnplacedOffering {
+                offering_id: problem.offerings[o.get()].id.clone(),
+                requested,
+                placed,
+            })
+        })
+        .collect()
 }

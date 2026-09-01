@@ -75,4 +75,11 @@ SolverOutput {
         },
     ),
     candidates: [],
+    unplaced_offerings: [
+        UnplacedOffering {
+            offering_id: "o1",
+            requested: 5,
+            placed: 2,
+        },
+    ],
 }

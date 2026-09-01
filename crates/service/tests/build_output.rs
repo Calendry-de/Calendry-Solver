@@ -183,7 +183,93 @@ fn an_infeasible_instance_renders_its_violations() {
 
     let output = output_for(&input, &["o1"]);
     assert!(!output.hard_violations.is_empty(), "a shortfall must be reported");
+    // The OTHER half of the same fact, reported a second, independent way.
+    // `hard_violations` fires because a constraint check ran against the
+    // instance; `unplaced_offerings` fires because three placement variables
+    // simply have no entry in `outcome.solution` at all — the two arrive
+    // through unrelated code paths and must still agree on the count.
+    assert_eq!(
+        output.unplaced_offerings,
+        vec![pb::UnplacedOffering { offering_id: "o1".into(), requested: 5, placed: 2 }],
+    );
     insta::assert_debug_snapshot!(output);
+}
+
+/// The gap `unplaced_offerings` exists to close, stated directly: two runs
+/// that report the SAME `hard_violations` (zero) and only differ in how much
+/// they actually placed must not look identical. See calendry issue #119 —
+/// six real runs on one unchanged instance swung between 170 and 208 of 208
+/// required Sessions, every one reporting zero hard violations, with nothing
+/// on the wire to tell them apart.
+///
+/// `ExactFrequency` is what makes `an_infeasible_instance_renders_its_
+/// violations` ALSO report a hard violation for its own shortfall — it is
+/// `base_input()`'s own default, not something every tenant necessarily has
+/// enabled (the catalogue is tenant-configurable, see `calendry`'s
+/// `constraint_def`). Dropping it here is not a contrived gap: it reproduces
+/// exactly the real condition that made the live shortfall invisible —
+/// nothing else in the enabled catalogue has any opinion about a Session
+/// that simply never got a slot.
+#[test]
+fn a_shortfall_with_zero_hard_violations_still_reports_unplaced() {
+    let mut input = base_input();
+    one_slot_grid(&mut input);
+    input.constraints = vec![enabled(
+        "c-room",
+        pb::constraint_config::Params::RoomDoubleBooking(pb::RoomDoubleBooking {}),
+    )];
+    input.offerings = vec![offering("o1", 3)];
+
+    let output = output_for(&input, &["o1"]);
+    assert!(
+        output.hard_violations.is_empty(),
+        "ExactFrequency is deliberately not enabled; nothing else has an opinion on a shortfall"
+    );
+    assert_eq!(output.sessions.len(), 2, "one slot, two rooms: only 2 of the 3 required fit");
+    assert_eq!(
+        output.unplaced_offerings,
+        vec![pb::UnplacedOffering { offering_id: "o1".into(), requested: 3, placed: 2 }],
+        "a shortfall must be visible even when hard_violations alone says nothing is wrong"
+    );
+}
+
+/// An Offering entirely covered by locked Sessions has nothing outstanding —
+/// zero placement variables were ever created for it — and must not be
+/// reported as short just because its own placements happen to be absent
+/// from `outcome.solution` (there are none to be absent).
+#[test]
+fn an_offering_fully_covered_by_locks_is_never_reported_short() {
+    let mut input = base_input();
+    input.offerings = vec![offering("o1", 2)];
+    input.existing_sessions = vec![
+        locked_session("s1", "o1", slot(0, 1, 1)),
+        locked_session("s2", "o1", slot(0, 2, 1)),
+    ];
+
+    let output = output_for(&input, &["o1"]);
+    assert!(output.sessions.is_empty(), "both occurrences are already locked");
+    assert!(output.unplaced_offerings.is_empty());
+}
+
+/// An out-of-scope Offering was never asked to place anything this run — its
+/// own shortfall, if any, belongs to whichever run WAS asked, not this one.
+/// Mirrors `problem.in_scope`'s own doc comment: an Offering with more locked
+/// Sessions than it requires and one nobody asked about must stay
+/// indistinguishable, and both are indistinguishable from "fully satisfied"
+/// here on purpose.
+#[test]
+fn an_out_of_scope_offering_is_never_reported_short() {
+    let mut input = base_input();
+    input.offerings = vec![offering("o1", 5), offering("o2", 1)];
+
+    let output = output_for(&input, &["o2"]);
+    assert!(
+        output
+            .unplaced_offerings
+            .iter()
+            .all(|u| u.offering_id != "o1"),
+        "o1 was never in scope; this run says nothing about it"
+    );
 }
 
 #[test]
