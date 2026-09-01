@@ -408,6 +408,7 @@ pub fn fixture(slots: SlotTable, constraints: ConstraintSet) -> ProblemSpec {
 pub fn fixed_session(id: &str, room: Option<u32>, slot: u32) -> FixedSpec {
     FixedSpec {
         session_id: id.to_string(),
+        external: false,
         // These fixtures are pure occupancy blockers, not realizations of an
         // Offering under test. Frequency accounting is exercised at the
         // conversion boundary, where the link is actually resolved.

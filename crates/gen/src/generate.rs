@@ -710,6 +710,7 @@ fn split_occurrences(
         match placed {
             Some((start, room)) => fixed.push(FixedSpec {
                 session_id: format!("{}#{}-locked", spec.id, occ.index),
+                external: false,
                 // A locked Session still realizes its Offering, so it counts
                 // toward that Offering's required frequency.
                 offering: Some(OfferingIdx(occ.offering)),

@@ -824,6 +824,11 @@ pub struct OfferingSpec {
 #[derive(Clone, Debug)]
 pub struct FixedSpec {
     pub session_id: String,
+    /// Occupancy from another tenant's use of a Federation-shared Room —
+    /// never a Session of this snapshot's tenant. The output's
+    /// `retained_session_ids` accounting (ADR-0032) excludes it: only a
+    /// Session the caller actually sent can be "retained".
+    pub external: bool,
     /// The Offering this Session realizes, when it realizes one.
     ///
     /// `None` for ad-hoc Sessions (a `staff_meeting` kind need not realize any
@@ -1048,6 +1053,8 @@ impl Offering {
 #[derive(Clone, Debug)]
 pub struct FixedOccupancy {
     pub session_id: String,
+    /// See [`FixedSpec::external`].
+    pub external: bool,
     /// See [`FixedSpec::offering`].
     pub offering: Option<OfferingIdx>,
     pub kind: String,
@@ -1165,6 +1172,13 @@ pub struct ProblemSpec {
     /// no gaps anywhere, which is inert unless `MinimizeBreakSpanning` or
     /// `Daybreak` is configured.
     pub grid_time: GridTime,
+    /// The run's "now", as a slot: no NEW placement may start before it
+    /// (ADR-0032). `None` — the default, and what every fixture and the
+    /// benchmark generator use — means no reference exists and nothing is
+    /// masked. The conversion layer, whose wire semantics define "no
+    /// reference" as "the reference lies beyond the term", maps that case to
+    /// one-past-the-last-slot instead, masking everything.
+    pub reference: Option<SlotIdx>,
 }
 
 /// Which Persons' and Groups' Sessions carry their OWN movement weight
@@ -1217,6 +1231,7 @@ impl ProblemSpec {
             in_scope_movement_weight: 0.0,
             movement_overrides: MovementOverrides::default(),
             grid_time: GridTime::default(),
+            reference: None,
         }
     }
 
@@ -1379,6 +1394,10 @@ pub struct PlacementVar {
 #[derive(Clone, Debug)]
 pub struct Problem {
     pub slots: SlotTable,
+    /// See [`ProblemSpec::reference`]. Enforced in
+    /// [`crate::solution::SearchState::statically_blocked`], so construction,
+    /// repair and the targeted ruin operator all read one definition.
+    pub reference: Option<SlotIdx>,
     /// The grid's wall-clock gap structure — see [`GridTime`]. Only read by
     /// `MinimizeBreakSpanning`, `Daybreak` and `Precedence`'s
     /// `min_gap_minutes`.
@@ -1566,6 +1585,7 @@ impl Problem {
             in_scope_movement_weight,
             movement_overrides,
             grid_time,
+            reference,
         } = spec;
 
         let parent_of: Vec<Option<GroupIdx>> = groups.iter().map(|g| g.parent).collect();
@@ -1827,6 +1847,7 @@ impl Problem {
                     .and_then(|o| derived_offerings.get(o.get()))
                     .map_or(0, |o| o.min_capacity),
                 session_id: f.session_id,
+                external: f.external,
                 offering: f.offering,
                 kind: f.kind,
                 room: f.room,
@@ -2237,6 +2258,7 @@ impl Problem {
 
         let problem = Self {
             slots,
+            reference,
             grid_time,
             rooms,
             groups,
@@ -2738,6 +2760,7 @@ mod tests {
             fixed: (0..4)
                 .map(|i| FixedSpec {
                     session_id: format!("s{i}"),
+                    external: false,
                     offering: Some(OfferingIdx(0)),
                     kind: "lecture".into(),
                     room: None,

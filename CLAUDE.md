@@ -63,6 +63,7 @@ Check any change against these. Each links to the decision behind it.
 - [ ] `LecturerVeto` combined with a genuine lecturer pool is refused at conversion, never silently inert — [ADR-0026](docs/adr/0026-personpreferencefit-charges-the-unmet-fraction.md)
 - [ ] The solver tolerates infeasible input; the app's "warn and allow" UX produces it
 - [ ] A run with unplaced demand never reports `converged`: stagnation escalates instead, and an exhausted ladder reports `stagnated` — gated on `unplaced` alone, never the other hard counts — [ADR-0031](docs/adr/0031-convergence-is-never-declared-over-unplaced-demand.md)
+- [ ] Every Session the run received comes back placed or in `retained_session_ids`, and no NEW placement ever starts before the reference — [ADR-0032](docs/adr/0032-the-answer-accounts-for-every-session-it-was-given.md)
 - [ ] Tests use move budgets, never wall-clock budgets — [ADR-0006](docs/adr/0006-two-budgets-and-the-limit-of-determinism.md)
 
 The nested-group rule is a performance requirement as much as a correctness one:
@@ -328,6 +329,22 @@ index forever; and an unplaced Session whose SAMPLED candidates all score
 infeasible gets an exhaustive `is_free` fallback over its full candidate
 space, so "no placement exists" is a true statement rather than a sampling
 artifact.
+
+**The answer accounts for every Session it was given (ADR-0032, "the
+vanishing eleven").** A Session before `reference_slot` classifies as PAST,
+satisfies its Offering's demand as fixed occupancy, and used to come back in
+NEITHER `sessions` NOR `unplaced_offerings` — the app deleted taught history
+as `not_returned_by_solver`, and nothing stopped the replacement landing in
+an elapsed week for the NEXT run to drop. Two changes close the loop:
+`SolverOutput.retained_session_ids` lists every non-Federation immovable
+Session the run kept (the applier's rule: gone = in neither list; retained
+Sessions are still deliberately NOT echoed as placements), and
+`ProblemSpec::reference` masks every candidate start before the run's "now"
+in `SearchState::statically_blocked` — one definition covering construction,
+repair and `ruin_blocking`. Core `reference: None` masks NOTHING (fixtures,
+generator); the wire's "no reference / beyond the term" case maps to
+one-past-the-last-slot and masks EVERYTHING, matching what
+`classify_immovable` already said it meant.
 
 **`LecturerConsistency` is built.** Once its prerequisite (lecturer-pool
 selection) landed, the remaining gap was one evaluator: a distinct-lecturer

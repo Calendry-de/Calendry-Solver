@@ -912,6 +912,20 @@ impl SearchState {
             return true;
         }
 
+        // A slot before the run's reference instant is elapsed time: no NEW
+        // teaching can happen there, and no eviction can open it — the same
+        // monotone-safe, always-on shape as the calendar closure above
+        // (ADR-0032). Compared by the span's START, mirroring
+        // `classify_immovable`'s past test exactly, so "too old to move" and
+        // "too old to place into" are one line. Fixed occupancy is untouched
+        // here as everywhere in this function: a Session already sitting in
+        // the past is history, not a candidate.
+        if let Some(r) = problem.reference
+            && span.first().is_some_and(|&s| s < r)
+        {
+            return true;
+        }
+
         if who.enforce.lecturer_veto
             && let Some(veto) = who.veto_slots
             && span.iter().any(|s| veto.contains(s.get()))

@@ -83,6 +83,7 @@ fn evaluate_hard_reports_a_relation_already_violated_by_locked_input() {
     let b = offering("b", 0, &[]);
     let locked_a = FixedSpec {
         session_id: "sess-a".to_string(),
+        external: false,
         offering: Some(OfferingIdx(0)),
         kind: "lecture".to_string(),
         room: None,

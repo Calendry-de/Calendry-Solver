@@ -82,4 +82,5 @@ SolverOutput {
             placed: 2,
         },
     ],
+    retained_session_ids: [],
 }

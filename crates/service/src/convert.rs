@@ -135,6 +135,14 @@ pub fn convert(input: &pb::SolverInput, scope: &pb::SolveScope) -> Result<Proble
         in_scope_movement_weight,
         movement_overrides,
         grid_time,
+        // The core mask (ADR-0032) reads this the other way around from
+        // `classify_immovable`: no NEW placement may start before it. The
+        // wire's "no reference, or beyond the term" case — `None` from
+        // `resolve_reference` — already classifies every Session as past, so
+        // its mask form is one-past-the-last-slot, blocking every start.
+        // Core `None` (the fixtures' and generator's default) would instead
+        // mask nothing, which is why the two `None`s must not be conflated.
+        reference: Some(reference.unwrap_or(SlotIdx(slots.len() as u32))),
         ..ProblemSpec::new(slots)
     })?)
 }
@@ -1034,6 +1042,7 @@ fn partition_sessions(
         match reason {
             Some(reason) => fixed.push(FixedSpec {
                 session_id: s.id.clone(),
+                external: false,
                 offering,
                 kind: s.kind.clone(),
                 // REQUIRED unless genuinely absent.
@@ -1218,7 +1227,10 @@ fn build_external_occupancy(
 
         out.push(FixedSpec {
             // Another tenant's use of a Federation-shared Room. It realizes no
-            // Offering in *this* snapshot, so it is occupancy and nothing more.
+            // Offering in *this* snapshot, so it is occupancy and nothing more
+            // — which is exactly what `external` records: never a Session of
+            // this tenant, so never in `retained_session_ids`.
+            external: true,
             offering: None,
             session_id: if e.source_ref.is_empty() {
                 format!("external:{}", e.room_id)
@@ -2169,6 +2181,21 @@ pub fn build_output(
         // produces one result; there is nothing to put here yet.
         candidates: Vec::new(),
         unplaced_offerings: unplaced_offerings(problem, outcome),
+        // Every Session this run received and kept as immovable occupancy —
+        // past, locked, or out of scope under LOCK_POLICY_HARD. Deliberately
+        // not echoed in `sessions` (the caller's own data would double-count
+        // on apply), but the wire answer must still ACCOUNT for them: a past
+        // Session satisfies its Offering's demand, so it appears in neither
+        // `sessions` nor `unplaced_offerings`, and an applier reading absence
+        // as orphanhood deletes taught history (ADR-0032, "the vanishing
+        // eleven"). Federation occupancy is another tenant's, not a Session
+        // of this snapshot, and stays out.
+        retained_session_ids: problem
+            .fixed
+            .iter()
+            .filter(|f| !f.external)
+            .map(|f| f.session_id.clone())
+            .collect(),
     }
 }
 

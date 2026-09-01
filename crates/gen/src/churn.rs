@@ -95,6 +95,7 @@ pub fn measure(
             let at = baseline_at(p);
             FixedSpec {
                 session_id: format!("locked-{}", p.get()),
+                external: false,
                 offering: None,
                 kind: offering.kind.clone(),
                 room: Some(at.room),
@@ -116,6 +117,7 @@ pub fn measure(
     if with_clash {
         fixed.push(FixedSpec {
             session_id: "forced-closure".to_string(),
+            external: false,
             offering: None,
             kind: "closure".to_string(),
             room: Some(forced_at.room),

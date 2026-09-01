@@ -80,6 +80,11 @@ fn locked_sessions_are_not_echoed_as_placements() {
         .collect();
     refs.sort_unstable();
     assert_eq!(refs, vec!["o1#0", "o1#1"]);
+    // Not echoed — but ACCOUNTED FOR (ADR-0032): the retained list is what
+    // lets an applier tell "kept as immovable occupancy" from "gone".
+    let mut retained = output.retained_session_ids.clone();
+    retained.sort_unstable();
+    assert_eq!(retained, vec!["s1", "s2", "s3"]);
     insta::assert_debug_snapshot!(output);
 }
 

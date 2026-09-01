@@ -88,4 +88,5 @@ SolverOutput {
     ),
     candidates: [],
     unplaced_offerings: [],
+    retained_session_ids: [],
 }
