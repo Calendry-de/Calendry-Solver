@@ -77,6 +77,17 @@ pub fn room(i: u32) -> pb::Room {
         location: String::new(),
         feature_quantities: vec![],
         site: String::new(),
+        is_specialized: false,
+    }
+}
+
+/// A SPECIALIZED Room carrying `features` — a lab or computer room, the
+/// subject of `MinimizeSpecializedRoomUse`.
+pub fn specialized_room(i: u32, features: &[&str]) -> pb::Room {
+    pb::Room {
+        is_specialized: true,
+        feature_tags: features.iter().map(|f| (*f).to_string()).collect(),
+        ..room(i)
     }
 }
 

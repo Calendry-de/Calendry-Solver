@@ -39,9 +39,10 @@ use calendry_solver_core::ids::{GroupIdx, OfferingIdx, PersonIdx, RoomIdx, SlotI
 use calendry_solver_core::preferences::{Preference, PreferenceInstance};
 use calendry_solver_core::problem::{
     CapacityWasteInstance, ConstraintInstance, ConstraintSet, FixedSpec, Immovable,
-    MaxConcurrentOnlineInstance, MinimizeBreakSpanningInstance, MovementOverrides, OfferingSpec,
-    PlacementVar, Problem, ProblemSpec, ProtectedBlockInstance, RelationKind, RelationSpec, Room,
-    SchedulingPattern, ScopeSpec, Unavailability, classify_immovable,
+    MaxConcurrentOnlineInstance, MinimizeBreakSpanningInstance, MinimizeSpecializedRoomUseInstance,
+    MovementOverrides, OfferingSpec, PlacementVar, Problem, ProblemSpec, ProtectedBlockInstance,
+    RelationKind, RelationSpec, Room, SchedulingPattern, ScopeSpec, Unavailability,
+    classify_immovable,
 };
 use calendry_solver_core::slots::{GridTime, SlotTable, WeekKind, WeekSpec};
 use calendry_solver_core::soft::{SoftInstance, SoftParams};
@@ -425,6 +426,7 @@ fn build_rooms(input: &pb::SolverInput) -> Vec<Room> {
             rank: r.rank,
             is_virtual: r.is_virtual,
             features: r.feature_tags.clone(),
+            is_specialized: r.is_specialized,
             federation_owned: matches!(r.owner, Some(pb::room::Owner::FederationId(_))),
             location: r.location.clone(),
         })
@@ -674,6 +676,26 @@ fn build_offerings(
             required_room_count: o.required_room_count,
             eligible_room_combinations,
             min_capacity: o.min_capacity,
+            // BOTH wire lists, deduplicated. They are separate fields a caller
+            // is not required to keep in sync (the same reason
+            // `individually_eligible` above honors both), and
+            // `MinimizeSpecializedRoomUse` must not charge an Offering that
+            // stated its need in whichever one the app happened to use.
+            required_room_features: {
+                let mut f: Vec<String> = o
+                    .required_room_features
+                    .iter()
+                    .cloned()
+                    .chain(
+                        o.room_feature_requirements
+                            .iter()
+                            .map(|r| r.feature.clone()),
+                    )
+                    .collect();
+                f.sort_unstable();
+                f.dedup();
+                f
+            },
             // An unrecognized or absent value maps to `Unspecified` — the same
             // "solve exactly as today" inert reading the wire field's own doc
             // comment promises, not an error: a stale value here is not a
@@ -1828,6 +1850,25 @@ fn build_constraints(input: &pb::SolverInput) -> Result<ConstraintSet, ConvertEr
                 }
                 set.minimize_offering_day_split
                     .push(MinimizeOfferingDaySplitInstance {
+                        id: c.id.clone(),
+                        kinds: c.applies_to_kinds.clone(),
+                        weight: c.weight,
+                    });
+            }
+
+            // Built — see `Problem::specialized_room_cost`. Empty message: no
+            // params beyond id/kinds/weight; WHICH Rooms are specialized is
+            // `Room.is_specialized`, entity data, not constraint policy — the
+            // same split `ExactFrequency` makes for `required_session_count`.
+            Some(Params::MinimizeSpecializedRoomUse(_)) => {
+                if c.weight < 0.0 || c.weight.is_nan() {
+                    return Err(ConvertError::NegativeSoftWeight {
+                        constraint: c.id.clone(),
+                        weight: c.weight,
+                    });
+                }
+                set.minimize_specialized_room_use
+                    .push(MinimizeSpecializedRoomUseInstance {
                         id: c.id.clone(),
                         kinds: c.applies_to_kinds.clone(),
                         weight: c.weight,

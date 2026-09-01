@@ -248,6 +248,11 @@ fn build_rooms(params: &InstanceParams, rng: &mut Rng) -> Vec<Room> {
             rank: if premium { PREMIUM_RANK } else { ORDINARY_RANK },
             is_virtual: false,
             features,
+            // The generator never marks a Room specialized: it does not
+            // calibrate `MinimizeSpecializedRoomUse`'s firing rate, the same
+            // reason `location` is left unconfigured just below. Marking any
+            // would silently reprice every existing benchmark preset.
+            is_specialized: false,
             federation_owned: false,
             // Left unconfigured: the generator does not calibrate
             // `MinimizeLocationChange`'s firing rate, the same reason
@@ -268,6 +273,7 @@ fn build_rooms(params: &InstanceParams, rng: &mut Rng) -> Vec<Room> {
             rank: ORDINARY_RANK,
             is_virtual: true,
             features: FEATURES.iter().map(ToString::to_string).collect(),
+            is_specialized: false,
             federation_owned: false,
             location: String::new(),
         });
@@ -554,6 +560,7 @@ fn build_offerings(
             eligible_lecturer_combinations: vec![],
             groups: vec![GroupIdx(group)],
             participants: vec![],
+            required_room_features: vec![],
             eligible_rooms,
             required_room_count: 0,
             eligible_room_combinations: vec![],
@@ -609,6 +616,7 @@ fn build_offerings(
                 eligible_lecturer_combinations: vec![],
                 groups: vec![GroupIdx(group)],
                 participants: vec![],
+                required_room_features: vec![],
                 eligible_rooms,
                 required_room_count: 0,
                 eligible_room_combinations: vec![],
@@ -786,6 +794,9 @@ fn build_constraints(params: &InstanceParams, slots: &SlotTable) -> ConstraintSe
     ];
 
     ConstraintSet {
+        // Never generated: the presets do not mark any Room specialized, so
+        // an instance here could never fire — see `build_rooms`.
+        minimize_specialized_room_use: Vec::new(),
         room_double_booking: vec![all("c-room")],
         lecturer_double_booking: vec![all("c-lecturer")],
         group_double_booking: vec![all("c-group")],

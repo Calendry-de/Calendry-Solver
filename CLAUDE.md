@@ -96,7 +96,7 @@ the behaviour they exercise, and kept separate from the generator on purpose
 ```bash
 git clone --recurse-submodules …     # or: git submodule update --init --recursive
 
-cargo test --workspace               # 612 tests
+cargo test --workspace               # 633 tests
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo fmt --all --check
 
@@ -217,6 +217,22 @@ scope. Closes the measured gap (36–100% churn on a targeted repair) without
 the larger, session-level-scope redesign the tracking card also considered;
 see ADR-0008's "In-scope stay-put pressure, landed" addendum for why.
 
+**`MinimizeSpecializedRoomUse` is built.** A Room marked
+`Room.is_specialized` — a lab, computer room or workshop — is discouraged from
+hosting teaching that does not need it, so it stays free for teaching that
+does. EXEMPT BY REQUIREMENT: no charge when the Offering's
+`required_room_features`/`room_feature_requirements` intersect that Room's
+`feature_tags`, so the programming class in the computer lab pays nothing.
+Deliberately NOT `MinimizeRoomRank`: `rank` is ordinal desirability whose
+`invert` mode means "prefer the premium rooms", so encoding a lab as high-rank
+would pull Sessions INTO it — and rank is kind-scoped, so it cannot tell the
+class that needs the lab from the one that merely landed there. Flat, charged
+once per placement, and it PRICES rather than filters (a specialized Room stays
+eligible, so it is still used when it is the only one that fits). Every
+decision is precomputed into `Offering::charged_specialized_rooms`, keeping
+`Problem::specialized_room_cost` a bit test. See ADR-0024's addendum for why a
+second room-axis type does not violate one-type-per-axis.
+
 **The spare bank crosses the wire (issue #22).** A Session with no
 `start_slot` is no longer refused: it is teaching that is OWED but unplaced,
 after a cancellation. It reuses its Session id and carries **no** `original`,
@@ -330,6 +346,12 @@ schema pipeline never exercised end to end. See
 2. **Unary, keyed by `(slot, room)`** — the six soft types, and also
    `LecturerVeto`, which despite its name depends only on one Session's slot and
    its lecturers. Precomputed lookup tables and masks; O(1) exact deltas.
+   Note the near-miss family that does NOT fit here: `MinimizeCapacityWaste`,
+   `MinimizeBreakSpanning` and `MinimizeSpecializedRoomUse` are unary in the
+   same sense but read the OFFERING (its `min_capacity`, its duration, its
+   required features), so a table keyed by kind-profile cannot express them.
+   Each is a plain formula on `Problem` instead, summed into `Objective::soft`
+   like any table hit.
 3. **Aggregate over a set** — `OnlineOnsiteSameDay` and `MaxOnlineShare`, in
    `aggregates.rs`. Neither is expressible as a slot-keyed bitset, and **neither
    is a filter any more**.

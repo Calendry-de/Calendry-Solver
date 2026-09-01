@@ -554,6 +554,7 @@ mod tests {
             rank,
             is_virtual: virt,
             features: vec![],
+            is_specialized: false,
             federation_owned: false,
             location: String::new(),
         }

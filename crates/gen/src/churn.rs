@@ -142,6 +142,7 @@ pub fn measure(
         required_room_count: target_offering.required_room_count,
         eligible_room_combinations: target_offering.eligible_room_combinations.clone(),
         min_capacity: target_offering.min_capacity,
+        required_room_features: vec![],
         scheduling_pattern: target_offering.scheduling_pattern,
         prefer_fuller_days: target_offering.prefer_fuller_days,
     }];

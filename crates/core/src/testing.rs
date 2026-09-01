@@ -28,8 +28,9 @@ use crate::aggregates::DayMixInstance;
 use crate::ids::{GroupIdx, OfferingIdx, PersonIdx, RoomIdx, SlotIdx};
 use crate::preferences::{Preference, PreferenceInstance};
 use crate::problem::{
-    ConstraintInstance, ConstraintSet, FixedSpec, Group, Immovable, OfferingSpec, Person,
-    PlacementVar, Problem, ProblemSpec, Room, SchedulingPattern,
+    ConstraintInstance, ConstraintSet, FixedSpec, Group, Immovable,
+    MinimizeSpecializedRoomUseInstance, OfferingSpec, Person, PlacementVar, Problem, ProblemSpec,
+    Room, SchedulingPattern,
 };
 use crate::slots::{SlotTable, WeekKind, WeekSpec};
 use crate::solution::MAX_ADDITIONAL_ROOMS;
@@ -64,8 +65,21 @@ pub fn room(id: &str) -> Room {
         rank: 1,
         is_virtual: false,
         features: vec![],
+        is_specialized: false,
         federation_owned: false,
         location: String::new(),
+    }
+}
+
+/// A SPECIALIZED Room carrying `features` — a lab or computer room. The
+/// pairing matters: `MinimizeSpecializedRoomUse` exempts an Offering that
+/// requires any of them, so a specialized Room with no features can never
+/// exempt anybody and is not the interesting fixture.
+pub fn specialized_room(id: &str, features: &[&str]) -> Room {
+    Room {
+        is_specialized: true,
+        features: features.iter().map(|f| (*f).to_string()).collect(),
+        ..room(id)
     }
 }
 
@@ -120,9 +134,28 @@ pub fn offering(id: &str, count: u32, eligible: &[u32]) -> OfferingSpec {
         required_room_count: 0,
         eligible_room_combinations: vec![],
         min_capacity: 0,
+        required_room_features: vec![],
         scheduling_pattern: SchedulingPattern::Unspecified,
         prefer_fuller_days: false,
     }
+}
+
+/// A `ConstraintSet` with `MinimizeSpecializedRoomUse` enabled at `weight`,
+/// on top of `base` — the opt-in `all_constraints` deliberately withholds.
+pub fn with_specialized_room_use(mut base: ConstraintSet, weight: f64) -> ConstraintSet {
+    base.minimize_specialized_room_use = vec![MinimizeSpecializedRoomUseInstance {
+        id: "c-specialized".to_string(),
+        kinds: vec![],
+        weight,
+    }];
+    base
+}
+
+/// `offering` that REQUIRES the named Room features — the side of
+/// `MinimizeSpecializedRoomUse` that is exempt from its charge.
+pub fn requiring_features(mut o: OfferingSpec, features: &[&str]) -> OfferingSpec {
+    o.required_room_features = features.iter().map(|f| (*f).to_string()).collect();
+    o
 }
 
 /// `offering` with its scheduling pattern overridden — the fixtures
@@ -276,6 +309,11 @@ pub fn all_constraints() -> ConstraintSet {
         person_double_booking: inst("c-person"),
         exact_frequency: inst("c-freq"),
         lecturer_veto: inst("c-veto"),
+        // Left EMPTY for the same reason `person_preference_fit` is: this one
+        // has a real cost the moment any Room is marked specialized, so
+        // enabling it here would silently reprice fixtures that are about
+        // something else entirely. `specialized_room_use` opts a fixture in.
+        minimize_specialized_room_use: vec![],
         // Included, unlike `person_preference_fit` below, and the asymmetry is
         // the precedent `lecturer_veto` already set: a veto with no declared
         // windows produces an EMPTY mask, so it cannot change any fixture's

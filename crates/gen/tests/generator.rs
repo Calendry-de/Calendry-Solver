@@ -260,6 +260,7 @@ fn overlapping_problem(offerings: u32, sessions: u32, shared: usize) -> Problem 
         rank: 1,
         is_virtual: false,
         features: vec![],
+        is_specialized: false,
         federation_owned: false,
         location: String::new(),
     });
@@ -294,6 +295,7 @@ fn overlapping_problem(offerings: u32, sessions: u32, shared: usize) -> Problem 
             required_room_count: 0,
             eligible_room_combinations: vec![],
             min_capacity: 0,
+            required_room_features: vec![],
             scheduling_pattern: SchedulingPattern::Unspecified,
             prefer_fuller_days: false,
         });

@@ -32,6 +32,13 @@ pub struct Room {
     pub rank: u32,
     pub is_virtual: bool,
     pub features: Vec<String>,
+    /// Scarce by FUNCTION — a lab, a computer room, a workshop. A SEPARATE
+    /// axis from [`Self::rank`], which is ordinal desirability and whose
+    /// `MinimizeRoomRank.invert` mode reads it in the opposite direction; a
+    /// Room can be both, or either alone. Inert until a
+    /// `MinimizeSpecializedRoomUse` instance is configured, and even then only
+    /// for Offerings that require none of this Room's `features`.
+    pub is_specialized: bool,
     pub federation_owned: bool,
     /// Free-text building/campus identifier. `""` means unconfigured —
     /// naturally inert for `MinimizeLocationChange`, since every Room sharing
@@ -355,6 +362,11 @@ pub struct ConstraintSet {
     /// SOFT, per-`(offering, room)`. Rewards a good Room-size fit — see
     /// [`Problem::capacity_waste_cost`].
     pub minimize_capacity_waste: Vec<CapacityWasteInstance>,
+    /// SOFT, per-placement: discourage occupying a `Room::is_specialized`
+    /// Room with teaching that requires none of its features. See
+    /// [`Offering::specialized_room_charge`], where the whole decision is
+    /// precomputed.
+    pub minimize_specialized_room_use: Vec<MinimizeSpecializedRoomUseInstance>,
     /// HARD, filterable. A tenant-wide reserved window — see
     /// [`Offering::protected_block_slots`], the precomputed mask.
     pub protected_block: Vec<ProtectedBlockInstance>,
@@ -517,6 +529,26 @@ pub struct MinimizeBreakSpanningInstance {
     pub id: String,
     pub kinds: Vec<String>,
     pub weight: f64,
+}
+
+/// One `MinimizeSpecializedRoomUse` instance. Same id/kinds/weight shape as
+/// [`MinimizeBreakSpanningInstance`], and outside `SoftModel` for a sharper
+/// version of the same reason: its cost depends on whether THIS Offering
+/// requires any of the Room's features, and two Offerings of one kind — one
+/// profile, one table row — routinely differ there. A `(kind-profile, slot,
+/// room)` table cannot express it at all.
+#[derive(Clone, Debug)]
+pub struct MinimizeSpecializedRoomUseInstance {
+    pub id: String,
+    pub kinds: Vec<String>,
+    pub weight: f64,
+}
+
+impl MinimizeSpecializedRoomUseInstance {
+    #[inline]
+    pub fn covers(&self, kind: &str) -> bool {
+        self.kinds.is_empty() || self.kinds.iter().any(|k| k == kind)
+    }
 }
 
 impl MinimizeBreakSpanningInstance {
@@ -775,6 +807,17 @@ pub struct OfferingSpec {
     /// question the eligibility filter's boolean pass/fail already answered
     /// and discarded. `0` means no requirement was ever stated.
     pub min_capacity: u32,
+    /// Every feature name this Offering requires of its Room, from BOTH wire
+    /// lists (`required_room_features` and `room_feature_requirements`).
+    ///
+    /// Kept for the same reason `min_capacity` above is: room ELIGIBILITY is
+    /// already resolved into `eligible_rooms` by the caller, so this is not a
+    /// second filter — but `MinimizeSpecializedRoomUse` needs to know not
+    /// just WHICH Rooms are eligible but WHY, since a specialized Room is
+    /// exempt from its charge exactly when the Offering requires something
+    /// that Room provides. Empty for the overwhelming majority of Offerings,
+    /// which require nothing.
+    pub required_room_features: Vec<String>,
 }
 
 /// Immovable occupancy as supplied, before closures are derived.
@@ -859,6 +902,23 @@ pub struct Offering {
     pub scheduling_pattern: SchedulingPattern,
     /// See `OfferingSpec::prefer_fuller_days`.
     pub prefer_fuller_days: bool,
+    /// What one placement of this Offering costs for occupying a SPECIALIZED
+    /// Room it does not need — the summed weight of every
+    /// `MinimizeSpecializedRoomUse` instance covering this Offering's kind,
+    /// or `0.0` when none does.
+    ///
+    /// Precomputed alongside [`Self::charged_specialized_rooms`] so the hot
+    /// path is a bit test and a float read, never a `Vec<String>`
+    /// intersection: the exemption is a feature-set question, and answering
+    /// it inside `score_one` would put string comparison in the innermost
+    /// loop the search has.
+    pub specialized_room_charge: f64,
+    /// Which Rooms actually cost this Offering
+    /// [`Self::specialized_room_charge`] — every `Room::is_specialized` Room
+    /// whose `features` this Offering requires NONE of. Empty when no
+    /// instance covers this kind, so the charge is unreachable rather than
+    /// merely zero.
+    pub charged_specialized_rooms: BitSet,
     /// Dense row indices into the problem's `DifferentTime` relations this
     /// Offering is a member of — empty for every Offering not named in one,
     /// which is the overwhelming majority. Precomputed the same way
@@ -1667,10 +1727,52 @@ impl Problem {
             }
         }
 
+        // `MinimizeSpecializedRoomUse`, resolved per Offering once.
+        //
+        // Two things collapse into a bit test here. WHICH Rooms are
+        // specialized is fixed for the run, and WHETHER this Offering is
+        // exempt from a given one is a feature-set intersection — a
+        // `Vec<String>` scan that must never happen inside `score_one`. So
+        // both are answered now, and `specialized_room_cost` becomes a bit
+        // test plus a float read.
+        //
+        // The charge is folded in the same pass: an Offering no instance
+        // covers gets an EMPTY set rather than a zero weight, so the whole
+        // term is unreachable for it rather than merely free.
+        let specialized_charge_of = |kind: &str| -> f64 {
+            constraints
+                .minimize_specialized_room_use
+                .iter()
+                .filter(|i| i.covers(kind))
+                .map(|i| i.weight)
+                .sum()
+        };
+        let charged_specialized_rooms_for = |kind: &str, required: &[String]| -> BitSet {
+            let mut mask = BitSet::new(rooms.len());
+            if specialized_charge_of(kind) == 0.0 {
+                return mask;
+            }
+            for (i, r) in rooms.iter().enumerate() {
+                // Exempt by REQUIREMENT: the class that needs the lab belongs
+                // in the lab, and charging it would price a choice it never
+                // had. Only teaching that could have gone elsewhere is
+                // discouraged.
+                if r.is_specialized && !required.iter().any(|f| r.features.contains(f)) {
+                    mask.insert(i);
+                }
+            }
+            mask
+        };
+
         let derived_offerings: Vec<Offering> = offerings
             .into_iter()
             .enumerate()
             .map(|(i, o)| Offering {
+                specialized_room_charge: specialized_charge_of(&o.kind),
+                charged_specialized_rooms: charged_specialized_rooms_for(
+                    &o.kind,
+                    &o.required_room_features,
+                ),
                 different_time_relations: different_time_membership[i].clone(),
                 meet_together_relations: meet_together_membership[i].clone(),
                 soft_profile: soft.profile_for_kind(&o.kind),
@@ -1948,6 +2050,11 @@ impl Problem {
             .iter()
             .map(|i| i.weight)
             .sum();
+        let specialized_room_weight: f64 = constraints
+            .minimize_specialized_room_use
+            .iter()
+            .map(|i| i.weight)
+            .sum();
         let break_spanning_weight: f64 = constraints
             .minimize_break_spanning
             .iter()
@@ -2009,6 +2116,12 @@ impl Problem {
          * instance's weight is the per-placement ceiling, same shape as
          * `soft.total_weight`.
          *
+         * THE SPECIALIZED-ROOM TERM IS BOUNDED THE SAME WAY, and more
+         * tightly than the others: it is FLAT and charged at most ONCE per
+         * placement (a Session occupying several specialized Rooms still
+         * pays its weight once), so summing every instance's weight is
+         * exactly the per-placement ceiling rather than an over-estimate.
+         *
          * THE BREAK-SPANNING TERM IS BOUNDED THE SAME WAY: `break_spanning_
          * cost` charges each covering instance's flat `weight` at most once
          * per placement (span crosses a gap, or it does not — no scaling by
@@ -2029,6 +2142,7 @@ impl Problem {
             + in_scope_movement_weight * placements.len() as f64
             + max_movement_override * placements.len() as f64
             + capacity_waste_weight * placements.len() as f64
+            + specialized_room_weight * placements.len() as f64
             + break_spanning_weight * placements.len() as f64
             // Read off `(group, day)` cell counts, exactly like day_mix_weight
             // above: neither is bounded by placements, since one placement can
@@ -2379,6 +2493,36 @@ impl Problem {
             .sum()
     }
 
+    /// What placing `offering` into `rooms` costs for occupying a SPECIALIZED
+    /// Room it does not need — a lab, computer room or workshop that should
+    /// have stayed free for teaching that requires it.
+    ///
+    /// FLAT and charged at most ONCE per placement, however many specialized
+    /// Rooms it occupies. `Room::is_specialized` is a boolean, so unlike
+    /// `MinimizeCapacityWaste`'s ratio or `MinimizeRoomRank`'s distance past a
+    /// threshold there is no gradient to grade — and charging per Room would
+    /// make one placement's ceiling `weight * MAX_ROOMS_PER_SESSION`, which
+    /// `hard_penalty` would then have to widen for a case that barely exists.
+    ///
+    /// Every decision is already precomputed into
+    /// [`Offering::charged_specialized_rooms`] — which Rooms are specialized,
+    /// whether this Offering is exempt from each, and whether any instance
+    /// covers its kind at all — so this stays a bit test on the hot path.
+    #[inline]
+    pub fn specialized_room_cost(
+        &self,
+        offering: &Offering,
+        rooms: impl Iterator<Item = RoomIdx>,
+    ) -> f64 {
+        if offering.charged_specialized_rooms.is_empty() {
+            return 0.0;
+        }
+        let charged = rooms
+            .into_iter()
+            .any(|r| offering.charged_specialized_rooms.contains(r.get()));
+        if charged { offering.specialized_room_charge } else { 0.0 }
+    }
+
     /// SOFT. Discourages a Session's span from crossing a `grid_time` gap —
     /// starting before a break and resuming after it. Charges each covering
     /// instance's flat `weight` once if the span crosses ANY gap at all,
@@ -2498,6 +2642,7 @@ mod tests {
                 required_room_count: 0,
                 eligible_room_combinations: vec![],
                 min_capacity: 0,
+                required_room_features: vec![],
                 scheduling_pattern: SchedulingPattern::Unspecified,
                 prefer_fuller_days: false,
             },
@@ -2514,6 +2659,7 @@ mod tests {
                 required_room_count: 0,
                 eligible_room_combinations: vec![],
                 min_capacity: 0,
+                required_room_features: vec![],
                 scheduling_pattern: SchedulingPattern::Unspecified,
                 prefer_fuller_days: false,
             },
@@ -2553,6 +2699,7 @@ mod tests {
             required_room_count: 0,
             eligible_room_combinations: vec![],
             min_capacity: 0,
+            required_room_features: vec![],
             scheduling_pattern: SchedulingPattern::Unspecified,
             prefer_fuller_days: false,
         }

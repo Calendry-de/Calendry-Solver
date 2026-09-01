@@ -247,6 +247,7 @@ impl<'p> Trial<'p> {
             + self.problem.preference_cost_for_placement(o, p, at)
             + self.problem.movement_cost(p, at.start, at.room)
             + self.problem.capacity_waste_cost(o, capacity)
+            + self.problem.specialized_room_cost(o, at.all_rooms())
             + self
                 .problem
                 .break_spanning_cost(o, at.start, o.duration_blocks);
@@ -271,6 +272,7 @@ impl<'p> Trial<'p> {
             + self.problem.preference_cost_for_placement(o, p, at)
             + self.problem.movement_cost(p, at.start, at.room)
             + self.problem.capacity_waste_cost(o, capacity)
+            + self.problem.specialized_room_cost(o, at.all_rooms())
             + self
                 .problem
                 .break_spanning_cost(o, at.start, o.duration_blocks);
@@ -712,6 +714,7 @@ fn ruin_worst(
                     .cost(p, pl.start, &problem.rooms[pl.room.get()].features)
                 + problem.movement_cost(p, pl.start, pl.room)
                 + problem.capacity_waste_cost(o, capacity)
+                + problem.specialized_room_cost(o, pl.all_rooms())
                 + problem.break_spanning_cost(o, pl.start, o.duration_blocks);
             if let Some(span) = problem.slots.span(pl.start, o.duration_blocks) {
                 let occupant = Occupant::of_offering(o)
@@ -923,6 +926,7 @@ pub fn recompute_objective(problem: &Problem, solution: &Solution) -> Objective 
                         .cost(p, pl.start, &problem.rooms[pl.room.get()].features)
                     + problem.movement_cost(p, pl.start, pl.room)
                     + problem.capacity_waste_cost(o, capacity)
+                    + problem.specialized_room_cost(o, pl.all_rooms())
                     + problem.break_spanning_cost(o, pl.start, o.duration_blocks);
             }
             None => unplaced += 1,

@@ -268,6 +268,7 @@ fn score_one(problem: &Problem, solution: &Solution, state: &SearchState, mv: &M
             + problem.preference_cost_for_placement(offering, mv.placement, mv.to)
             + problem.movement_cost(mv.placement, mv.to.start, mv.to.room)
             + problem.capacity_waste_cost(offering, capacity)
+            + problem.specialized_room_cost(offering, mv.to.all_rooms())
             + problem.break_spanning_cost(offering, mv.to.start, offering.duration_blocks)
             + share_penalty
             + max_days_penalty
