@@ -27,8 +27,8 @@ each other:
 ## Decisions
 
 **Every Session the run received comes back either placed or retained.**
-`SolverOutput.retained_session_ids` (schema `d7c3dda`+`fda9a9e`, the
-`unplaced-offerings-119` release train) lists the id of every immovable
+`SolverOutput.retained_session_ids` (schema tag `v0.16.1`, on top of the
+merged `unplaced-offerings-119` work) lists the id of every immovable
 Session the run kept — past, locked, or out of scope under
 `LOCK_POLICY_HARD`. The applier's rule becomes one line: a Session is gone
 only when it appears in **neither** `sessions` **nor**
@@ -78,10 +78,10 @@ of quietly placing teaching into elapsed weeks.
 
 ## Consequences
 
-* The proto pin must move to a tag containing both `unplaced_offerings` and
-  `retained_session_ids` before this ships; until then the submodule sits on
-  the branch commits. The app's applier gains the two-list rule and should
-  stop deleting on any answer that predates the field.
+* The proto pin sits on `v0.16.1`, the first tag carrying both
+  `unplaced_offerings` and `retained_session_ids`. The app's applier gains
+  the two-list rule and should stop deleting on any answer that predates the
+  field.
 * A mid-term re-solve can no longer relocate future teaching into elapsed
   weeks — capacity genuinely shrinks as a term progresses, and a repair that
   used to "succeed" by hiding a Session in the past now reports the shortfall
