@@ -87,4 +87,5 @@ SolverOutput {
         },
     ),
     candidates: [],
+    unplaced_offerings: [],
 }
