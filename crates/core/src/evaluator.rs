@@ -64,6 +64,34 @@ impl MoveEvaluator for CpuEvaluator {
     }
 }
 
+/// Whether `mv` could be placed right now — the same gates `score_one`
+/// applies before costing, without the cost.
+///
+/// Exists for repair's exhaustive fallback (ADR-0031): when candidate
+/// *sampling* finds nothing feasible for an unplaced Session, the question
+/// becomes "does ANY feasible cell exist", and answering it with `score_batch`
+/// would pay the full soft costing for cells that only need the bit tests.
+pub fn is_feasible(problem: &Problem, state: &SearchState, mv: &Move) -> bool {
+    let offering = problem.offering_of(mv.placement);
+
+    let Some(span) = problem.slots.span(mv.to.start, offering.duration_blocks) else {
+        return false;
+    };
+    if !offering.is_room_choice_eligible(mv.to.room, mv.to.additional_rooms) {
+        return false;
+    }
+    if !offering.is_lecturer_choice_eligible(mv.to.lecturers) {
+        return false;
+    }
+
+    let candidate = Occupant::of_offering(offering)
+        .with_room(mv.to.room)
+        .with_additional_rooms(mv.to.additional_rooms)
+        .with_pool_lecturers(mv.to.lecturers)
+        .with_offering(problem.placement(mv.placement).offering);
+    state.is_free(problem, &candidate, &span)
+}
+
 fn score_one(problem: &Problem, solution: &Solution, state: &SearchState, mv: &Move) -> Score {
     let offering = problem.offering_of(mv.placement);
 
@@ -324,5 +352,10 @@ mod tests {
 
         assert!(!out[0].0.is_finite(), "occupied room must be infeasible");
         assert_eq!(out[1], Score(0.0), "free room, no soft constraints, costs 0");
+
+        // The cheap gate must agree with the priced one, cell for cell —
+        // repair's exhaustive fallback (ADR-0031) substitutes it for scoring.
+        assert!(!is_feasible(&problem, &occ, &moves[0]));
+        assert!(is_feasible(&problem, &occ, &moves[1]));
     }
 }

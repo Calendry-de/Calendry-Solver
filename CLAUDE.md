@@ -62,6 +62,7 @@ Check any change against these. Each links to the decision behind it.
 - [ ] Lecturer-pool selection is built: a pool Offering's `PersonPreferenceFit` cost MUST go through `PreferenceModel::cost_for` (per-person, live), never the static `table` — `Problem::preference_cost_for_placement` is the one place that decides which, and `Offering::has_lecturer_pool` is the read — [ADR-0026](docs/adr/0026-personpreferencefit-charges-the-unmet-fraction.md)
 - [ ] `LecturerVeto` combined with a genuine lecturer pool is refused at conversion, never silently inert — [ADR-0026](docs/adr/0026-personpreferencefit-charges-the-unmet-fraction.md)
 - [ ] The solver tolerates infeasible input; the app's "warn and allow" UX produces it
+- [ ] A run with unplaced demand never reports `converged`: stagnation escalates instead, and an exhausted ladder reports `stagnated` — gated on `unplaced` alone, never the other hard counts — [ADR-0031](docs/adr/0031-convergence-is-never-declared-over-unplaced-demand.md)
 - [ ] Tests use move budgets, never wall-clock budgets — [ADR-0006](docs/adr/0006-two-budgets-and-the-limit-of-determinism.md)
 
 The nested-group rule is a performance requirement as much as a correctness one:
@@ -306,6 +307,28 @@ first-meetings-only), it decides ordering structurally but measures
 `SameTime` family does not. All four decisions, and the one open divergence,
 are in ADR-0028's "`Precedence` landed" addendum.
 
+**Convergence is never declared over unplaced demand (issue #120,
+[ADR-0031](docs/adr/0031-convergence-is-never-declared-over-unplaced-demand.md)).**
+`termination_reason: "converged"` is reserved for a best solution with ZERO
+unplaced Sessions. While demand remains unplaced, hitting the stagnation limit
+ESCALATES instead of terminating — the ruin cap doubles per level
+(`tuning::RUIN_CAP_BASE`/`ESCALATION_LEVELS`, 8 → 64) and the temperature is
+reheated — and only an exhausted ladder stops the run, with the new reason
+`"stagnated"` (a plain wire string, no proto change; the app must not read an
+unknown reason as success — #119's reporting work). The ladder is FINITE, so
+an unbudgeted call still terminates, and it is gated on `unplaced` alone,
+never the other hard counts — ADR-0025's stance on the aggregate hard terms
+is unchanged. Three search changes travel with it: a fourth ruin arm,
+`ruin_blocking`, that probes an unplaced Session's candidate cells and evicts
+the cheapest movable blocker set (NOT the arm ADR-0025 rejected — an unplaced
+Session has no placement whose scoring could be fixed); rounds now repair
+previously-unplaced Sessions FIRST, each class seeded-shuffled, because the
+old ascending-index order handed every contested freed cell to the lowest
+index forever; and an unplaced Session whose SAMPLED candidates all score
+infeasible gets an exhaustive `is_free` fallback over its full candidate
+space, so "no placement exists" is a true statement rather than a sampling
+artifact.
+
 **`LecturerConsistency` is built.** Once its prerequisite (lecturer-pool
 selection) landed, the remaining gap was one evaluator: a distinct-lecturer
 count over an entire Offering's placed Sessions, priced against
@@ -439,12 +462,15 @@ to both ([ADR-0025](docs/adr/0025-maxonlineshare-is-not-enforced-by-the-search.m
 * **Construction is seed-independent**; the seed influences only the LNS phase.
 * **Negative soft weights and out-of-range share ratios are rejected**, as is a
   `MaxOnlineShare` with no window — a ratio is meaningless without one.
-* **Two search defects were found by falsification tests**, and both are worth
-  knowing because the fix is easy to undo by accident: LNS never retried
-  Sessions construction left unplaced (so the `unplaced` term was permanently
-  unoptimizable), and repair broke ties by lowest index (which collapsed the
-  neighbourhood — ruining the same Session always regenerated the same
-  placement). Ties are now broken with the seeded RNG: still reproducible, but
+* **Three search defects were found by falsification/field evidence**, and all
+  are worth knowing because the fix is easy to undo by accident: LNS never
+  retried Sessions construction left unplaced (so the `unplaced` term was
+  permanently unoptimizable), repair broke ties by lowest index (which
+  collapsed the neighbourhood — ruining the same Session always regenerated
+  the same placement), and a round's removal set was repaired in ascending
+  index order (the same collapse one level up — every contested freed cell
+  went to the lowest index, every round, forever; issue #120/ADR-0031). Ties
+  and repair order are now driven by the seeded RNG: still reproducible, but
   the neighbourhood is real.
 
 ---

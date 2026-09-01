@@ -19,6 +19,7 @@ and measured to be wrong.
 | [0004](0004-four-crates-core-must-not-see-prost.md) | Four crates, so that `core` cannot see prost types |
 | [0005](0005-unary-rpcs-and-solver-owned-run-state.md) | Unary RPCs only; the solver owns in-flight run state and the app polls |
 | [0006](0006-two-budgets-and-the-limit-of-determinism.md) | Both a time budget and a move budget; whichever hits first ends the run |
+| [0031](0031-convergence-is-never-declared-over-unplaced-demand.md) | Convergence is never declared over unplaced demand |
 
 ## Domain and constraints
 

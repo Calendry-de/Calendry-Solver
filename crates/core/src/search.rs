@@ -31,15 +31,28 @@
 //! **wall-clock budget** cannot be reproducible, because the iteration count
 //! depends on machine speed and load. The guarantee is byte-identical output for
 //! the same `(input, seed, move budget)` when termination is deterministic —
-//! `"converged"` or `"move_budget"`. `termination_reason` tells a caller which
-//! case they got.
+//! `"converged"`, `"stagnated"` or `"move_budget"`. `termination_reason` tells a
+//! caller which case they got.
+//!
+//! # Termination over unplaced demand (ADR-0031)
+//!
+//! `"converged"` is reserved for a best solution with **zero unplaced
+//! Sessions**. While unplaced demand remains, hitting the stagnation limit
+//! escalates instead of terminating — the ruin cap doubles and the temperature
+//! is reheated — because a flat counter cannot tell "no improving move exists"
+//! from "the right combination was never sampled". The ladder is finite, so an
+//! unbudgeted call still terminates; a run that exhausts it stops with
+//! `"stagnated"`, the honest "demand is still unplaced and I ran out of ideas,
+//! not budget". Scoped to `unplaced` alone, not all of `Objective::hard()`:
+//! the aggregate hard terms can be genuinely unsatisfiable by the data
+//! (ADR-0025), and a run succeeding while reporting them stays acceptable.
 
 use std::collections::HashMap;
 
 use crate::constraints::{self, Violation};
 use crate::evaluator::{CpuEvaluator, Move, MoveEvaluator, Score};
 use crate::ids::PlacementIdx;
-use crate::problem::Problem;
+use crate::problem::{Offering, Problem};
 use crate::rng::Rng;
 use crate::soft::{Objective, RankSpan, SoftComponent};
 use crate::solution::{Occupant, Placement, SearchState, Solution};
@@ -65,6 +78,19 @@ pub mod tuning {
     /// instances but wasteful at university scale; beyond this the candidate
     /// list is sampled with the seeded RNG.
     pub const MAX_CANDIDATES: usize = 512;
+    /// Base cap on placed Sessions disturbed per ruin round, doubled per
+    /// escalation level (ADR-0031).
+    pub const RUIN_CAP_BASE: usize = 8;
+    /// Escalation levels available while unplaced demand remains. Each level
+    /// doubles the ruin cap and reheats the temperature; the ladder being
+    /// FINITE is what keeps an unbudgeted call terminating — the same job the
+    /// stagnation limit itself exists for. With 3 levels the cap runs
+    /// 8 → 16 → 32 → 64.
+    pub const ESCALATION_LEVELS: u32 = 3;
+    /// Candidate cells probed per targeted-ruin invocation (ADR-0031): for
+    /// each, the operator identifies the placed Sessions blocking it and
+    /// evicts the cheapest such set.
+    pub const BLOCK_PROBE_CELLS: usize = 16;
 }
 
 /// Both budgets apply; whichever is hit first ends the run. 0 = unbounded.
@@ -378,6 +404,10 @@ pub fn solve_with<E: MoveEvaluator>(
     let stagnation_limit = tuning::STAGNATION_BASE
         + tuning::STAGNATION_PER_PLACEMENT * problem.placements.len() as u64;
     let mut stagnant = 0u64;
+    // Escalation level (ADR-0031): 0 is the ordinary search. Raised instead of
+    // terminating when stagnation hits while Sessions remain unplaced; reset
+    // whenever the best-known unplaced count drops.
+    let mut level = 0u32;
 
     // Nothing to improve: no placements, or an already-perfect objective.
     let mut done =
@@ -393,8 +423,27 @@ pub fn solve_with<E: MoveEvaluator>(
             break;
         }
         if stagnant >= stagnation_limit {
-            termination_reason = "converged";
-            break;
+            // "Converged" is reserved for complete demand (ADR-0031): while
+            // Sessions remain unplaced, stagnation cannot tell "no improving
+            // move exists" from "the right combination was never sampled", so
+            // the search escalates — a bigger ruin cap, a reheated
+            // temperature — before it is allowed to give up. The ladder is
+            // finite, so an unbudgeted call still terminates; exhausting it
+            // reports the honest reason instead of a false convergence.
+            if best_objective.unplaced == 0 {
+                termination_reason = "converged";
+                break;
+            }
+            if level >= tuning::ESCALATION_LEVELS {
+                termination_reason = "stagnated";
+                break;
+            }
+            level += 1;
+            stagnant = 0;
+            // At MIN_TEMPERATURE acceptance is greedy, and the larger
+            // rearrangements the raised cap exists for routinely pass through
+            // soft-cost-worse intermediate rounds greed rejects.
+            temperature = initial_temperature(problem);
         }
 
         iterations += 1;
@@ -407,7 +456,8 @@ pub fn solve_with<E: MoveEvaluator>(
         trial.begin();
 
         // --- ruin ---------------------------------------------------------
-        let removed = ruin(problem, &mut trial, &mut rng);
+        let ruin_cap = tuning::RUIN_CAP_BASE << level;
+        let removed = ruin(problem, &mut trial, &mut rng, ruin_cap);
         if removed.is_empty() {
             trial.rollback();
             stagnant += 1;
@@ -418,9 +468,16 @@ pub fn solve_with<E: MoveEvaluator>(
         // No hand-maintained deltas: `Trial::place` updates the solution, the
         // occupancy index, the aggregate counters and the objective as one
         // operation, so they cannot disagree.
-        for &p in &removed {
-            let scored =
-                repair_one(problem, evaluator, trial.state(), trial.solution(), p, &mut rng);
+        for &(p, was_unplaced) in &removed {
+            let scored = repair_one(
+                problem,
+                evaluator,
+                trial.state(),
+                trial.solution(),
+                p,
+                was_unplaced,
+                &mut rng,
+            );
             moves_evaluated += scored.evaluated;
             candidates_enumerated += scored.enumerated;
             if let Some(placement) = scored.best {
@@ -457,6 +514,11 @@ pub fn solve_with<E: MoveEvaluator>(
 
         let objective = trial.objective();
         if objective.total(problem.hard_penalty) < best_objective.total(problem.hard_penalty) {
+            if objective.unplaced < best_objective.unplaced {
+                // The problem just got smaller: fresh patience at base
+                // intensity for what remains (ADR-0031).
+                level = 0;
+            }
             best = trial.solution().clone();
             best_objective = objective;
             stagnant = 0;
@@ -612,18 +674,35 @@ pub fn construct(problem: &Problem) -> (Solution, SearchState) {
 
 /// Remove a handful of placements, releasing their occupancy.
 ///
-/// Three operators, chosen by the seeded RNG. `Related` is what lets the search
+/// Four operators, chosen by the seeded RNG (the fourth, [`ruin_blocking`],
+/// only while Sessions remain unplaced). `Related` is what lets the search
 /// *swap* two Sessions: any one-at-a-time neighbourhood has to pass through an
 /// infeasible intermediate to reach a swap, so without it those moves are
 /// unreachable.
 ///
+/// `cap` bounds how many PLACED Sessions one round may disturb — the base cap
+/// at level 0, doubled per escalation level (ADR-0031).
+///
+/// Returns the removal set in **repair order** — previously-unplaced Sessions
+/// first, then the ruined, each class shuffled with the seeded RNG — with each
+/// entry flagged `true` if it was unplaced before this round. Unplaced-first is
+/// aligned with the objective (placing one outranks any soft cost a re-placed
+/// Session could recover); the shuffles matter because a fixed ascending order
+/// hands every contested freed cell to the lowest index forever — the same
+/// neighbourhood collapse `repair_one`'s tie-break fix records, one level up.
+///
 /// The removed positions no longer come back as a second return value: the
 /// `Trial`'s journal records them, so the undo is its business rather than the
 /// caller's.
-fn ruin(problem: &Problem, trial: &mut Trial<'_>, rng: &mut Rng) -> Vec<PlacementIdx> {
+fn ruin(
+    problem: &Problem,
+    trial: &mut Trial<'_>,
+    rng: &mut Rng,
+    cap: usize,
+) -> Vec<(PlacementIdx, bool)> {
     // Selection reads the solution; removal mutates the trial. Scoped so the
     // shared borrow ends before the exclusive one begins.
-    let chosen = {
+    let ordered = {
         let current = trial.solution();
         let placed: Vec<PlacementIdx> = problem
             .placement_ids()
@@ -634,37 +713,57 @@ fn ruin(problem: &Problem, trial: &mut Trial<'_>, rng: &mut Rng) -> Vec<Placemen
         // Without this, ruin only ever selects PLACED Sessions, so a Session
         // that greedy dead-ended on could never be reconsidered and the
         // `unplaced` term of the objective would be permanently unoptimizable.
-        let unplaced: Vec<PlacementIdx> = problem
+        let mut unplaced: Vec<PlacementIdx> = problem
             .placement_ids()
             .filter(|&p| current.get(p).is_none())
             .collect();
 
-        if placed.is_empty() {
-            // Nothing to release; the unplaced simply join the repair list.
-            unplaced
+        let mut ruined = if placed.is_empty() {
+            // Nothing to release; the unplaced simply form the repair list.
+            Vec::new()
         } else {
-            // Ruin size: at least 1, at most 8 or the number placed, whichever
-            // is smaller.
-            let max_k = placed.len().clamp(1, 8);
+            // Ruin size: at least 1, at most `cap` or the number placed,
+            // whichever is smaller.
+            let max_k = placed.len().clamp(1, cap);
             let k = 1 + rng.below(max_k);
 
-            let mut chosen = match rng.below(3) {
-                0 => ruin_random(&placed, k, rng),
-                1 => ruin_worst(problem, current, trial.state(), &placed, k),
-                _ => ruin_related(problem, current, &placed, k, rng),
+            let mut chosen = if unplaced.is_empty() {
+                match rng.below(3) {
+                    0 => ruin_random(&placed, k, rng),
+                    1 => ruin_worst(problem, current, trial.state(), &placed, k),
+                    _ => ruin_related(problem, current, &placed, k, rng),
+                }
+            } else {
+                match rng.below(4) {
+                    0 => ruin_random(&placed, k, rng),
+                    1 => ruin_worst(problem, current, trial.state(), &placed, k),
+                    2 => ruin_related(problem, current, &placed, k, rng),
+                    _ => ruin_blocking(problem, current, &placed, &unplaced, max_k, rng),
+                }
             };
-            chosen.extend_from_slice(&unplaced);
             chosen.sort_unstable();
             chosen.dedup();
             chosen
-        }
+        };
+
+        rng.shuffle(&mut unplaced);
+        rng.shuffle(&mut ruined);
+        let mut ordered: Vec<(PlacementIdx, bool)> =
+            Vec::with_capacity(unplaced.len() + ruined.len());
+        ordered.extend(unplaced.into_iter().map(|p| (p, true)));
+        ordered.extend(ruined.into_iter().map(|p| (p, false)));
+        ordered
     };
 
-    for &p in &chosen {
-        // Already-unplaced entries return `None` and change nothing.
-        let _ = trial.unplace(p);
+    for &(p, was_unplaced) in &ordered {
+        let released = trial.unplace(p);
+        debug_assert_eq!(
+            released.is_none(),
+            was_unplaced,
+            "the unplaced flag must match what the trial actually released"
+        );
     }
-    chosen
+    ordered
 }
 
 fn ruin_random(placed: &[PlacementIdx], k: usize, rng: &mut Rng) -> Vec<PlacementIdx> {
@@ -780,6 +879,169 @@ fn ruin_related(
     out
 }
 
+/// Ruin the placed Sessions blocking a cell an UNPLACED Session could use
+/// (ADR-0031).
+///
+/// The other three operators select among PLACED Sessions — by chance, by
+/// cost, or by sharing a resource with a uniformly-random anchor — so freeing
+/// the exact cell a wedged Offering needs is left to luck, and repair can
+/// never evict on its own (an occupied cell scores infinite). This operator
+/// starts from the unplaced Session instead: probe a seeded sample of its
+/// candidate cells, identify the movable occupants blocking each, and evict
+/// the cheapest such set — at most one probe's blockers, never more than the
+/// round's ruin cap.
+///
+/// NOT the fourth arm ADR-0025 rejected. That one would have worked around a
+/// fixable scoring inconsistency in `ruin_worst`; an unplaced Session has no
+/// placement to score, and what blocks it is a relation between its candidate
+/// space and the current occupancy — information no per-placement cost
+/// correction can surface, because the blockers may individually be perfectly
+/// cheap.
+///
+/// Blocker identification is a HEURISTIC over the pairwise axes (see
+/// [`blocks`]). It may over-approximate — an evicted non-blocker is merely
+/// re-placed — and it may miss an axis, wasting the round on a cell that
+/// stays blocked. Correctness never depends on it, exactly like
+/// `ruin_related`'s own relatedness test; `Occupancy` remains the authority.
+fn ruin_blocking(
+    problem: &Problem,
+    current: &Solution,
+    placed: &[PlacementIdx],
+    unplaced: &[PlacementIdx],
+    cap: usize,
+    rng: &mut Rng,
+) -> Vec<PlacementIdx> {
+    let target = unplaced[rng.below(unplaced.len())];
+    let offering = problem.offering_of(target);
+    let space = CandidateSpace::new(problem, target);
+    if space.total == 0 {
+        return Vec::new();
+    }
+
+    // Sampling WITH replacement plus dedup, rather than a partial
+    // Fisher-Yates: a duplicate probe costs one wasted draw in a heuristic,
+    // not a correctness or determinism problem.
+    let mut probe_ix: Vec<usize> = if space.total <= tuning::BLOCK_PROBE_CELLS {
+        (0..space.total).collect()
+    } else {
+        (0..tuning::BLOCK_PROBE_CELLS)
+            .map(|_| rng.below(space.total))
+            .collect()
+    };
+    probe_ix.sort_unstable();
+    probe_ix.dedup();
+
+    // Fewest blockers wins; ties resolve to the earliest probe, which is
+    // canonical after the sort above.
+    let mut best: Option<(usize, Vec<PlacementIdx>)> = None;
+
+    for &i in &probe_ix {
+        let mv = space.at(i);
+        let Some(span) = problem.slots.span(mv.to.start, offering.duration_blocks) else {
+            continue;
+        };
+        let candidate = Occupant::of_offering(offering)
+            .with_room(mv.to.room)
+            .with_additional_rooms(mv.to.additional_rooms)
+            .with_pool_lecturers(mv.to.lecturers);
+        // A cell no eviction could ever open — vetoed, calendar-closed,
+        // protected — has no blockers worth hunting for.
+        if SearchState::statically_blocked(problem, &candidate, &span) {
+            continue;
+        }
+
+        // A span never crosses a day (the grid refuses spills), so its raw
+        // slot indices are contiguous — the same fact `Occupancy::week_of`
+        // reads a whole span off its first slot by.
+        let first = span[0].get();
+        let last = span[span.len() - 1].get();
+
+        let mut blockers: Vec<PlacementIdx> = Vec::new();
+        for &q in placed {
+            let pl_q = current.get(q).expect("`placed` holds only placed Sessions");
+            let o_q = problem.offering_of(q);
+            let q_first = pl_q.start.get();
+            let q_last = q_first + o_q.duration_blocks as usize - 1;
+            if q_last < first || last < q_first {
+                continue;
+            }
+            if blocks(problem, &candidate, o_q, pl_q) {
+                blockers.push(q);
+                if blockers.len() > cap {
+                    // More than this round may evict: the cell cannot be
+                    // opened, so the exact set no longer matters.
+                    break;
+                }
+            }
+        }
+        if blockers.is_empty() || blockers.len() > cap {
+            // Empty means the cell is either already free — plain repair will
+            // take it this round — or blocked by something this heuristic
+            // cannot see (fixed occupancy, an aggregate cap). Neither has an
+            // eviction to offer.
+            continue;
+        }
+        if best.as_ref().is_none_or(|(n, _)| blockers.len() < *n) {
+            best = Some((blockers.len(), blockers));
+        }
+    }
+
+    best.map(|(_, b)| b).unwrap_or_default()
+}
+
+/// Whether a placed Session would block `candidate` on any pairwise axis —
+/// the targeting heuristic behind [`ruin_blocking`], deliberately mirroring
+/// how `Occupancy` marks and queries without being it.
+///
+/// Axis by axis: an EXCLUSIVE Room shared by both (ADR-0022's exemption
+/// preserved); intersecting lecturers, reading a pool Offering's chosen set
+/// from its `Placement` since its `Offering::lecturers` is empty (the trap
+/// `ruin_related` documents); the group conflict closure the way the real
+/// check runs it — `mark` sets the OTHER side's closure, `is_free` queries
+/// this side's own Groups by identity; intersecting attendees; and a shared
+/// `DifferentTime` relation row, which `mark` sets unconditionally.
+/// `MeetTogether` anchors and the online-concurrency cap are deliberately not
+/// mirrored — a missed blocker wastes a round, nothing more.
+fn blocks(problem: &Problem, candidate: &Occupant<'_>, o_q: &Offering, pl_q: Placement) -> bool {
+    if candidate.enforce.room
+        && o_q.enforce.room
+        && candidate
+            .all_rooms()
+            .any(|r| problem.rooms[r.get()].is_exclusive() && pl_q.all_rooms().any(|rq| rq == r))
+    {
+        return true;
+    }
+    if candidate.enforce.lecturer
+        && o_q.enforce.lecturer
+        && candidate.all_lecturers().any(|l| {
+            o_q.lecturers.contains(&l) || pl_q.lecturers.iter().flatten().any(|&lq| lq == l)
+        })
+    {
+        return true;
+    }
+    if candidate.enforce.group
+        && o_q.enforce.group
+        && o_q
+            .conflict_groups
+            .iter()
+            .any(|g| candidate.own_groups.contains(g))
+    {
+        return true;
+    }
+    if candidate.enforce.person
+        && o_q.enforce.person
+        && o_q
+            .attendees
+            .iter()
+            .any(|a| candidate.attendees.contains(a))
+    {
+        return true;
+    }
+    o_q.different_time_relations
+        .iter()
+        .any(|r| candidate.different_time_relations.contains(r))
+}
+
 // ---------------------------------------------------------------------------
 // Recreate
 // ---------------------------------------------------------------------------
@@ -792,58 +1054,118 @@ struct Repaired {
     enumerated: u64,
 }
 
-/// Score every eligible `(slot, room)` for one removed Session as a batch, and
-/// take the cheapest feasible one.
-fn repair_one<E: MoveEvaluator>(
-    problem: &Problem,
-    evaluator: &E,
-    state: &SearchState,
-    solution: &Solution,
-    p: PlacementIdx,
-    rng: &mut Rng,
-) -> Repaired {
-    let offering = problem.offering_of(p);
-    let n_rooms = offering.room_choice_count();
-    // `1` for every non-pool Offering — nothing to choose between, so this
-    // adds no width to the cross product below and `at()` degenerates back
-    // to exactly today's `(start, room)` indexing.
-    let n_lecturers = offering.lecturer_choice_count();
-    let n_starts = problem.slots.start_count(offering.duration_blocks);
-    let width = n_rooms * n_lecturers;
-    let total = n_starts * width;
-    if total == 0 {
-        return Repaired { best: None, evaluated: 0, enumerated: 0 };
-    }
-    let enumerated = total as u64;
+/// One placement's candidate space, addressed BY INDEX, never materialized.
+///
+/// Index `i` is slot-major, then room, then lecturer innermost:
+/// `(nth_start(i / width), room_choice((i % width) / n_lecturers),
+/// lecturer_choice((i % width) % n_lecturers))` — the order a triple
+/// nested slot-then-room-then-lecturer loop would produce.
+///
+/// One definition, two consumers — [`repair_one`] and [`ruin_blocking`] — so
+/// the cell an eviction was planned for is exactly the cell repair can then
+/// address.
+struct CandidateSpace<'p> {
+    problem: &'p Problem,
+    offering: &'p Offering,
+    placement: PlacementIdx,
+    n_lecturers: usize,
+    width: usize,
+    total: usize,
+}
 
-    // The candidate space is addressed BY INDEX, never materialized.
-    //
-    // Index `i` is slot-major, then room, then lecturer innermost:
-    // `(nth_start(i / width), room_choice((i % width) / n_lecturers),
-    // lecturer_choice((i % width) % n_lecturers))` — the order a triple
-    // nested slot-then-room-then-lecturer loop would produce.
-    let at = |i: usize| {
-        let (room, additional_rooms) = offering.room_choice((i % width) / n_lecturers);
-        let lecturers = offering.lecturer_choice((i % width) % n_lecturers);
+impl<'p> CandidateSpace<'p> {
+    fn new(problem: &'p Problem, p: PlacementIdx) -> Self {
+        let offering = problem.offering_of(p);
+        let n_rooms = offering.room_choice_count();
+        // `1` for every non-pool Offering — nothing to choose between, so this
+        // adds no width to the cross product and `at()` degenerates back to
+        // plain `(start, room)` indexing.
+        let n_lecturers = offering.lecturer_choice_count();
+        let n_starts = problem.slots.start_count(offering.duration_blocks);
+        let width = n_rooms * n_lecturers;
+        Self { problem, offering, placement: p, n_lecturers, width, total: n_starts * width }
+    }
+
+    fn at(&self, i: usize) -> Move {
+        let (room, additional_rooms) = self
+            .offering
+            .room_choice((i % self.width) / self.n_lecturers);
+        let lecturers = self
+            .offering
+            .lecturer_choice((i % self.width) % self.n_lecturers);
         Move {
-            placement: p,
+            placement: self.placement,
             to: Placement {
-                start: problem
+                start: self
+                    .problem
                     .slots
-                    .nth_start(offering.duration_blocks, i / width)
+                    .nth_start(self.offering.duration_blocks, i / self.width)
                     .expect("index below start_count"),
                 room,
                 additional_rooms,
                 lecturers,
             },
         }
-    };
+    }
+}
+
+/// Best score, then a SEEDED choice among everything tied with it. `None` when
+/// nothing scored finite.
+///
+/// Breaking ties by lowest index instead would make repair fully
+/// deterministic given a candidate list — and that collapses the
+/// neighbourhood: ruining the same Session always regenerates the same
+/// placement, so LNS can never escape a tie-induced dead end. (Observed for
+/// real: a Group forced onto one day would keep re-picking the virtual room
+/// and leave its second Session permanently unplaced.) The RNG is consumed
+/// sequentially here like everywhere else, so the run stays reproducible.
+fn pick_best(scores: &[Score], rng: &mut Rng) -> Option<usize> {
+    let mut best_score = f64::INFINITY;
+    for s in scores {
+        if s.0.is_finite() && s.0 < best_score {
+            best_score = s.0;
+        }
+    }
+    if !best_score.is_finite() {
+        return None;
+    }
+
+    let tied: Vec<usize> = scores
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| s.0 <= best_score + f64::EPSILON)
+        .map(|(i, _)| i)
+        .collect();
+    Some(tied[rng.below(tied.len())])
+}
+
+/// Score every eligible `(slot, room)` for one removed Session as a batch, and
+/// take the cheapest feasible one.
+///
+/// `was_unplaced` marks a Session that was ALREADY unplaced before this round
+/// (as opposed to one this round's ruin released), and buys it the exhaustive
+/// fallback below — the population where a sampling miss is most expensive.
+fn repair_one<E: MoveEvaluator>(
+    problem: &Problem,
+    evaluator: &E,
+    state: &SearchState,
+    solution: &Solution,
+    p: PlacementIdx,
+    was_unplaced: bool,
+    rng: &mut Rng,
+) -> Repaired {
+    let space = CandidateSpace::new(problem, p);
+    let total = space.total;
+    if total == 0 {
+        return Repaired { best: None, evaluated: 0, enumerated: 0 };
+    }
+    let mut enumerated = total as u64;
 
     let keep = total.min(tuning::MAX_CANDIDATES);
     let mut candidates: Vec<Move> = Vec::with_capacity(keep);
 
     if total <= tuning::MAX_CANDIDATES {
-        candidates.extend((0..total).map(at));
+        candidates.extend((0..total).map(|i| space.at(i)));
     } else {
         // Partial Fisher-Yates over a VIRTUAL array [0, total).
         //
@@ -861,7 +1183,7 @@ fn repair_one<E: MoveEvaluator>(
             let j = i + rng.below(total - i);
             let picked = moved.get(&j).copied().unwrap_or(j);
             let displaced = moved.get(&i).copied().unwrap_or(i);
-            candidates.push(at(picked));
+            candidates.push(space.at(picked));
             // Position i is finalized once visited and never read again, so only
             // position j needs recording.
             moved.insert(j, displaced);
@@ -872,35 +1194,63 @@ fn repair_one<E: MoveEvaluator>(
 
     let mut scores = vec![Score::default(); candidates.len()];
     evaluator.score_batch(problem, solution, state, &candidates, &mut scores);
+    let mut evaluated = candidates.len() as u64;
 
-    // Best score, then a SEEDED choice among everything tied with it.
-    //
-    // Breaking ties by lowest index instead would make repair fully
-    // deterministic given a candidate list — and that collapses the
-    // neighbourhood: ruining the same Session always regenerates the same
-    // placement, so LNS can never escape a tie-induced dead end. (Observed for
-    // real: a Group forced onto one day would keep re-picking the virtual room
-    // and leave its second Session permanently unplaced.) The RNG is consumed
-    // sequentially here like everywhere else, so the run stays reproducible.
-    let mut best_score = f64::INFINITY;
-    for s in &scores {
-        if s.0.is_finite() && s.0 < best_score {
-            best_score = s.0;
+    if let Some(pick) = pick_best(&scores, rng) {
+        return Repaired { best: Some(candidates[pick].to), evaluated, enumerated };
+    }
+
+    // Exhaustive feasibility fallback (ADR-0031), for a Session that was
+    // ALREADY unplaced and whose candidate space was SAMPLED: the sampling
+    // above happens before feasibility, so all `keep` samples can be occupied
+    // while a free cell sits outside the sample — and repair would then report
+    // "no placement exists" for a Session that had a home. The `is_free` bit
+    // tests over the full space are far cheaper than scoring it, and they run
+    // only here, where a miss costs a placement rather than a preference.
+    if !was_unplaced || total <= tuning::MAX_CANDIDATES {
+        return Repaired { best: None, evaluated, enumerated };
+    }
+    enumerated += total as u64;
+
+    // Reservoir sampling (algorithm R) over the FEASIBLE cells, so the RNG is
+    // consumed once per feasible cell beyond the cap — sequential and
+    // reproducible like every other draw.
+    let mut feasible: Vec<usize> = Vec::with_capacity(tuning::MAX_CANDIDATES);
+    let mut seen = 0usize;
+    for i in 0..total {
+        if !crate::evaluator::is_feasible(problem, state, &space.at(i)) {
+            continue;
+        }
+        seen += 1;
+        if feasible.len() < tuning::MAX_CANDIDATES {
+            feasible.push(i);
+        } else {
+            let j = rng.below(seen);
+            if j < tuning::MAX_CANDIDATES {
+                feasible[j] = i;
+            }
         }
     }
-    if !best_score.is_finite() {
-        return Repaired { best: None, evaluated: candidates.len() as u64, enumerated };
+    if feasible.is_empty() {
+        // A true statement now, not a sampling artifact: no free cell exists
+        // for this Session in the current occupancy.
+        return Repaired { best: None, evaluated, enumerated };
     }
+    // Canonical order so argmin ties break identically.
+    feasible.sort_unstable();
 
-    let tied: Vec<usize> = scores
-        .iter()
-        .enumerate()
-        .filter(|(_, s)| s.0 <= best_score + f64::EPSILON)
-        .map(|(i, _)| i)
-        .collect();
-    let pick = tied[rng.below(tied.len())];
+    let candidates: Vec<Move> = feasible.into_iter().map(|i| space.at(i)).collect();
+    let mut scores = vec![Score::default(); candidates.len()];
+    evaluator.score_batch(problem, solution, state, &candidates, &mut scores);
+    evaluated += candidates.len() as u64;
 
-    Repaired { best: Some(candidates[pick].to), evaluated: candidates.len() as u64, enumerated }
+    match pick_best(&scores, rng) {
+        Some(pick) => Repaired { best: Some(candidates[pick].to), evaluated, enumerated },
+        // Feasibility can shift between the scan and the scoring only if the
+        // state changed in between, which it cannot within one call — but a
+        // `None` here must stay a graceful miss, not a panic.
+        None => Repaired { best: None, evaluated, enumerated },
+    }
 }
 
 // ---------------------------------------------------------------------------

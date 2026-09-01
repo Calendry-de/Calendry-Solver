@@ -68,10 +68,10 @@ SolverOutput {
     ),
     stats: Some(
         SolveStats {
-            moves_evaluated: 2706,
-            moves_accepted: 300,
+            moves_evaluated: 10462,
+            moves_accepted: 1200,
             elapsed_millis: 0,
-            termination_reason: "converged",
+            termination_reason: "stagnated",
         },
     ),
     candidates: [],

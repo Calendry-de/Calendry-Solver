@@ -485,6 +485,32 @@ pub fn oversubscribed() -> Problem {
     })
 }
 
+/// A feasible instance greedy construction wedges (ADR-0031).
+///
+/// One room, two blocks on one day. `wide` (two attendees, no blackout) sorts
+/// first in construction — attendee count breaks the eligible-room tie — and
+/// takes block 0, the first feasible cell. `narrow` (one attendee, its group
+/// blacked out at block 1) then finds block 0 occupied and block 1 vetoed, so
+/// construction leaves it unplaced. The only feasible completion — `wide` at
+/// block 1, `narrow` at block 0 — requires the search to move a PLACED
+/// Session for the sake of an UNPLACED one, which repair alone can never do.
+pub fn evictable_wedge() -> Problem {
+    assemble(ProblemSpec {
+        rooms: rooms(1),
+        groups: vec![
+            group("wide-g", None),
+            group_with_blackouts("narrow-g", None, vec![blackout(&[], &[1], &[])]),
+        ],
+        persons: vec![person("p0", &[0]), person("p1", &[0]), person("p2", &[1])],
+        offerings: vec![
+            with_groups(offering("wide", 1, &[0]), &[0]),
+            with_groups(offering("narrow", 1, &[0]), &[1]),
+        ],
+        constraints: all_constraints(),
+        ..ProblemSpec::new(grid(2, 1))
+    })
+}
+
 /// One room, 3 slots, one Offering needing 1 Session. The first slot — the one
 /// greedy construction would otherwise take — is occupied by an immovable
 /// Session for the given `reason`.

@@ -889,10 +889,18 @@ impl SearchState {
     ///
     /// Both are scored on the objective instead. See [`crate::aggregates`].
     pub fn is_free(&self, problem: &Problem, who: &Occupant<'_>, span: &[SlotIdx]) -> bool {
-        if !self.occupancy.is_free(problem, who, span) {
-            return false;
-        }
+        self.occupancy.is_free(problem, who, span) && !Self::statically_blocked(problem, who, span)
+    }
 
+    /// The occupancy-independent half of [`Self::is_free`]: the calendar
+    /// closure, both veto masks and `ProtectedBlock` — everything that rejects
+    /// a cell no matter what else is placed.
+    ///
+    /// Split out for the targeted ruin operator (ADR-0031), which needs to ask
+    /// "could this cell EVER host this Session" before hunting for the
+    /// occupants blocking it — a cell rejected here has no blockers worth
+    /// evicting. One definition, two callers, so they cannot drift.
+    pub fn statically_blocked(problem: &Problem, who: &Occupant<'_>, span: &[SlotIdx]) -> bool {
         // Not a catalogue type, and not gated by any `Enforce` flag or tenant
         // switch: a Break/Holiday week or an individual holiday day is a fact
         // about the calendar, the same kind of always-on rule as the grid
@@ -901,14 +909,14 @@ impl SearchState {
         // NEW placement may land, the same way locked Sessions are never
         // second-guessed elsewhere in this codebase.
         if span.iter().any(|&s| problem.slots.flags(s).is_closed()) {
-            return false;
+            return true;
         }
 
         if who.enforce.lecturer_veto
             && let Some(veto) = who.veto_slots
             && span.iter().any(|s| veto.contains(s.get()))
         {
-            return false;
+            return true;
         }
 
         // Same shape, separate switch: a tenant may enforce one of the two
@@ -917,7 +925,7 @@ impl SearchState {
             && let Some(veto) = who.group_veto_slots
             && span.iter().any(|s| veto.contains(s.get()))
         {
-            return false;
+            return true;
         }
 
         // `ProtectedBlock`: monotone-safe like the calendar closure check
@@ -927,10 +935,10 @@ impl SearchState {
             && let Some(mask) = who.protected_block_slots
             && span.iter().any(|s| mask.contains(s.get()))
         {
-            return false;
+            return true;
         }
 
-        true
+        false
     }
 
     /// Would placing this Session here make a `(group, day)` cell mix delivery

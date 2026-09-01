@@ -28,12 +28,12 @@ pub const SEED: u64 = 0xC0FFEE;
 /// A **move** budget.
 ///
 /// Never a wall-clock budget. Same seed gives byte-identical output only when
-/// termination is itself deterministic — `"converged"` or `"move_budget"`. A run
-/// stopped by `max_wall_millis` completes however many LNS iterations the
-/// machine happened to manage, so a determinism test written against it will
-/// look flaky and will waste somebody's afternoon. That is inherent to a
-/// time-boxed metaheuristic, not a defect, and it is why `termination_reason`
-/// exists.
+/// termination is itself deterministic — `"converged"`, `"stagnated"` or
+/// `"move_budget"`. A run stopped by `max_wall_millis` completes however many
+/// LNS iterations the machine happened to manage, so a determinism test
+/// written against it will look flaky and will waste somebody's afternoon.
+/// That is inherent to a time-boxed metaheuristic, not a defect, and it is why
+/// `termination_reason` exists.
 pub fn moves(n: u64) -> Budget {
     Budget { max_wall_millis: 0, max_moves: n }
 }

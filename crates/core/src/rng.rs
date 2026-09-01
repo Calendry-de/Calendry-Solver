@@ -34,6 +34,16 @@ impl Rng {
         }
         (self.next_u64() % n as u64) as usize
     }
+
+    /// Fisher-Yates, consuming the stream once per element beyond the first —
+    /// sequential like every other draw, so a shuffled order is as
+    /// reproducible as the values themselves.
+    pub fn shuffle<T>(&mut self, xs: &mut [T]) {
+        for i in (1..xs.len()).rev() {
+            let j = self.below(i + 1);
+            xs.swap(i, j);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -59,5 +69,22 @@ mod tests {
         let mut x = Rng::new(1);
         let mut y = Rng::new(2);
         assert_ne!(x.next_u64(), y.next_u64());
+    }
+
+    #[test]
+    fn shuffle_is_a_reproducible_permutation() {
+        let mut a: Vec<u32> = (0..32).collect();
+        let mut b = a.clone();
+        Rng::new(9).shuffle(&mut a);
+        Rng::new(9).shuffle(&mut b);
+        assert_eq!(a, b, "same seed must give the same order");
+
+        let mut sorted = a.clone();
+        sorted.sort_unstable();
+        assert_eq!(sorted, (0..32).collect::<Vec<u32>>(), "must remain a permutation");
+
+        let mut c: Vec<u32> = (0..32).collect();
+        Rng::new(10).shuffle(&mut c);
+        assert_ne!(a, c, "different seeds should give different orders");
     }
 }
