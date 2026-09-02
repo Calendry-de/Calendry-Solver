@@ -114,6 +114,15 @@ pub struct Person {
 /// is every Friday and `{blocks:[0]}` is every first block. All three empty
 /// therefore means always unavailable, which is the literal reading and is
 /// preserved rather than silently treated as "never".
+///
+/// The axes are a CROSS PRODUCT — they intersect, they do not union — and a
+/// blackout LIST is the union of its windows. Those two facts together make
+/// the format fully expressive over `(week, day, block)`: `{days:[3,4,5],
+/// weeks:[5]}` is Wednesday to Friday of week 5 and of no other week, and an
+/// absence crossing a week boundary is two windows. A date-precise fourth axis
+/// has been proposed (Calendry #118) and is not needed; the over-block that
+/// motivated it is the caller rounding a partial week up before assembly. See
+/// `crates/core/tests/mid_week_absence.rs`, which pins this.
 #[derive(Clone, Debug, Default)]
 pub struct Unavailability {
     pub days: Vec<u32>,
