@@ -1309,6 +1309,44 @@ fn check_pair<'p>(
                 out,
             );
         }
+    } else if let Some((rx, ry)) = x.all_rooms().find_map(|rx| {
+        problem
+            .footprint_siblings(rx)
+            .iter()
+            .find(|&&fp| y.all_rooms().any(|ry| ry == fp))
+            .map(|&ry| (rx, ry))
+    }) && !meet_together_pair
+    {
+        // DIFFERENT Rooms, one physical space — movable walls, where 1.0 and
+        // the Audimax cannot both host a Session at one hour. Reported under
+        // `RoomDoubleBooking` rather than a type of its own, because that is
+        // what it is: the rule is unchanged, only the definition of "the same
+        // room" widened. `footprint_siblings` already excludes non-exclusive
+        // Rooms, so the exemption above needs no restating here.
+        //
+        // `else if`: an identical Room is the stronger statement and reads
+        // better in a report, and a pair sharing both would otherwise be
+        // named twice for one clash.
+        //
+        // Independent of `Occupancy`'s own check on purpose (ADR-0014). The
+        // search can never produce this pair, but a caller's snapshot can —
+        // two LOCKED Sessions either side of a folding wall — and the
+        // authoritative checker is what tells the timetabler about it.
+        for i in c.room_double_booking.iter().filter(|i| both(i)) {
+            report(
+                i,
+                ConstraintType::RoomDoubleBooking,
+                format!(
+                    "rooms '{}' and '{}' share a physical footprint, and host '{}' and '{}' \
+                     at {at}",
+                    problem.rooms[rx.get()].id,
+                    problem.rooms[ry.get()].id,
+                    x.label,
+                    y.label
+                ),
+                out,
+            );
+        }
     }
 
     // 2. Lecturer double-booking.

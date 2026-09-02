@@ -67,6 +67,16 @@ pub enum ConvertError {
     #[error(transparent)]
     GroupCycle(#[from] GroupCycle),
 
+    // -- rooms ---------------------------------------------------------------
+    #[error(
+        "room '{room}' is virtual and carries footprint_tags {tags:?}; a footprint is a claim \
+         about physical space, and a virtual room has none — its occupancy is deliberately \
+         unlimited, so the tag could only ever be inert. An inert exclusivity is the worst \
+         outcome available: the run would report no violation while the space it names is \
+         double-booked every time"
+    )]
+    FootprintOnVirtualRoom { room: String, tags: Vec<String> },
+
     // -- sessions ------------------------------------------------------------
     /// A slotless Session realizing NO Offering.
     ///

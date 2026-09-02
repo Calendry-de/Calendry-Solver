@@ -428,6 +428,11 @@ impl Occupancy {
     /// of them claimed a bit the others did not test, the search would refuse
     /// placements it then declined to report, or free a bit it never set.
     /// There is one expression, so there is one answer.
+    ///
+    /// What it returns is the Rooms this Session is ASSIGNED. Each of them may
+    /// stand for more than one occupancy row — see
+    /// [`Problem::footprint_siblings`] — and the three callers below expand
+    /// each entry the same way, immediately, for the same one-answer reason.
     #[inline]
     fn exclusive_rooms(
         problem: &Problem,
@@ -485,6 +490,15 @@ impl Occupancy {
             let c = s.get();
             if who.enforce.room {
                 for r in rooms.into_iter().flatten() {
+                    // A Room's own bit, and ONLY its own — a footprint is
+                    // expanded on the QUERY side, in `is_free`, never here.
+                    // Marking the siblings too would make the relation
+                    // transitive: with A|mid|B behind two separate walls,
+                    // booking A would set mid's bit and mid's bit would then
+                    // block B, which shares no wall with A and is genuinely
+                    // free. Expanding the question instead of the answer keeps
+                    // "these two Rooms overlap" exactly as symmetric and
+                    // exactly as non-transitive as the tags that state it.
                     self.room.set(r.get(), c);
                     if sharing && who.room == Some(r) {
                         let cell = self.meet_together_cells.entry((r, s)).or_default();
@@ -651,13 +665,18 @@ impl Occupancy {
             let c = s.get();
             if who.enforce.room {
                 for r in rooms.into_iter().flatten() {
-                    if !self.room.get(r.get(), c) {
-                        continue;
-                    }
                     // Occupied. Free only for a MeetTogether member JOINING
                     // an already-matching sibling span on its own Room —
                     // guaranteed legitimate by the exact-span check above —
                     // and only while the combined capacity still fits.
+                    //
+                    // Computed once per assigned Room rather than per bit
+                    // tested, and it answers for the footprint siblings too:
+                    // a MeetTogether member holds ONE Room, so whatever it set
+                    // across that Room's footprint it set as one act, and a
+                    // fellow member joining that exact span is entitled to
+                    // every bit of it. Capacity is still the Room's own —
+                    // walls do not add seats to the room actually being used.
                     let shareable = sharing && who.room == Some(r) && joining && {
                         let cap = problem.rooms[r.get()].capacity;
                         let used = self
@@ -666,8 +685,28 @@ impl Occupancy {
                             .map_or(0, |cell| cell.capacity_sum);
                         cap == 0 || used + who.min_capacity <= cap
                     };
-                    if !shareable {
+                    if shareable {
+                        continue;
+                    }
+                    if self.room.get(r.get(), c) {
                         return false;
+                    }
+                    // The movable-wall test, and the ONLY place a footprint
+                    // is expanded: `mark` writes one bit per assigned Room, so
+                    // a set bit always means "this Room itself is in use", and
+                    // the question asked of it here is "is anything I overlap
+                    // in use". That keeps the relation non-transitive, which
+                    // is what a Room in two footprints needs — see
+                    // `Problem::footprint_siblings`.
+                    //
+                    // A filter rather than a priced rule, for the reason every
+                    // structural type is one: 1.0 and the Audimax at the same
+                    // hour is not a preference to weigh, it is one space
+                    // holding two Sessions.
+                    for &fp in problem.footprint_siblings(r) {
+                        if self.room.get(fp.get(), c) {
+                            return false;
+                        }
                     }
                 }
             }

@@ -45,6 +45,26 @@ pub struct Room {
     /// that empty string counts as the SAME location rather than as distinct
     /// ones.
     pub location: String,
+    /// Physical FOOTPRINTS this Room occupies — tenant-defined open
+    /// vocabulary, like [`Self::features`]. Two Rooms sharing any tag share a
+    /// physical space, so booking either occupies both.
+    ///
+    /// The movable-wall case: 1.0, 1.1 and 1.2 behind folding partitions are
+    /// three bookable Rooms closed and one Audimax open, and all four Room
+    /// rows carry one tag. A tag is symmetric by construction — membership,
+    /// not a directed reference — so "A blocks B" and "B blocks A" cannot
+    /// drift apart, and a Room may carry several, which is how a wall shared
+    /// between two combination options is said.
+    ///
+    /// This is NOT [`Self::is_exclusive`], which is one Room against ITSELF
+    /// across time. It is a relationship BETWEEN Rooms, and it is structural
+    /// and HARD for the same reason: two Sessions in one physical space at one
+    /// time is not a preference to weigh.
+    ///
+    /// Resolved once into [`Problem::footprint_siblings`], which is what the
+    /// hot loop reads; a tag that no other exclusive Room carries resolves to
+    /// an empty sibling list and costs nothing.
+    pub footprints: Vec<String>,
 }
 
 impl Room {
@@ -1536,6 +1556,9 @@ pub struct Problem {
     /// `Room.location`, interned to a dense index parallel to [`Self::rooms`].
     /// See [`Problem::room_location`].
     room_location: Vec<u32>,
+    /// Every OTHER exclusive Room sharing a physical footprint with this one,
+    /// parallel to [`Self::rooms`]. See [`Problem::footprint_siblings`].
+    room_footprint_siblings: Vec<Vec<RoomIdx>>,
     /// Every configured `DifferentTime` relation's own id, dense, parallel to
     /// the row index every Offering's and `FixedOccupancy`'s
     /// `different_time_relations` entry names. Its length is the row count
@@ -1644,6 +1667,52 @@ impl Problem {
             })
             .collect();
         let n_locations = location_index.len();
+
+        // Footprint closure: which OTHER exclusive Rooms a booking of each
+        // Room also occupies. Resolved once, here, because none of its inputs
+        // can change during a run and `Occupancy` consults it on every
+        // mark/unmark/is_free — the same reason `room_location` above is
+        // interned rather than compared as strings in the loop.
+        //
+        // Non-exclusive Rooms are dropped from BOTH sides: a virtual Room
+        // neither claims a footprint nor can have one claimed against it
+        // (ADR-0022), so one carrying a tag contributes nothing rather than
+        // marking a row no reader consults. The wire layer refuses that
+        // combination outright, so this only softens what a fixture can build.
+        let mut footprint_members: std::collections::HashMap<&str, Vec<RoomIdx>> =
+            std::collections::HashMap::new();
+        for (i, r) in rooms.iter().enumerate() {
+            if !r.is_exclusive() {
+                continue;
+            }
+            for tag in &r.footprints {
+                footprint_members
+                    .entry(tag.as_str())
+                    .or_default()
+                    .push(RoomIdx(i as u32));
+            }
+        }
+        let room_footprint_siblings: Vec<Vec<RoomIdx>> = rooms
+            .iter()
+            .enumerate()
+            .map(|(i, r)| {
+                let me = RoomIdx(i as u32);
+                if !r.is_exclusive() {
+                    return Vec::new();
+                }
+                let mut out: Vec<RoomIdx> = r
+                    .footprints
+                    .iter()
+                    .filter_map(|tag| footprint_members.get(tag.as_str()))
+                    .flatten()
+                    .copied()
+                    .filter(|&other| other != me)
+                    .collect();
+                out.sort_unstable_by_key(|r| r.get());
+                out.dedup();
+                out
+            })
+            .collect();
 
         // Blackout -> slot mask, resolved against the tenant's grid. Unary, so
         // it precomputes once per Offering.
@@ -2315,6 +2384,7 @@ impl Problem {
             room_consistency_weight,
             lecturer_consistency_weight,
             room_location,
+            room_footprint_siblings,
             different_time_relation_ids,
             meet_together_relation_ids,
             relations: retained_relations,
@@ -2596,6 +2666,31 @@ impl Problem {
     #[inline]
     pub fn room_location(&self, r: RoomIdx) -> u32 {
         self.room_location[r.get()]
+    }
+
+    /// Every OTHER exclusive Room that cannot be in use while `r` is — `r`'s
+    /// [`Room::footprints`] resolved against every other Room's.
+    ///
+    /// Read on the QUERY side only. `Occupancy` marks one bit per Room a
+    /// Session is actually assigned, and asks this on `is_free`; the reverse —
+    /// marking the siblings — would make overlap TRANSITIVE, and it is not.
+    /// With `A | mid | B` behind two separate folding walls, `mid` overlaps
+    /// both and `A` overlaps neither `B` nor anything of `B`'s; booking `A`
+    /// must leave `B` bookable. Expanding the question preserves that;
+    /// expanding the answer loses it.
+    ///
+    /// EXCLUDES `r` itself, so the common case is an EMPTY slice and the
+    /// occupancy hot loop keeps its single `get` on `r`'s own row with a
+    /// zero-iteration loop after it. Excludes non-exclusive Rooms for
+    /// ADR-0022's reason: a virtual Room has no physical footprint and its
+    /// occupancy row is never read, so a tag on one could only ever block
+    /// something it does not stand in.
+    ///
+    /// Symmetric: `b` is in `a`'s siblings exactly when `a` is in `b`'s, so
+    /// whichever of the two is placed first, the other is refused.
+    #[inline]
+    pub fn footprint_siblings(&self, r: RoomIdx) -> &[RoomIdx] {
+        &self.room_footprint_siblings[r.get()]
     }
 
     /// A stable label for a placement, preferring the existing Session id.

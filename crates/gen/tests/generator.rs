@@ -263,6 +263,7 @@ fn overlapping_problem(offerings: u32, sessions: u32, shared: usize) -> Problem 
         is_specialized: false,
         federation_owned: false,
         location: String::new(),
+        footprints: vec![],
     });
 
     let person = |i: usize| Person {

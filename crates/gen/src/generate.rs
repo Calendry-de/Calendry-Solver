@@ -258,6 +258,11 @@ fn build_rooms(params: &InstanceParams, rng: &mut Rng) -> Vec<Room> {
             // `MinimizeLocationChange`'s firing rate, the same reason
             // `Group.size` is left at 0 for `GroupSizeFitsRoom` below.
             location: String::new(),
+            // Also unconfigured, and for a sharper version of that reason:
+            // footprint tags REMOVE room capacity rather than reprice it, so
+            // generating any would change the saturation every preset is
+            // calibrated against.
+            footprints: vec![],
         });
     }
 
@@ -276,6 +281,9 @@ fn build_rooms(params: &InstanceParams, rng: &mut Rng) -> Vec<Room> {
             is_specialized: false,
             federation_owned: false,
             location: String::new(),
+            // Meaningless on a virtual Room, which has no physical space to
+            // share — refused outright at the wire boundary.
+            footprints: vec![],
         });
     }
 

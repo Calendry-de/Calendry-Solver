@@ -68,7 +68,20 @@ pub fn room(id: &str) -> Room {
         is_specialized: false,
         federation_owned: false,
         location: String::new(),
+        footprints: vec![],
     }
+}
+
+/// Rooms `ids` behind movable walls: every one of them carries the same
+/// footprint tag, so booking any one occupies the space all of them describe.
+///
+/// The Audimax fixture in miniature — and deliberately the GENERAL form, since
+/// the combined room is just another member carrying the tag rather than a
+/// special kind of Room.
+pub fn footprint_rooms(tag: &str, ids: &[&str]) -> Vec<Room> {
+    ids.iter()
+        .map(|id| Room { footprints: vec![tag.to_string()], ..room(id) })
+        .collect()
 }
 
 /// A SPECIALIZED Room carrying `features` — a lab or computer room. The

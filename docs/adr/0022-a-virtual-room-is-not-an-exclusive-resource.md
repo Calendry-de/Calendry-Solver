@@ -71,3 +71,59 @@ non-virtual Rooms. A multi-Room combination mixing physical and virtual now
 reads its waste ratio against the physical seats alone; an all-virtual
 combination reads `0`, which `capacity_waste_cost` already treats the same way
 it treats `min_capacity == 0` — nothing to charge.
+
+## A third: exclusivity BETWEEN Rooms — footprint tags (Calendry #122)
+
+Movable walls. Rooms 1.0, 1.1 and 1.2 sit behind folding partitions; open every
+wall and it is the Audimax, close them and it is three independent rooms.
+Booking 1.0 must make 1.1, 1.2 **and** the Audimax unbookable for that slot,
+and booking the Audimax must make all three unbookable. One physical footprint,
+four Room identities.
+
+Nothing in the model could say it, and this ADR is why: exclusivity here is
+read from `Room::is_exclusive()`, a property of **one Room against itself
+across time**. There was no way to state that booking Room A also occupies
+Room B. `MeetTogether` is the opposite pairing (two Offerings sharing one
+Room), and multi-room requirement is the reverse again (one Session spanning
+several Rooms) — neither is this.
+
+`Room.footprints` is an open-vocabulary tag, like `feature_tags`: two Rooms
+overlap when they share one. Chosen over a directed "A also books B" reference
+for the reason this ADR keeps insisting on a single predicate — a tag is
+**symmetric by construction**, so the two directions cannot be built with one
+of them missing. It also answers the ticket's open question for free: a Room
+may carry several tags, which is how a wall shared between two combination
+options is expressed, and a tag only one Room carries is naturally inert
+rather than an error, so a half-entered configuration does not fail a run.
+
+**The footprint is expanded on the QUERY side, never on `mark`.** This is the
+load-bearing decision and the one that is easy to get wrong: marking the
+siblings' bits too is the obvious implementation, is one line shorter, and
+passes every test except one. It makes overlap **transitive**, and overlap is
+not transitive. With `A | mid | B` behind two separate folding walls, `mid`
+overlaps both while `A` and `B` overlap nothing of each other's; marking would
+set `mid`'s bit when `A` is booked, and `B` would then read that bit and refuse
+a slot it is entitled to. So `Occupancy::mark` still writes exactly one bit per
+assigned Room — a set bit always means "this Room itself is in use" — and
+`is_free` asks "is anything I overlap in use", walking `Problem::
+footprint_siblings`. `room_footprint_siblings` is resolved once in
+`Problem::build` for the reason `room_location` is interned there: the hot loop
+gets an indexed read of a slice that is EMPTY for every Room without a folding
+wall, which is nearly all of them.
+
+Non-exclusive Rooms are dropped from both sides of the closure, which is this
+ADR's own rule reaching one layer further: a virtual Room has no physical
+footprint and its occupancy row is never consulted, so a tag on one could only
+ever be inert. **Inert is refused, not tolerated** — `ConvertError::
+FootprintOnVirtualRoom`. That is the sharpest available version of this ADR's
+opening complaint: a caller who believes they declared a hard exclusivity would
+get zero violations reported forever while the space was double-booked every
+time. Core softens it to "dropped" rather than an error, because core takes
+fixtures as well as wire input, and the wire is where the fault can be named.
+
+Reported under `RoomDoubleBooking` rather than a constraint type of its own,
+with a message naming both Rooms. The rule is unchanged; only the definition of
+"the same room" widened. `check_pair` gets the branch independently of
+`Occupancy` for ADR-0014's reason — the search can never produce such a pair,
+but a caller's snapshot can, two locked Sessions either side of a folding wall,
+and the authoritative checker is what tells the timetabler about it.

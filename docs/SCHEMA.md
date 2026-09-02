@@ -51,6 +51,20 @@ about for a tracked-gap entry.
   concrete entry in `sessions`. Solver-side: **done**, wired into
   `build_output`. "Solver violations naming Sessions the solver invented".
 
+* **`Room.footprint_tags`** (field 13, pin v0.17.0). An open-vocabulary tag
+  naming a physical space several Room identities describe — movable walls,
+  where booking 1.0 must make 1.1, 1.2 and the Audimax unbookable for that
+  slot. Symmetric by construction rather than a directed "A also books B"
+  reference, so the two directions cannot be built with one missing; a Room
+  may carry several tags, and a tag only one Room carries is inert.
+  Solver-side: **done** — resolved into `Problem::footprint_siblings` and
+  tested in `Occupancy::is_free`, reported under `RoomDoubleBooking`. A tag on
+  a virtual Room is REFUSED (`ConvertError::FootprintOnVirtualRoom`), since a
+  virtual Room's occupancy row is never consulted and the tag could only be
+  inert. App-side: the schema needs a way to group Rooms, the provisioning UI
+  needs to set it, and `toWireRoom` needs to send it — none of that exists
+  yet. "Room exclusivity groups — movable-wall configs" (Calendry #122).
+
 * **`Room.feature_quantities`** and **`Offering.room_feature_requirements`**
   (with `RoomFeatureQuantity` / `RoomFeatureRequirement`). Today's
   `feature_tags` / `required_room_features` are presence-only, so "needs 24

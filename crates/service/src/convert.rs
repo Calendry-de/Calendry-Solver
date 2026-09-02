@@ -63,7 +63,7 @@ pub fn convert(input: &pb::SolverInput, scope: &pb::SolveScope) -> Result<Proble
 
     let slots = build_grid(input)?;
     let grid_time = build_grid_time(input)?;
-    let rooms = build_rooms(input);
+    let rooms = build_rooms(input)?;
     let room_index = index_by(&input.rooms, |r| r.id.clone());
 
     let (groups, group_index) = build_groups(input)?;
@@ -423,20 +423,40 @@ fn index_by<T, F: Fn(&T) -> String>(items: &[T], key: F) -> HashMap<String, u32>
         .collect()
 }
 
-fn build_rooms(input: &pb::SolverInput) -> Vec<Room> {
+fn build_rooms(input: &pb::SolverInput) -> Result<Vec<Room>, ConvertError> {
     input
         .rooms
         .iter()
-        .map(|r| Room {
-            id: r.id.clone(),
-            name: r.name.clone(),
-            capacity: r.capacity,
-            rank: r.rank,
-            is_virtual: r.is_virtual,
-            features: r.feature_tags.clone(),
-            is_specialized: r.is_specialized,
-            federation_owned: matches!(r.owner, Some(pb::room::Owner::FederationId(_))),
-            location: r.location.clone(),
+        .map(|r| {
+            // A footprint is a claim about PHYSICAL space, and a virtual Room
+            // has none — its occupancy row is never even read (ADR-0022), so a
+            // tag here would be silently inert. Inert is the one outcome worth
+            // refusing: the caller believes they have declared a hard
+            // exclusivity, and a run would report no violation while
+            // double-booking the space every time.
+            if r.is_virtual && !r.footprint_tags.is_empty() {
+                return Err(ConvertError::FootprintOnVirtualRoom {
+                    room: r.id.clone(),
+                    tags: r.footprint_tags.clone(),
+                });
+            }
+            Ok(Room {
+                id: r.id.clone(),
+                name: r.name.clone(),
+                capacity: r.capacity,
+                rank: r.rank,
+                is_virtual: r.is_virtual,
+                features: r.feature_tags.clone(),
+                is_specialized: r.is_specialized,
+                federation_owned: matches!(r.owner, Some(pb::room::Owner::FederationId(_))),
+                location: r.location.clone(),
+                // Verbatim. Resolving a tag to the set of Rooms carrying it is
+                // `Problem::build`'s job, not this one — a tag no other Room
+                // shares is legitimate (a wall configuration mid-edit) and
+                // resolves to an empty sibling list, so there is nothing to
+                // validate here beyond the virtual case above.
+                footprints: r.footprint_tags.clone(),
+            })
         })
         .collect()
 }

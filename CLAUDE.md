@@ -50,7 +50,7 @@ Check any change against these. Each links to the decision behind it.
 - [ ] No exam-week or holiday logic by array slicing; resolve against the Academic Calendar
 - [ ] No per-person timezone anywhere in grid or constraint logic
 - [ ] No expression evaluation of tenant-supplied strings; typed parameters only — [ADR-0007](docs/adr/0007-fourteen-typed-constraint-types-no-dsl.md)
-- [ ] Room exclusivity is read from `Room::is_exclusive()`, never from a room id — [ADR-0022](docs/adr/0022-a-virtual-room-is-not-an-exclusive-resource.md)
+- [ ] Room exclusivity is read from `Room::is_exclusive()`, never from a room id; exclusivity BETWEEN Rooms is `Problem::footprint_siblings`, expanded on the QUERY side only — marking a sibling's bit makes overlap transitive, and it is not — [ADR-0022](docs/adr/0022-a-virtual-room-is-not-an-exclusive-resource.md)
 - [ ] A preset never moves to make a violation count fall — [ADR-0025](docs/adr/0025-maxonlineshare-is-not-enforced-by-the-search.md)
 - [ ] Past Sessions excluded from recalculation, always — [ADR-0008](docs/adr/0008-one-solve-mechanism-scope-plus-lock-policy.md)
 - [ ] Locked and past Sessions never moved, in either version; out-of-scope Sessions are hard-locked under `LOCK_POLICY_HARD`, movable-but-penalized under `LOCK_POLICY_MINIMIZE_MOVEMENT` (the only variant v2 relaxes) — [ADR-0008](docs/adr/0008-one-solve-mechanism-scope-plus-lock-policy.md)
@@ -98,7 +98,7 @@ the behaviour they exercise, and kept separate from the generator on purpose
 ```bash
 git clone --recurse-submodules …     # or: git submodule update --init --recursive
 
-cargo test --workspace               # 633 tests
+cargo test --workspace               # 670 tests
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo fmt --all --check
 
@@ -234,6 +234,23 @@ eligible, so it is still used when it is the only one that fits). Every
 decision is precomputed into `Offering::charged_specialized_rooms`, keeping
 `Problem::specialized_room_cost` a bit test. See ADR-0024's addendum for why a
 second room-axis type does not violate one-type-per-axis.
+
+**Room exclusivity groups are built (Calendry #122).** Movable walls: rooms
+1.0, 1.1 and 1.2 behind folding partitions are three bookable Rooms closed and
+one Audimax open, so booking any one of them must make the other three
+unbookable for that slot. `Room.footprint_tags` is an open-vocabulary tag,
+SYMMETRIC by construction — a Room may carry several (a wall shared between
+two combination options), and a tag only one Room carries is inert rather than
+an error, so a half-entered configuration does not fail a run. Structural and
+HARD, reported under `RoomDoubleBooking` with a message naming both Rooms
+rather than as a type of its own: the rule is unchanged, only the definition
+of "the same room" widened. The one refusal is a tag on a VIRTUAL Room, whose
+occupancy row is never consulted (ADR-0022) — it could only be inert, and an
+inert exclusivity reports no violation while double-booking the space every
+time. THE THING NOT TO UNDO: the footprint is expanded on the QUERY side, in
+`is_free`, never in `mark`. Marking the siblings is shorter and passes every
+test but one; it makes overlap TRANSITIVE, so with `A | mid | B` behind two
+separate walls, booking `A` would block `B`. See ADR-0022's third addendum.
 
 **The spare bank crosses the wire (issue #22).** A Session with no
 `start_slot` is no longer refused: it is teaching that is OWED but unplaced,
@@ -381,7 +398,8 @@ schema pipeline never exercised end to end. See
 
 1. **Pairwise, keyed by `(entity, slot)`** — the four structural double-booking
    types. Occupancy bitsets; the search can never violate them. Note that the
-   room axis exempts non-exclusive Rooms
+   room axis exempts non-exclusive Rooms, and that a booked Room's bit is
+   tested against every Room sharing its physical footprint
    ([ADR-0022](docs/adr/0022-a-virtual-room-is-not-an-exclusive-resource.md)).
 2. **Unary, keyed by `(slot, room)`** — the six soft types, and also
    `LecturerVeto`, which despite its name depends only on one Session's slot and

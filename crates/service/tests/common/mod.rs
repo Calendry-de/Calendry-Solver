@@ -78,7 +78,14 @@ pub fn room(i: u32) -> pb::Room {
         feature_quantities: vec![],
         site: String::new(),
         is_specialized: false,
+        footprint_tags: vec![],
     }
+}
+
+/// A Room over a shared physical FOOTPRINT — the movable-wall case, where
+/// several Room identities describe one space.
+pub fn footprint_room(i: u32, tags: &[&str]) -> pb::Room {
+    pb::Room { footprint_tags: tags.iter().map(|t| (*t).to_string()).collect(), ..room(i) }
 }
 
 /// A SPECIALIZED Room carrying `features` — a lab or computer room, the

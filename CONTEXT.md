@@ -120,6 +120,15 @@ _Avoid_: online flag, remote mode
 A Room only one Session may occupy at a time — every physical Room, and no
 virtual one. The single property the room double-booking check consults.
 
+**Footprint**:
+The physical space a Room stands in, named by a tenant-defined tag. Several
+Rooms may share one: 1.0, 1.1 and 1.2 behind folding partitions plus the
+Audimax they combine into are four Rooms over one footprint, so booking any
+one of them occupies all four for that slot. Exclusivity BETWEEN Rooms, where
+*Exclusive Room* above is a Room against itself. Symmetric, and deliberately
+NOT transitive: a Room may sit in two footprints without joining them.
+_Avoid_: room group, combined room, room set
+
 ---
 
 ## Scheduling

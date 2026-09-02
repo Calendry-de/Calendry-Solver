@@ -557,6 +557,7 @@ mod tests {
             is_specialized: false,
             federation_owned: false,
             location: String::new(),
+            footprints: vec![],
         }
     }
 
