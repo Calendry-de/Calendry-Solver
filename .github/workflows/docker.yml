@@ -22,7 +22,7 @@ jobs:
       # recursive: crates/proto/build.rs compiles vendor/calendry-proto/proto,
       # which is a submodule of a submodule.
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           submodules: recursive
 
