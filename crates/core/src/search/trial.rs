@@ -150,7 +150,8 @@ impl<'p> Trial<'p> {
             + self.problem.specialized_room_cost(o, at.all_rooms())
             + self
                 .problem
-                .break_spanning_cost(o, at.start, o.duration_blocks);
+                .break_spanning_cost(o, at.start, o.duration_blocks)
+            + self.problem.exam_week_cost(o, at.start);
         self.unplaced -= 1;
         self.journal.push(Change::Placed(p, at));
         true
@@ -175,7 +176,8 @@ impl<'p> Trial<'p> {
             + self.problem.specialized_room_cost(o, at.all_rooms())
             + self
                 .problem
-                .break_spanning_cost(o, at.start, o.duration_blocks);
+                .break_spanning_cost(o, at.start, o.duration_blocks)
+            + self.problem.exam_week_cost(o, at.start);
         self.unplaced += 1;
         self.journal.push(Change::Removed(p, at));
         Some(at)

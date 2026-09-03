@@ -77,6 +77,22 @@ pub enum ConvertError {
     )]
     FootprintOnVirtualRoom { room: String, tags: Vec<String> },
 
+    // -- calendar ------------------------------------------------------------
+    /// `Week.exam_group_ids` on a week that is not an exam week.
+    ///
+    /// Refused rather than ignored for `FootprintOnVirtualRoom`'s reason: the
+    /// scope narrows an exam period this week does not have, so it could only
+    /// ever be inert — and inert here reads as "no exam period at all", which
+    /// puts ordinary teaching on top of the exams the scope was sent to
+    /// protect while the run reports nothing wrong.
+    #[error(
+        "calendar.weeks[{week}] carries exam_group_ids {groups:?} but its kind is not \
+         WEEK_KIND_EXAM; the scope narrows an exam period this week does not have, so it could \
+         only ever be inert — and an inert scope reads as 'no exam period', putting ordinary \
+         teaching on top of the exams it was sent to protect while the run reports nothing wrong"
+    )]
+    ExamGroupsOnNonExamWeek { week: u32, groups: Vec<String> },
+
     // -- sessions ------------------------------------------------------------
     /// A slotless Session realizing NO Offering.
     ///

@@ -19,7 +19,7 @@ use crate::bitset::BitSet;
 use crate::groups::{GroupClosure, GroupCycle};
 use crate::ids::{GroupIdx, OfferingIdx, PersonIdx, PlacementIdx, RoomIdx, SlotIdx};
 use crate::preferences::{Preference, PreferenceInstance, PreferenceModel};
-use crate::slots::{GridTime, SlotTable};
+use crate::slots::{GridTime, SlotTable, WeekKind};
 use crate::soft::{SoftInstance, SoftModel};
 use crate::solution::{MAX_ADDITIONAL_ROOMS, MAX_LECTURERS, Placement};
 
@@ -396,6 +396,17 @@ pub struct ConstraintSet {
     /// [`Offering::specialized_room_charge`], where the whole decision is
     /// precomputed.
     pub minimize_specialized_room_use: Vec<MinimizeSpecializedRoomUseInstance>,
+    /// SOFT, per-placement: discourage a Session from sitting in an EXAM week
+    /// — or, with `invert`, from sitting outside one.
+    ///
+    /// NOT a [`crate::soft::SoftParams`] variant, and deliberately: since an
+    /// exam week may be scoped to Groups ([`ProblemSpec::exam_week_groups`]),
+    /// the predicate reads which cohorts attend THIS Offering, and the soft
+    /// table is keyed by a kind-profile that cannot express that. Same move
+    /// ADR-0026 made for `PersonPreferenceFit`, for the same reason. See
+    /// [`Problem::exam_week_cost`] and [`Offering::exam_week_slots`], where
+    /// the whole decision is precomputed. ADR-0033.
+    pub minimize_exam_week: Vec<MinimizeExamWeekInstance>,
     /// HARD, filterable. A tenant-wide reserved window — see
     /// [`Offering::protected_block_slots`], the precomputed mask.
     pub protected_block: Vec<ProtectedBlockInstance>,
@@ -574,6 +585,39 @@ pub struct MinimizeSpecializedRoomUseInstance {
 }
 
 impl MinimizeSpecializedRoomUseInstance {
+    #[inline]
+    pub fn covers(&self, kind: &str) -> bool {
+        self.kinds.is_empty() || self.kinds.iter().any(|k| k == kind)
+    }
+}
+
+/// One `MinimizeExamWeek` instance. Same id/kinds/weight shape as
+/// [`MinimizeSpecializedRoomUseInstance`], and outside `SoftModel` for the
+/// same class of reason: its cost depends on which Groups this Offering
+/// serves, and two Offerings of one kind — one profile, one table row —
+/// routinely serve different cohorts.
+///
+/// `invert` selects the direction, mirroring `MinimizeRoomRank`:
+///   false — penalize placing IN this Offering's exam period: keep ordinary
+///           lessons out of it.
+///   true  — penalize placing OUTSIDE it, pushing exam-kind Sessions toward
+///           the exam period instead of away from it. Scoping this to
+///           exam-kind Sessions is the tenant's job via `kinds`; the type has
+///           no notion of kind itself.
+///
+/// A flag rather than two types, for ADR-0024's reason — but note that the
+/// flag does NOT make the two directions mutually exclusive: a tenant may
+/// instantiate both, which is why an Offering carries a separate charge for
+/// each side of its mask.
+#[derive(Clone, Debug)]
+pub struct MinimizeExamWeekInstance {
+    pub id: String,
+    pub kinds: Vec<String>,
+    pub weight: f64,
+    pub invert: bool,
+}
+
+impl MinimizeExamWeekInstance {
     #[inline]
     pub fn covers(&self, kind: &str) -> bool {
         self.kinds.is_empty() || self.kinds.iter().any(|k| k == kind)
@@ -953,6 +997,30 @@ pub struct Offering {
     /// instance covers this kind, so the charge is unreachable rather than
     /// merely zero.
     pub charged_specialized_rooms: BitSet,
+    /// Which slots fall in an EXAM week for THIS Offering's cohorts — every
+    /// slot whose week is an exam week either term-globally or for a Group in
+    /// `{own_groups} ∪ ancestors(own_groups)`.
+    ///
+    /// `expand_ancestry`, for ADR-0027's reason one axis over: an exam period
+    /// declared on a programme covers its cohorts, so the QUERY walks up. An
+    /// Offering serving cohorts whose periods differ gets their UNION, which
+    /// is the correct answer for both directions of the flag — see ADR-0033.
+    ///
+    /// Unlike [`Self::charged_specialized_rooms`] this is NOT emptied when the
+    /// charges are zero. An empty mask does not mean "free": under `invert` it
+    /// means *charged at every slot*, so emptying it as a shortcut would make
+    /// the inverted direction silently cost nothing.
+    pub exam_week_slots: BitSet,
+    /// What one placement of this Offering costs for sitting INSIDE
+    /// [`Self::exam_week_slots`] — the summed weight of every
+    /// `MinimizeExamWeek` instance covering this kind with `invert: false`.
+    pub exam_week_charge_in: f64,
+    /// What one placement costs for sitting OUTSIDE
+    /// [`Self::exam_week_slots`] — the same sum over instances with
+    /// `invert: true`. Separate from [`Self::exam_week_charge_in`] because a
+    /// tenant may enable both directions at once, and one Offering must then
+    /// be able to be charged on either side of its own mask.
+    pub exam_week_charge_out: f64,
     /// Dense row indices into the problem's `DifferentTime` relations this
     /// Offering is a member of — empty for every Offering not named in one,
     /// which is the overwhelming majority. Precomputed the same way
@@ -1208,6 +1276,37 @@ pub struct ProblemSpec {
     /// reference" as "the reference lies beyond the term", maps that case to
     /// one-past-the-last-slot instead, masking everything.
     pub reference: Option<SlotIdx>,
+    /// Which Groups each EXAM week is an exam week FOR (ADR-0033). A week
+    /// absent from this list — or present with an empty `groups` — is an exam
+    /// week for EVERY Group, which is what every exam week was before this
+    /// existed and what the wire's absent `Week.exam_group_ids` decodes to.
+    ///
+    /// Lands on the spec rather than on [`crate::slots::WeekSpec`] for the
+    /// reason the whole design rests on: `slots` is deliberately the
+    /// group-free coordinate system, `week_kind` stays a property of a slot
+    /// rather than of a `(slot, Group)` pair, and the `SlotTable` is built
+    /// before the `GroupIdx` space exists at all. Same place
+    /// `movement_overrides` lands, for the same reason.
+    ///
+    /// Several entries for one week are a UNION — the natural spelling of "A
+    /// and B both sit exams in week 12" — and the wire cannot produce them,
+    /// since it carries one list per `Week`.
+    pub exam_week_groups: Vec<ExamWeekScope>,
+}
+
+/// Which Groups one EXAM week belongs to (ADR-0033).
+///
+/// An id may name a Group at any level and binds that Group's DESCENDANTS: a
+/// programme's exam fortnight covers its cohorts. The query side therefore
+/// walks UP through [`crate::groups::GroupClosure::expand_ancestry`] — the
+/// same downward-binding direction `GroupVeto` uses (ADR-0027), and
+/// deliberately not the both-directions propagation double-booking uses.
+///
+/// `groups` empty means every Group, so this type can only ever NARROW.
+#[derive(Clone, Debug)]
+pub struct ExamWeekScope {
+    pub week: u32,
+    pub groups: Vec<GroupIdx>,
 }
 
 /// Which Persons' and Groups' Sessions carry their OWN movement weight
@@ -1261,6 +1360,7 @@ impl ProblemSpec {
             movement_overrides: MovementOverrides::default(),
             grid_time: GridTime::default(),
             reference: None,
+            exam_week_groups: Vec::new(),
         }
     }
 
@@ -1618,6 +1718,7 @@ impl Problem {
             movement_overrides,
             grid_time,
             reference,
+            exam_week_groups,
         } = spec;
 
         let parent_of: Vec<Option<GroupIdx>> = groups.iter().map(|g| g.parent).collect();
@@ -1753,6 +1854,41 @@ impl Problem {
             mask
         };
 
+        // Which slots fall in an EXAM week for a given Offering's cohorts
+        // (ADR-0033). `expand_ancestry` for ADR-0027's reason one axis over:
+        // an exam period declared on a programme covers its cohorts, so the
+        // query walks UP. An unscoped exam week matches everybody, which is
+        // what every exam week was before the scope existed.
+        //
+        // Cohorts whose periods differ give their UNION, and that is the
+        // correct answer for BOTH directions of `invert`: a joint lecture
+        // collides with either cohort's exams, and a joint exam may sit in
+        // either cohort's period. The intersection would leave a joint
+        // Offering with no exam period at all, which under `invert` is a
+        // uniform charge that steers nothing.
+        let exam_week_mask = |own: &[GroupIdx]| -> BitSet {
+            let mut mask = BitSet::new(slots.len());
+            let ancestry = closure.expand_ancestry(own);
+            for slot in slots.all() {
+                let f = slots.flags(slot);
+                if f.week_kind != WeekKind::Exam {
+                    continue;
+                }
+                let mut scoped = exam_week_groups
+                    .iter()
+                    .filter(|s| s.week == f.week)
+                    .peekable();
+                let mine = scoped.peek().is_none()
+                    || scoped.any(|s| {
+                        s.groups.is_empty() || s.groups.iter().any(|g| ancestry.contains(g))
+                    });
+                if mine {
+                    mask.insert(slot.get());
+                }
+            }
+            mask
+        };
+
         // Tenant-wide, keyed by KIND rather than by any per-entity data — the
         // first hard mask that is pure constraint-config policy. Recomputed
         // per Offering like `veto_mask`/`group_veto_mask` above rather than
@@ -1862,6 +1998,24 @@ impl Problem {
             mask
         };
 
+        // Two charges, one per direction of `invert`, because the flag does
+        // not make the directions exclusive: a tenant may enable both, and
+        // one Offering must then be chargeable on either side of its mask.
+        //
+        // DELIBERATELY NOT following `charged_specialized_rooms_for`'s
+        // empty-mask shortcut above. An empty exam-week mask does not mean
+        // "free" — under `invert` it means charged at EVERY slot — so the
+        // zero-charge guard belongs on the charges, in `exam_week_cost`, and
+        // never on the mask.
+        let exam_week_charge_of = |kind: &str, invert: bool| -> f64 {
+            constraints
+                .minimize_exam_week
+                .iter()
+                .filter(|i| i.invert == invert && i.covers(kind))
+                .map(|i| i.weight)
+                .sum()
+        };
+
         let derived_offerings: Vec<Offering> = offerings
             .into_iter()
             .enumerate()
@@ -1876,6 +2030,11 @@ impl Problem {
                 soft_profile: soft.profile_for_kind(&o.kind),
                 veto_slots: veto_mask(&o.lecturers),
                 group_veto_slots: group_veto_mask(&o.groups),
+                // Before `o.groups` is moved into `own_groups` below, exactly
+                // as `group_veto_slots` must be.
+                exam_week_slots: exam_week_mask(&o.groups),
+                exam_week_charge_in: exam_week_charge_of(&o.kind, false),
+                exam_week_charge_out: exam_week_charge_of(&o.kind, true),
                 protected_block_slots: protected_block_mask(&o.kind),
                 subtree_groups: closure.expand_subtree(&o.groups),
                 enforce: constraints.enforce_for_kind(&o.kind),
@@ -2159,6 +2318,22 @@ impl Problem {
             .iter()
             .map(|i| i.weight)
             .sum();
+        // NOT optional, and not merely tidy: `MinimizeExamWeek` used to live
+        // in `ConstraintSet::soft`, so its weight used to arrive through
+        // `soft.total_weight` below. Moving the type out (ADR-0033) removed
+        // that contribution, and without this term `hard_penalty` would
+        // silently SHRINK — letting a soft preference gain ground on a hole
+        // in the timetable.
+        //
+        // The bound holds because one placement is charged on exactly one
+        // side of its own mask: `max(charge_in, charge_out) <=
+        // exam_week_weight`, so summing every instance's weight is still the
+        // per-placement ceiling.
+        let exam_week_weight: f64 = constraints
+            .minimize_exam_week
+            .iter()
+            .map(|i| i.weight)
+            .sum();
 
         // Built here rather than beside `SoftModel` above because it keys on
         // the PLACEMENT, so it needs the derived Offerings — a placement's
@@ -2243,6 +2418,7 @@ impl Problem {
             + capacity_waste_weight * placements.len() as f64
             + specialized_room_weight * placements.len() as f64
             + break_spanning_weight * placements.len() as f64
+            + exam_week_weight * placements.len() as f64
             // Read off `(group, day)` cell counts, exactly like day_mix_weight
             // above: neither is bounded by placements, since one placement can
             // touch several cells at once.
@@ -2622,6 +2798,38 @@ impl Problem {
             .into_iter()
             .any(|r| offering.charged_specialized_rooms.contains(r.get()));
         if charged { offering.specialized_room_charge } else { 0.0 }
+    }
+
+    /// SOFT. Charges a placement for sitting inside this Offering's exam
+    /// period — or, with an `invert` instance, for sitting outside it.
+    /// ADR-0033.
+    ///
+    /// Every decision is precomputed into [`Offering::exam_week_slots`]:
+    /// which weeks are exam weeks, which of those are scoped to Groups, and
+    /// whether this Offering's cohorts are among them. So this stays a bit
+    /// test on the hot path, the same shape [`Self::specialized_room_cost`]
+    /// has.
+    ///
+    /// Keyed on the START slot alone, matching what the soft table charged
+    /// when this type lived there: a Session's span cannot leave its week.
+    ///
+    /// THE GUARD IS ON THE CHARGES, NEVER ON THE MASK. An empty
+    /// `exam_week_slots` means this Offering has no exam period, and under
+    /// `invert` that means charged at EVERY slot — a non-steering constant
+    /// that is nonetheless the honest reading, and exactly what an `invert`
+    /// instance over a calendar with no exam weeks already charged before
+    /// scoping existed. Short-circuiting on an empty mask would make the
+    /// inverted direction silently cost nothing.
+    #[inline]
+    pub fn exam_week_cost(&self, offering: &Offering, start: SlotIdx) -> f64 {
+        if offering.exam_week_charge_in == 0.0 && offering.exam_week_charge_out == 0.0 {
+            return 0.0;
+        }
+        if offering.exam_week_slots.contains(start.get()) {
+            offering.exam_week_charge_in
+        } else {
+            offering.exam_week_charge_out
+        }
     }
 
     /// SOFT. Discourages a Session's span from crossing a `grid_time` gap —

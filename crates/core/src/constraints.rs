@@ -57,6 +57,12 @@ pub enum ConstraintType {
     SameStartRelation,
     MeetTogetherRelation,
     PrecedenceRelation,
+    /// Carried in [`crate::soft::SoftComponent`] rather than in a
+    /// [`Violation`], like `OnlineOnsiteSameDay` and `PersonPreferenceFit`
+    /// above: it is priced, not filtered. It is here rather than reached
+    /// through `SoftParams::type_name` because ADR-0033 moved it out of the
+    /// `(kind-profile, slot, room)` table — the wire string is unchanged.
+    MinimizeExamWeek,
 }
 
 impl ConstraintType {
@@ -83,6 +89,7 @@ impl ConstraintType {
             Self::SameStartRelation => "SameStartRelation",
             Self::MeetTogetherRelation => "MeetTogetherRelation",
             Self::PrecedenceRelation => "PrecedenceRelation",
+            Self::MinimizeExamWeek => "MinimizeExamWeek",
         }
     }
 }

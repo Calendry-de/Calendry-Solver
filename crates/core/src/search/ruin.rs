@@ -152,7 +152,8 @@ pub(super) fn ruin_worst(
                 + problem.movement_cost(p, pl.start, pl.room)
                 + problem.capacity_waste_cost(o, capacity)
                 + problem.specialized_room_cost(o, pl.all_rooms())
-                + problem.break_spanning_cost(o, pl.start, o.duration_blocks);
+                + problem.break_spanning_cost(o, pl.start, o.duration_blocks)
+                + problem.exam_week_cost(o, pl.start);
             if let Some(span) = problem.slots.span(pl.start, o.duration_blocks) {
                 let occupant = Occupant::of_offering(o)
                     .with_room(pl.room)

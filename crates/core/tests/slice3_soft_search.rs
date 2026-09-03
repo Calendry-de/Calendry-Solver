@@ -162,15 +162,7 @@ fn minimize_day_usage_steers_off_the_named_weekday() {
 fn minimize_exam_week_steers_out_of_the_exam_week() {
     // Slot 0 is in the exam week, slot 1 is a teaching week.
     let (off, on) = slot_with_weight(|w| {
-        testing::single_session(
-            testing::exam_week_grid(),
-            testing::rooms(1),
-            vec![testing::soft(
-                "e",
-                w,
-                SoftParams::MinimizeExamWeek { invert: false },
-            )],
-        )
+        testing::single_session_exam_week(testing::exam_week_grid(), testing::rooms(1), w, false)
     });
     assert_eq!(off, 0, "unweighted, greedy takes the earliest slot");
     assert_eq!(on, 1, "the exam week must be vacated");
@@ -184,14 +176,11 @@ fn inverted_minimize_exam_week_steers_into_the_exam_week() {
     // that dropped `invert` (behaving as if it were false, or ignored
     // entirely) would leave `on == 0` — it would never make the move.
     let (off, on) = slot_with_weight(|w| {
-        testing::single_session(
+        testing::single_session_exam_week(
             testing::teaching_then_exam_grid(),
             testing::rooms(1),
-            vec![testing::soft(
-                "e",
-                w,
-                SoftParams::MinimizeExamWeek { invert: true },
-            )],
+            w,
+            true,
         )
     });
     assert_eq!(off, 0, "unweighted, greedy takes the earliest slot");

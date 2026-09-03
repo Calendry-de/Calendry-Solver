@@ -41,6 +41,7 @@ pub fn base_input() -> pb::SolverInput {
                     index: i,
                     start_date: format!("2026-01-{:02}", 5 + i * 7),
                     kind: pb::WeekKind::Teaching as i32,
+                    exam_group_ids: vec![],
                 })
                 .collect(),
             holidays: vec![],
@@ -242,6 +243,7 @@ pub fn one_slot_grid(input: &mut pb::SolverInput) {
             index: 0,
             start_date: "2026-01-05".into(),
             kind: pb::WeekKind::Teaching as i32,
+            exam_group_ids: vec![],
         }],
         holidays: vec![],
     });

@@ -94,7 +94,7 @@ about for a tracked-gap entry.
   `MinimizeRoomRank.invert` / `MinimizeBlockUsage` precedent. `false` (absent)
   is today's only prior behavior, unchanged; `true` pushes Sessions toward the
   exam period instead of away from it. **Solver-side: done**, 2026-08-29 —
-  `SoftParams::MinimizeExamWeek` now carries `invert` and
+  the instance carries `invert` and
   `crates/service/src/convert.rs` reads `p.invert` from the wire; the
   direction-flip is covered by a falsification test
   (`inverted_minimize_exam_week_steers_into_the_exam_week`, on a grid built
@@ -103,6 +103,23 @@ about for a tracked-gap entry.
   placement logic" (the wire half only; the lecturer-facing "create my own
   exam" flow, and pushing toward TERM-END specifically rather than just
   "the exam period", are still app-side / unbuilt).
+
+  Superseded in one detail as of ADR-0033: the instance is no longer a
+  `SoftParams::MinimizeExamWeek` variant. Once `Week.exam_group_ids` let an
+  exam week belong to some cohorts and not others, the predicate had to read
+  the Offering, so the type moved to `ConstraintSet::minimize_exam_week` and
+  `Problem::exam_week_cost`. `invert` and the falsification test above are
+  unchanged, and both directions still read one per-Offering mask.
+
+* **`Week.exam_group_ids`** (field 4, `repeated string`). Which Groups a week
+  is an EXAM week FOR; empty means every Group, so every peer on an earlier
+  pin keeps today's term-global behaviour exactly. **Solver-side: done** —
+  see [ADR-0033](adr/0033-an-exam-week-is-scoped-on-the-calendar-and-charged-per-offering.md)
+  for why the scope narrows `Week` rather than adding a second message, and
+  why the query walks UP through `expand_ancestry`. Two refusals, both because
+  inert would silently widen: an unknown group id, and a non-empty list on a
+  week that is not an exam week (`ConvertError::ExamGroupsOnNonExamWeek`).
+  Calendry #126 sub-ask 3; sub-asks 1 and 2 are app-only.
 
 * **`Compactness`** is built — see the solver repo's CLAUDE.md.
   **`LecturerConsistency`** (`oneof params` entry 30) is now built too: its

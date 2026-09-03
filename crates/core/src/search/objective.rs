@@ -26,7 +26,8 @@ pub fn recompute_objective(problem: &Problem, solution: &Solution) -> Objective 
                     + problem.movement_cost(p, pl.start, pl.room)
                     + problem.capacity_waste_cost(o, capacity)
                     + problem.specialized_room_cost(o, pl.all_rooms())
-                    + problem.break_spanning_cost(o, pl.start, o.duration_blocks);
+                    + problem.break_spanning_cost(o, pl.start, o.duration_blocks)
+                    + problem.exam_week_cost(o, pl.start);
             }
             None => unplaced += 1,
         }
@@ -145,8 +146,48 @@ pub fn soft_breakdown(problem: &Problem, solution: &Solution) -> Vec<SoftCompone
             }
         });
 
+    /*
+     * And the exam-week instances, for the third time the same reason: since
+     * ADR-0033 an exam week may be scoped to Groups, so the type left
+     * `problem.soft` and its cost comes from `Problem::exam_week_cost`
+     * instead. Without this block the type would vanish from the breakdown
+     * while still moving the score, which ADR-0024 names as the failure to
+     * avoid — the breakdown is what the app shows a human to explain it.
+     *
+     * `raw_count` is charged placements and `weighted` is exactly what the
+     * objective charged, read through the same per-Offering mask the search
+     * used rather than through a second reading of the calendar.
+     */
+    let exam_week = problem.constraints.minimize_exam_week.iter().map(|inst| {
+        let mut count = 0u64;
+        let mut weighted = 0.0f64;
+
+        for p in problem.placement_ids() {
+            let Some(pl) = solution.get(p) else { continue };
+            let o = problem.offering_of(p);
+            if !inst.covers(&o.kind) {
+                continue;
+            }
+            // The same side-of-the-mask question `exam_week_cost` asks, per
+            // instance rather than per Offering, so two instances with
+            // different kind scopes stay separately attributable.
+            if o.exam_week_slots.contains(pl.start.get()) != inst.invert {
+                count += 1;
+                weighted += inst.weight;
+            }
+        }
+
+        SoftComponent {
+            constraint_id: inst.id.clone(),
+            constraint_type: constraints::ConstraintType::MinimizeExamWeek.as_str(),
+            raw_count: count,
+            weighted,
+        }
+    });
+
     day_mix
         .chain(preference)
+        .chain(exam_week)
         .chain(problem.soft.instances.iter().map(|inst| {
             let mut count = 0u64;
             let mut weighted = 0.0f64;

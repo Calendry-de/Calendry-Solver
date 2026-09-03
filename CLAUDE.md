@@ -363,6 +363,25 @@ generator); the wire's "no reference / beyond the term" case maps to
 one-past-the-last-slot and masks EVERYTHING, matching what
 `classify_immovable` already said it meant.
 
+**A scoped exam week is built (Calendry #126 sub-ask 3, [ADR-0033](docs/adr/0033-an-exam-week-is-scoped-on-the-calendar-and-charged-per-offering.md)).**
+A calendar period was term-global, so two cohorts sitting exams in different
+weeks was unsayable. `Week.exam_group_ids` narrows the week — empty means
+every Group, so every earlier pin keeps today's behaviour exactly — and
+`MinimizeExamWeek` LEAVES `SoftParams` as a result: its predicate now reads
+which cohorts attend the Offering, and the soft table is keyed by a
+kind-profile that cannot express that. It joins the near-miss family instead
+(`Offering::exam_week_slots`, `Problem::exam_week_cost`), which is ADR-0026's
+move for `PersonPreferenceFit` one axis over. THE THINGS NOT TO UNDO:
+`hard_penalty` gained `exam_week_weight * placements`, because the type
+leaving `ConstraintSet::soft` removed its contribution from
+`soft.total_weight` and the bound would otherwise shrink SILENTLY; and the
+mask is NOT emptied when the charges are zero the way
+`charged_specialized_rooms_for` empties its own — an empty exam mask under
+`invert` means charged at EVERY slot, not free, so the guard is on the
+charges. `SlotFlags` is unchanged and an exam week is still OPEN, which is the
+property the whole design exists to protect. Verified byte-identical on all
+four presets, objective totals included.
+
 **`LecturerConsistency` is built.** Once its prerequisite (lecturer-pool
 selection) landed, the remaining gap was one evaluator: a distinct-lecturer
 count over an entire Offering's placed Sessions, priced against
@@ -401,15 +420,19 @@ schema pipeline never exercised end to end. See
    room axis exempts non-exclusive Rooms, and that a booked Room's bit is
    tested against every Room sharing its physical footprint
    ([ADR-0022](docs/adr/0022-a-virtual-room-is-not-an-exclusive-resource.md)).
-2. **Unary, keyed by `(slot, room)`** — the six soft types, and also
+2. **Unary, keyed by `(slot, room)`** — most soft types, and also
    `LecturerVeto`, which despite its name depends only on one Session's slot and
    its lecturers. Precomputed lookup tables and masks; O(1) exact deltas.
    Note the near-miss family that does NOT fit here: `MinimizeCapacityWaste`,
-   `MinimizeBreakSpanning` and `MinimizeSpecializedRoomUse` are unary in the
-   same sense but read the OFFERING (its `min_capacity`, its duration, its
-   required features), so a table keyed by kind-profile cannot express them.
-   Each is a plain formula on `Problem` instead, summed into `Objective::soft`
-   like any table hit.
+   `MinimizeBreakSpanning`, `MinimizeSpecializedRoomUse` and — since
+   [ADR-0033](docs/adr/0033-an-exam-week-is-scoped-on-the-calendar-and-charged-per-offering.md)
+   — `MinimizeExamWeek` are unary in the same sense but read the OFFERING (its
+   `min_capacity`, its duration, its required features, its Groups), so a table
+   keyed by kind-profile cannot express them. Each is a plain formula on
+   `Problem` instead, summed into `Objective::soft` like any table hit. The
+   membership of this shape is therefore not fixed, and counting the
+   `SoftParams` variants is not a check on anything — the boundary is the
+   predicate's inputs.
 3. **Aggregate over a set** — `OnlineOnsiteSameDay` and `MaxOnlineShare`, in
    `aggregates.rs`. Neither is expressible as a slot-keyed bitset, and **neither
    is a filter any more**.
@@ -476,6 +499,14 @@ to both ([ADR-0025](docs/adr/0025-maxonlineshare-is-not-enforced-by-the-search.m
   agree on a flat hierarchy, which is why the guard is a pair of tests over a
   two-level fixture and an ADR — `expand_conflict` fails exactly ONE of the eight
   tests in `group_veto.rs`. [ADR-0027](docs/adr/0027-group-blackouts-inherit-downward.md).
+* **A scoped EXAM week binds downward too, so its query also walks up.**
+  `Week.exam_group_ids` names the Groups a week is an exam week FOR, and an
+  Offering's exam period is the union over `{g} ∪ ancestors(g)` for its Groups
+  — the same `expand_ancestry` table, one axis over. Same guard shape, and one
+  argument stronger than `GroupVeto`'s: under `MinimizeExamWeek { invert: true }`
+  a wrong expansion does not over-block, it *steers*, actively pulling a
+  cohort's lecture into a seminar's exam period.
+  [ADR-0033](docs/adr/0033-an-exam-week-is-scoped-on-the-calendar-and-charged-per-offering.md).
 * **`PersonPreferenceFit` does not propagate at all.** It counts a placement's
   *lecturers*, never its attendees, so no Group axis enters it. That is a scope
   decision rather than an omission: an attendee set averages ~65 people at

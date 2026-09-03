@@ -12,8 +12,9 @@ use calendry_solver_core::aggregates::{DayMixInstance, ShareInstance, ShareWindo
 use calendry_solver_core::ids::{GroupIdx, OfferingIdx, PersonIdx, RoomIdx, SlotIdx};
 use calendry_solver_core::preferences::{Preference, PreferenceInstance};
 use calendry_solver_core::problem::{
-    ConstraintInstance, ConstraintSet, FixedSpec, Group, Immovable, OfferingSpec, Person,
-    PlacementVar, Problem, ProblemSpec, Room, SchedulingPattern, Unavailability,
+    ConstraintInstance, ConstraintSet, FixedSpec, Group, Immovable, MinimizeExamWeekInstance,
+    OfferingSpec, Person, PlacementVar, Problem, ProblemSpec, Room, SchedulingPattern,
+    Unavailability,
 };
 use calendry_solver_core::rng::Rng;
 use calendry_solver_core::slots::{SlotTable, WeekKind, WeekSpec};
@@ -787,12 +788,6 @@ fn build_constraints(params: &InstanceParams, slots: &SlotTable) -> ConstraintSe
             params: SoftParams::MinimizeRoomRank { rank_threshold: PREMIUM_RANK, invert: false },
         },
         SoftInstance {
-            id: "soft-exam-week".into(),
-            kinds: vec![],
-            weight: 5.0 * w,
-            params: SoftParams::MinimizeExamWeek { invert: false },
-        },
-        SoftInstance {
             id: "soft-online".into(),
             kinds: vec![],
             weight: 2.0 * w,
@@ -806,6 +801,18 @@ fn build_constraints(params: &InstanceParams, slots: &SlotTable) -> ConstraintSe
         // Never generated: the presets do not mark any Room specialized, so
         // an instance here could never fire — see `build_rooms`.
         minimize_specialized_room_use: Vec::new(),
+        // Was a `SoftParams` variant in the list above until ADR-0033 moved
+        // it out. Same id, same weight, and `exam_week_groups` left empty, so
+        // every Offering's mask is exactly the global exam-week set and every
+        // preset's objective is unchanged. Drawing scopes at random would
+        // move the baseline, and the presets ARE the baseline (ADR-0027's
+        // stance for `GroupVeto`).
+        minimize_exam_week: vec![MinimizeExamWeekInstance {
+            id: "soft-exam-week".into(),
+            kinds: vec![],
+            weight: 5.0 * w,
+            invert: false,
+        }],
         room_double_booking: vec![all("c-room")],
         lecturer_double_booking: vec![all("c-lecturer")],
         group_double_booking: vec![all("c-group")],

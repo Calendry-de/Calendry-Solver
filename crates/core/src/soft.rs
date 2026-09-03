@@ -1,8 +1,18 @@
 //! Soft constraints and the weighted objective.
 //!
-//! # All six soft types are unary
+//! # Every type in THIS module is unary in `(slot, room)`
 //!
-//! Every soft type depends only on the `(slot, room)` of a **single** Session —
+//! Not every soft type in the catalogue lives here, and the boundary is the
+//! predicate's inputs rather than hardness: a type belongs in `SoftParams`
+//! exactly when its cost is decided by a slot and a Room and nothing else.
+//! `MinimizeCapacityWaste`, `MinimizeBreakSpanning` and
+//! `MinimizeSpecializedRoomUse` read the OFFERING, `PersonPreferenceFit` reads
+//! who leads the placement (ADR-0026), and `MinimizeExamWeek` reads which
+//! Groups attend it (ADR-0033) — all four are plain formulas on `Problem`,
+//! summed into the same `Objective::soft` field. Counting the variants here is
+//! therefore not a check on anything.
+//!
+//! Every type that IS here depends only on the `(slot, room)` of a **single** Session —
 //! unlike all four structural types, which are pairwise. That has two
 //! consequences the design leans on heavily:
 //!
@@ -18,7 +28,7 @@ use std::collections::HashMap;
 
 use crate::ids::{RoomIdx, SlotIdx};
 use crate::problem::Room;
-use crate::slots::{SlotFlags, SlotTable, WeekKind};
+use crate::slots::{SlotFlags, SlotTable};
 
 /// Typed parameters, one variant per predefined soft type. There is no
 /// interpreter: tenant-supplied logic never executes.
@@ -70,17 +80,6 @@ pub enum SoftParams {
         rank_threshold: u32,
         invert: bool,
     },
-    /// Penalize Sessions falling in a week whose `WeekKind` is EXAM.
-    ///
-    /// `invert` selects the direction, mirroring `MinimizeRoomRank`:
-    ///   false — penalize placing IN an exam week: keep ordinary lessons out.
-    ///   true  — penalize placing OUTSIDE an exam week: push exam-kind
-    ///           Sessions toward the exam period instead of away from it.
-    ///           Scoping this to exam-kind Sessions is the tenant's job via
-    ///           `applies_to_kinds`; this type has no notion of kind itself.
-    MinimizeExamWeek {
-        invert: bool,
-    },
     MinimizeOnline,
 }
 
@@ -92,7 +91,6 @@ impl SoftParams {
             SoftParams::MinimizeBlockUsage { .. } => "MinimizeBlockUsage",
             SoftParams::MinimizeDayUsage { .. } => "MinimizeDayUsage",
             SoftParams::MinimizeRoomRank { .. } => "MinimizeRoomRank",
-            SoftParams::MinimizeExamWeek { .. } => "MinimizeExamWeek",
             SoftParams::MinimizeOnline => "MinimizeOnline",
         }
     }
@@ -117,7 +115,6 @@ impl SoftParams {
                     room.rank >= *rank_threshold
                 }
             }
-            SoftParams::MinimizeExamWeek { invert } => (f.week_kind == WeekKind::Exam) != *invert,
             SoftParams::MinimizeOnline => room.is_virtual,
         }
     }
@@ -129,8 +126,8 @@ impl SoftParams {
     /// never disagree about which rooms are affected.
     ///
     /// ONLY `MinimizeRoomRank` GRADES. Every other type is a property a slot
-    /// either has or does not ("this is the last block", "this week is an exam
-    /// week"), with no meaningful notion of degree, so they return 1.0 and cost
+    /// either has or does not ("this is the last block", "this is a Saturday"),
+    /// with no meaningful notion of degree, so they return 1.0 and cost
     /// exactly their weight as before.
     ///
     /// WHY THE RESULT IS CAPPED AT 1.0, WHICH IS NOT A STYLE CHOICE.
@@ -544,7 +541,7 @@ pub struct SoftComponent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::slots::WeekSpec;
+    use crate::slots::{WeekKind, WeekSpec};
 
     fn room_at(rank: u32, virt: bool) -> Room {
         Room {
@@ -650,7 +647,6 @@ mod tests {
         let first = g.flags(g.resolve(0, 1, 0).unwrap());
         let last = g.flags(g.resolve(0, 1, 2).unwrap());
         let sat = g.flags(g.resolve(0, 6, 1).unwrap());
-        let exam = g.flags(g.resolve(1, 1, 1).unwrap());
 
         assert!(SoftParams::MinimizeFirstBlock.applies(first, &plain));
         assert!(!SoftParams::MinimizeFirstBlock.applies(last, &plain));
@@ -662,13 +658,11 @@ mod tests {
         assert!(sat_rule.applies(sat, &plain));
         assert!(!sat_rule.applies(first, &plain));
 
-        assert!(SoftParams::MinimizeExamWeek { invert: false }.applies(exam, &plain));
-        assert!(!SoftParams::MinimizeExamWeek { invert: false }.applies(first, &plain));
-
-        // Inverted: penalize being OUTSIDE the exam week instead.
-        assert!(SoftParams::MinimizeExamWeek { invert: true }.applies(first, &plain));
-        assert!(!SoftParams::MinimizeExamWeek { invert: true }.applies(exam, &plain));
-
+        // The exam-week axis used to be asserted here. It left `SoftParams`
+        // when an exam week became scopeable to Groups (ADR-0033), so the same
+        // claim — the predicate reads the calendar, never a week index — is now
+        // pinned over the per-Offering mask in
+        // `crates/core/tests/minimize_exam_week.rs`.
         let rank = SoftParams::MinimizeRoomRank { rank_threshold: 5, invert: false };
         assert!(rank.applies(first, &room_at(5, false)));
         assert!(rank.applies(first, &room_at(9, false)));

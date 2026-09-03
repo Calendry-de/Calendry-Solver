@@ -38,11 +38,11 @@ use calendry_solver_core::aggregates::{
 use calendry_solver_core::ids::{GroupIdx, OfferingIdx, PersonIdx, RoomIdx, SlotIdx};
 use calendry_solver_core::preferences::{Preference, PreferenceInstance};
 use calendry_solver_core::problem::{
-    CapacityWasteInstance, ConstraintInstance, ConstraintSet, FixedSpec, Immovable,
-    MaxConcurrentOnlineInstance, MinimizeBreakSpanningInstance, MinimizeSpecializedRoomUseInstance,
-    MovementOverrides, OfferingSpec, PlacementVar, Problem, ProblemSpec, ProtectedBlockInstance,
-    RelationKind, RelationSpec, Room, SchedulingPattern, ScopeSpec, Unavailability,
-    classify_immovable,
+    CapacityWasteInstance, ConstraintInstance, ConstraintSet, ExamWeekScope, FixedSpec, Immovable,
+    MaxConcurrentOnlineInstance, MinimizeBreakSpanningInstance, MinimizeExamWeekInstance,
+    MinimizeSpecializedRoomUseInstance, MovementOverrides, OfferingSpec, PlacementVar, Problem,
+    ProblemSpec, ProtectedBlockInstance, RelationKind, RelationSpec, Room, SchedulingPattern,
+    ScopeSpec, Unavailability, classify_immovable,
 };
 use calendry_solver_core::slots::{GridTime, SlotTable, WeekKind, WeekSpec};
 use calendry_solver_core::soft::{SoftInstance, SoftParams};
@@ -71,6 +71,7 @@ pub fn convert(input: &pb::SolverInput, scope: &pb::SolveScope) -> Result<Proble
     let person_index = index_by(&input.persons, |p| p.id.clone());
 
     let movement_overrides = build_movement_overrides(scope, &group_index, &person_index)?;
+    let exam_week_groups = build_exam_week_groups(input, &group_index)?;
 
     let reference = resolve_reference(input, &slots);
     let scope_offerings = resolve_scope(input, scope);
@@ -143,6 +144,7 @@ pub fn convert(input: &pb::SolverInput, scope: &pb::SolveScope) -> Result<Proble
         // Core `None` (the fixtures' and generator's default) would instead
         // mask nothing, which is why the two `None`s must not be conflated.
         reference: Some(reference.unwrap_or(SlotIdx(slots.len() as u32))),
+        exam_week_groups,
         ..ProblemSpec::new(slots)
     })?)
 }
@@ -328,6 +330,63 @@ fn build_movement_overrides(
             }
             None => return Err(ConvertError::MovementOverrideWithoutTarget { index }),
         }
+    }
+
+    Ok(out)
+}
+
+/// Which Groups each EXAM week belongs to — `Week.exam_group_ids`, resolved
+/// against the Group index (ADR-0033).
+///
+/// Not part of `build_grid`: the scope is deliberately NOT part of the
+/// `SlotTable`, which stays the group-free coordinate system, and the
+/// `GroupIdx` space does not exist until `build_groups` has run.
+///
+/// Two refusals, both because the alternative is a SILENT WIDENING:
+///
+/// * an unknown Group id — dropping it narrows the scope, and dropping the
+///   only id widens it from "cohort A's exam period" to "the whole
+///   institution's", which is the failure the house style exists to prevent;
+/// * a non-empty list on a week that is not `WEEK_KIND_EXAM` — it could only
+///   ever be inert, and inert here reads as "no exam period", so ordinary
+///   teaching lands on top of the exams the scope was sent to protect while
+///   the run reports nothing wrong. Structurally the same call
+///   `FootprintOnVirtualRoom` makes.
+///
+/// A week scoped to Groups that exist but that no Offering attends is neither
+/// — the id resolves, so nothing widens, and the scope simply matches
+/// nothing. The solver tolerates inconsequential input.
+fn build_exam_week_groups(
+    input: &pb::SolverInput,
+    group_index: &HashMap<String, u32>,
+) -> Result<Vec<ExamWeekScope>, ConvertError> {
+    let Some(calendar) = input.calendar.as_ref() else {
+        return Ok(Vec::new());
+    };
+    let groups = Resolver::new(group_index);
+    let mut out = Vec::new();
+
+    for (index, w) in calendar.weeks.iter().enumerate() {
+        if w.exam_group_ids.is_empty() {
+            continue;
+        }
+        if pb::WeekKind::try_from(w.kind) != Ok(pb::WeekKind::Exam) {
+            return Err(ConvertError::ExamGroupsOnNonExamWeek {
+                week: index as u32,
+                groups: w.exam_group_ids.clone(),
+            });
+        }
+        let mut resolved = Vec::with_capacity(w.exam_group_ids.len());
+        for id in &w.exam_group_ids {
+            resolved.push(groups.require(id, GroupIdx, |group| ConvertError::UnknownGroup {
+                context: format!("calendar.weeks[{index}].exam_group_ids"),
+                group,
+            })?);
+        }
+        // The week INDEX, matching how `SlotFlags::week` is numbered — the
+        // position in `calendar.weeks`, never `Week.index`, which is the
+        // app's own label and need not agree.
+        out.push(ExamWeekScope { week: index as u32, groups: resolved });
     }
 
     Ok(out)
@@ -1405,9 +1464,32 @@ fn build_constraints(input: &pb::SolverInput) -> Result<ConstraintSet, ConvertEr
                 c,
                 SoftParams::MinimizeRoomRank { rank_threshold: p.rank_threshold, invert: p.invert },
             )?),
+            /*
+             * SOFT, and its own list rather than `set.soft`, for the same
+             * reason `PersonPreferenceFit` has one: since ADR-0033 an exam
+             * week may be scoped to Groups (`Week.exam_group_ids`), so this
+             * cost depends on which cohorts THIS Offering serves, and
+             * `SoftModel` is a `(kind-profile, slot, room)` table that cannot
+             * express it — two Offerings of one kind routinely serve
+             * different cohorts.
+             *
+             * The weight check is inlined because `soft_instance` builds a
+             * `SoftInstance`, which this is not; same shape the
+             * `MinimizeSpecializedRoomUse` arm below uses.
+             */
             Some(Params::MinimizeExamWeek(p)) => {
-                set.soft
-                    .push(soft_instance(c, SoftParams::MinimizeExamWeek { invert: p.invert })?);
+                if c.weight < 0.0 || c.weight.is_nan() {
+                    return Err(ConvertError::NegativeSoftWeight {
+                        constraint: c.id.clone(),
+                        weight: c.weight,
+                    });
+                }
+                set.minimize_exam_week.push(MinimizeExamWeekInstance {
+                    id: c.id.clone(),
+                    kinds: c.applies_to_kinds.clone(),
+                    weight: c.weight,
+                    invert: p.invert,
+                });
             }
             Some(Params::MinimizeOnline(_)) => {
                 set.soft.push(soft_instance(c, SoftParams::MinimizeOnline)?);

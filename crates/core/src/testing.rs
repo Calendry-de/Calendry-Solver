@@ -28,9 +28,9 @@ use crate::aggregates::DayMixInstance;
 use crate::ids::{GroupIdx, OfferingIdx, PersonIdx, RoomIdx, SlotIdx};
 use crate::preferences::{Preference, PreferenceInstance};
 use crate::problem::{
-    ConstraintInstance, ConstraintSet, FixedSpec, Group, Immovable,
-    MinimizeSpecializedRoomUseInstance, OfferingSpec, Person, PlacementVar, Problem, ProblemSpec,
-    Room, SchedulingPattern,
+    ConstraintInstance, ConstraintSet, ExamWeekScope, FixedSpec, Group, Immovable,
+    MinimizeExamWeekInstance, MinimizeSpecializedRoomUseInstance, OfferingSpec, Person,
+    PlacementVar, Problem, ProblemSpec, Room, SchedulingPattern,
 };
 use crate::slots::{SlotTable, WeekKind, WeekSpec};
 use crate::solution::MAX_ADDITIONAL_ROOMS;
@@ -327,6 +327,7 @@ pub fn all_constraints() -> ConstraintSet {
         // enabling it here would silently reprice fixtures that are about
         // something else entirely. `specialized_room_use` opts a fixture in.
         minimize_specialized_room_use: vec![],
+        minimize_exam_week: vec![],
         // Included, unlike `person_preference_fit` below, and the asymmetry is
         // the precedent `lecturer_veto` already set: a veto with no declared
         // windows produces an EMPTY mask, so it cannot change any fixture's
@@ -715,6 +716,44 @@ pub fn soft(id: &str, weight: f64, params: SoftParams) -> SoftInstance {
 /// Structural checks plus the given soft instances.
 pub fn with_soft(soft: Vec<SoftInstance>) -> ConstraintSet {
     ConstraintSet { soft, ..all_constraints() }
+}
+
+/// `all_constraints` plus one `MinimizeExamWeek` instance. Its own helper
+/// rather than a `SoftParams` entry in [`with_soft`] because ADR-0033 moved
+/// the type out of the soft table — an exam week can be scoped to Groups, so
+/// the cost reads the Offering.
+pub fn with_exam_week(mut base: ConstraintSet, weight: f64, invert: bool) -> ConstraintSet {
+    base.minimize_exam_week = vec![MinimizeExamWeekInstance {
+        id: "c-exam-week".to_string(),
+        kinds: vec![],
+        weight,
+        invert,
+    }];
+    base
+}
+
+/// One EXAM week scoped to the given Groups. Empty `groups` is the
+/// term-global reading, so it says explicitly what an absent entry says by
+/// default — useful for pinning that the two agree.
+pub fn exam_scope(week: u32, groups: &[u32]) -> ExamWeekScope {
+    ExamWeekScope { week, groups: groups.iter().map(|&g| GroupIdx(g)).collect() }
+}
+
+/// [`single_session`]'s exam-week counterpart: one Offering, one Session, and
+/// one `MinimizeExamWeek` instance at `weight`.
+pub fn single_session_exam_week(
+    slots: SlotTable,
+    rooms: Vec<Room>,
+    weight: f64,
+    invert: bool,
+) -> Problem {
+    let eligible: Vec<u32> = (0..rooms.len() as u32).collect();
+    assemble(ProblemSpec {
+        rooms,
+        offerings: vec![offering("S", 1, &eligible)],
+        constraints: with_exam_week(all_constraints(), weight, invert),
+        ..ProblemSpec::new(slots)
+    })
 }
 
 /// One Offering needing one Session, over the given grid and rooms.

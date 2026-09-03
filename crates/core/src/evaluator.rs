@@ -298,6 +298,7 @@ fn score_one(problem: &Problem, solution: &Solution, state: &SearchState, mv: &M
             + problem.capacity_waste_cost(offering, capacity)
             + problem.specialized_room_cost(offering, mv.to.all_rooms())
             + problem.break_spanning_cost(offering, mv.to.start, offering.duration_blocks)
+            + problem.exam_week_cost(offering, mv.to.start)
             + share_penalty
             + max_days_penalty
             + max_consecutive_days_penalty
