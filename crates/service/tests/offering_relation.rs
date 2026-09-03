@@ -161,6 +161,7 @@ fn with_precedence(min_gap_minutes: u32, max_days_between: u32) -> pb::OfferingR
     pb::OfferingRelation {
         params: Some(pb::offering_relation::Params::Precedence(pb::Precedence {
             min_gap_minutes,
+            min_days_between: 0,
             max_days_between,
         })),
         ..relation("rel-1", &["o1", "o2"])
@@ -179,6 +180,7 @@ fn precedence_resolves_to_precedence_kind_carrying_both_parameters() {
         problem.relations[0].kind,
         calendry_solver_core::problem::RelationKind::Precedence {
             min_gap_minutes: 1_440,
+            min_days_between: 0,
             max_days_between: 7,
         }
     );
@@ -218,6 +220,7 @@ fn both_precedence_parameters_at_zero_are_accepted_not_treated_as_unset() {
         problem.relations[0].kind,
         calendry_solver_core::problem::RelationKind::Precedence {
             min_gap_minutes: 0,
+            min_days_between: 0,
             max_days_between: 0,
         }
     );

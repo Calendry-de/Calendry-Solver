@@ -217,15 +217,18 @@ fn build_relations(
             // Built — see `crate::solution::Occupancy`'s `meet_together_anchor`/
             // `meet_together_cells` for the occupancy-level mechanism.
             Some(Params::MeetTogether(_)) => RelationKind::MeetTogether,
-            // Built — the one kind that reads `offering_ids`' order. Both
-            // parameters pass through unvalidated on purpose: every `u32` is
-            // meaningful, including the two zeroes, which mean "back-to-back
-            // is fine" and "no upper bound" respectively. A pairing that
-            // cannot be satisfied (`min_gap_minutes` longer than
-            // `max_days_between` allows) is over-constrained input, which the
-            // solver tolerates and reports rather than refuses.
+            // Built — the one kind that reads `offering_ids`' order. All
+            // three parameters pass through unvalidated on purpose: every
+            // `u32` is meaningful, including the three zeroes, which mean
+            // "back-to-back is fine", "no day floor" and "no upper bound"
+            // respectively. Over-constrained input is tolerated and reported
+            // rather than refused — a `min_gap_minutes` longer than
+            // `max_days_between` allows, or a `min_days_between` above
+            // `max_days_between`, both report both bounds breached instead of
+            // failing the run.
             Some(Params::Precedence(p)) => RelationKind::Precedence {
                 min_gap_minutes: p.min_gap_minutes,
+                min_days_between: p.min_days_between,
                 max_days_between: p.max_days_between,
             },
             None => {

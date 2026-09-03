@@ -312,6 +312,19 @@ pub enum RelationKind {
         /// [`crate::slots::GridTime`]. 0 = back-to-back is fine, but the
         /// ordering itself still holds.
         min_gap_minutes: u32,
+        /// FLOOR on the boundary in CALENDAR days, the counterpart to
+        /// [`Self::Precedence::max_days_between`]'s ceiling. 0 = no floor
+        /// beyond the ordering itself.
+        ///
+        /// The "N days between" family, as a scalar rather than a
+        /// `NextDay`/`TwoDaysAfter` kind: those would be two hardcoded
+        /// values of one parameter (ADR-0024), and welding `1` and `2` into
+        /// type names is the magic-number shape this catalogue replaced.
+        ///
+        /// NOT expressible through `min_gap_minutes`, which is why it
+        /// exists — see `constraints::for_each_precedence_breach` and
+        /// ADR-0028's day-floor addendum for the impossibility argument.
+        min_days_between: u32,
         /// Ceiling on the boundary in CALENDAR days (not teaching days).
         /// 0 = unbounded.
         max_days_between: u32,
@@ -319,9 +332,11 @@ pub enum RelationKind {
 }
 
 /// One configured Offering relation — an ordered set of Offering references
-/// plus a type, per ADR-0028. `members` is ordered because a FEW relation
-/// types read the order — `Precedence` is the first built one, and a future
-/// `Next Day` would be another; every other kind ignores it.
+/// plus a type, per ADR-0028. `members` is ordered because `Precedence` reads
+/// the order; every other kind ignores it. (A `Next Day` kind was once
+/// expected to be the second such reader. It is not coming: the day-counted
+/// family is `Precedence`'s `min_days_between` parameter — ADR-0028's day-floor
+/// addendum.)
 #[derive(Clone, Debug)]
 pub struct RelationSpec {
     pub id: String,

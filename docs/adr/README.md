@@ -41,6 +41,7 @@ and measured to be wrong.
 | [0030](0030-a-rotating-block-pattern-decomposes-into-parts-that-already-exist.md) | A rotating block pattern decomposes into three parts, two of which already exist |
 | [0033](0033-an-exam-week-is-scoped-on-the-calendar-and-charged-per-offering.md) | An exam week is scoped on the calendar and charged per Offering |
 | [0034](0034-a-room-pin-is-checked-against-the-candidate-not-precomputed-into-the-offering.md) | A Person's Room pin is checked against the candidate, not precomputed into the Offering |
+| [0035](0035-room-sharing-is-a-property-of-the-room.md) | Room sharing is a property of the Room, not a relation between Offerings |
 
 ## Benchmarking
 

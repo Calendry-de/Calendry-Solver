@@ -214,3 +214,79 @@ exact day and block, a stronger claim than the type makes — and ordering makes
 no such claim, so the two genuinely differ. But it has not been *decided*, only
 noticed. **Recorded here rather than changed in passing**: altering a shipped
 type's semantics belongs in its own change with its own tests.
+
+## The day-counted gap family is a third bound, not two more kinds (issue #55)
+
+`Next Day` and `Two Days After` were two of the "three types in forty" this ADR opened
+by using to justify an ordered set. Both are now built, and neither is a type:
+**they are values of one new scalar, `Precedence.min_days_between`** — a FLOOR on the
+same boundary `max_days_between` already ceilings, computed from the same `days`
+expression, in the same calendar days.
+
+That leaves `Precedence` as the only one of the three that was ever a kind, which does
+not weaken the ordered-set decision — the order is still read, by the type that reads
+it — but it does correct the arithmetic. The ordered set bought one type, not three, and
+it was still cheap.
+
+**One scalar rather than two kinds** is [ADR-0024](0024-one-type-per-axis-with-flags.md)
+applied without argument: floor and ceiling are two directions of one axis over one
+field, which is the case that ADR was written for. Its separate-instantiability objection
+carries over intact — two kinds could both be configured over the same member set, and
+nothing could stop "next day" and "two days after" being asked for at once. And a kind
+would have had to *choose* between "exactly N days" and "at least N days" invisibly,
+where two scalars make the tenant say which: `min == max` is exact, a floor alone is
+at-least.
+
+### The wall-clock floor is not a substitute, and that is provable
+
+`min_gap_minutes: 1440` looks like "at least a day" and is not. It is wall-clock, so it
+constrains time-of-day as a side effect: a lecture ending Monday 12:30 and a lab starting
+Tuesday 08:00 are 1170 minutes apart and would breach it, while a same-day pair 150
+minutes apart would pass anything below that. A separating threshold exists only inside
+`(last_start - first_end, 1440 + first_start - last_end]`, a window derived from
+`TimeGrid.day_start_minute`, the block lengths, every break and the block count — so a
+value that separates today stops separating when the grid gains a block. **On a teaching
+day spanning 12 hours or more the window is empty and no value works at all**, which is
+an impossibility rather than a tuning problem, and is pinned by a test.
+
+### What is deliberately still NOT expressible
+
+Two readings of "next day" are refused rather than approximated, and both are refused on
+this ADR's own rules:
+
+- **"The next TEACHING day."** In calendar days, `min_days_between == max_days_between
+  == 1` means a Friday predecessor demands a Saturday successor — and because
+  `Precedence` is term-wide and priced at `hard_penalty`, one Friday Session breaches the
+  relation for the whole run, silently. The "Two units, deliberately" section above
+  already drew this line: `Daybreak` treats consecutive `day_index` values as adjacent
+  nights *because it is about adjacency*, and `Precedence` measures a multi-day distance.
+  "Next day" is adjacency; "two days after" is distance. Only the distance half is a
+  parameter of this type. A teaching-day unit would be a flag on this axis, and must
+  arrive with the request that needs it — picking a day unit wrong is invisible.
+- **A per-occurrence pairing.** UniTime's `Next Day` pairs occurrence *i* of one class
+  with occurrence *i* of the other. `Precedence` declares its pairing as TERM-WIDE, ALL
+  PAIRS, so twelve lectures and twelve labs have ONE boundary, and
+  `min_days_between: 1, max_days_between: 1` says "the last lecture is exactly one day
+  before the first lab" — a block-teaching statement, not "each lab follows its own
+  lecture". This ADR requires each type to declare its own occurrence pairing, so a
+  per-occurrence relation is a NEW kind, not a parameter. It stays unbuilt: it is only
+  meaningful when the two frequencies match, and Calendry places Sessions per-week
+  independently with no meeting-pattern object — the same fact that makes the `SameTime`
+  family per-week best-effort.
+
+Also unexpressible, and also unrequested: a SYMMETRIC gap ("N hours apart, either
+order"). `min_gap_minutes` imposes the gap *and* the ordering because it lives on
+`Precedence`. UniTime's hour-gap types are symmetric. If that is ever wanted it is a flag
+on this axis, not a kind — and, like the day unit, it must arrive with its request.
+
+### Reporting
+
+The floor reports under `PrecedenceRelation` like every other breach of this type, as a
+fourth `Breach` variant, and it **suppresses the minute-gap check** when it fires — the
+same exclusivity `OutOfOrder` already has, for the same reason: a boundary on the wrong
+day has no meaningful minute gap to be short, and charging one mistake twice at
+`hard_penalty` would misprice it. It does not suppress the ceiling: under contradictory
+input both bounds are genuinely breached and the timetabler should see both. Locked and
+past Sessions count, because the floor rides `precedence_extents`' existing
+placed-and-fixed walk — the divergence from the `SameTime` family recorded above is
+unchanged, not widened.

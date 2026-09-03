@@ -999,6 +999,9 @@ enum Breach {
     OutOfOrder,
     /// Correctly ordered, but closer together than `min_gap_minutes`.
     GapTooShort { observed: u32, required: u32 },
+    /// Correctly ordered, but spanning FEWER calendar days than
+    /// `min_days_between` requires.
+    TooCloseInDays { observed: u32, required: u32 },
     /// Correctly ordered, but spanning more calendar days than
     /// `max_days_between` allows.
     TooFarApart { observed: u32, allowed: u32 },
@@ -1075,7 +1078,9 @@ fn for_each_precedence_breach(
     mut report: impl FnMut(&crate::problem::RelationSpec, OfferingIdx, OfferingIdx, Breach),
 ) {
     for r in &problem.relations {
-        let RelationKind::Precedence { min_gap_minutes, max_days_between } = r.kind else {
+        let RelationKind::Precedence { min_gap_minutes, min_days_between, max_days_between } =
+            r.kind
+        else {
             continue;
         };
         let extents = precedence_extents(problem, solution, &r.members);
@@ -1096,11 +1101,38 @@ fn for_each_precedence_breach(
             // whose blocks run past midnight is a real state
             // (`block_end_minute` is documented as not wrapping at 24h), and
             // it would underflow here.
-            let gap = succ.first_start.minute.saturating_sub(pred.last_end.minute);
-            if gap < min_gap_minutes {
-                report(r, a, b, Breach::GapTooShort { observed: gap, required: min_gap_minutes });
-            }
             let days = succ.first_start.day - pred.last_end.day;
+
+            // The day FLOOR, and it excludes the minute gap the way the
+            // ordering test above excludes both: a boundary landing on the
+            // wrong DAY has no meaningful minute gap to be short. Without
+            // the exclusion one mistake would be charged twice at
+            // `hard_penalty` on a single boundary, since `Objective::hard`
+            // sums the violation count and the count IS the number of
+            // reports.
+            //
+            // It does NOT suppress the ceiling below: under contradictory
+            // input (`min_days_between > max_days_between`) both bounds are
+            // genuinely breached, and the timetabler should see both.
+            if min_days_between > 0 && days < min_days_between {
+                report(
+                    r,
+                    a,
+                    b,
+                    Breach::TooCloseInDays { observed: days, required: min_days_between },
+                );
+            } else {
+                let gap = succ.first_start.minute.saturating_sub(pred.last_end.minute);
+                if gap < min_gap_minutes {
+                    report(
+                        r,
+                        a,
+                        b,
+                        Breach::GapTooShort { observed: gap, required: min_gap_minutes },
+                    );
+                }
+            }
+
             if max_days_between > 0 && days > max_days_between {
                 report(r, a, b, Breach::TooFarApart { observed: days, allowed: max_days_between });
             }
@@ -1130,6 +1162,11 @@ pub fn precedence_relations(problem: &Problem, solution: &Solution, out: &mut Ve
             Breach::GapTooShort { observed, required } => format!(
                 "relation '{}': only {observed} minute(s) between '{before}' ending and \
                  '{after}' starting, below the required {required}",
+                r.id
+            ),
+            Breach::TooCloseInDays { observed, required } => format!(
+                "relation '{}': '{after}' starts {observed} day(s) after '{before}' ends, \
+                 below the required {required}",
                 r.id
             ),
             Breach::TooFarApart { observed, allowed } => format!(

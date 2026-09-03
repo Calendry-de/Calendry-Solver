@@ -29,7 +29,13 @@ mod common;
 use common::{SEED, moves};
 
 fn precedence(min_gap_minutes: u32, max_days_between: u32) -> RelationKind {
-    RelationKind::Precedence { min_gap_minutes, max_days_between }
+    RelationKind::Precedence { min_gap_minutes, min_days_between: 0, max_days_between }
+}
+
+/// The day FLOOR, with no minute gap and no ceiling — see
+/// `day_counted_relations.rs` for why the floor cannot be spelled in minutes.
+fn day_floor(min_days_between: u32) -> RelationKind {
+    RelationKind::Precedence { min_gap_minutes: 0, min_days_between, max_days_between: 0 }
 }
 
 /// Two Offerings, `count` Sessions each, chained `a` before `b`.
@@ -438,6 +444,164 @@ fn no_relation_configured_reports_nothing() {
 
     let solution = place(&problem, &[1], &[0]);
     assert_eq!(recompute_objective(&problem, &solution).precedence_violations, 0);
+}
+
+// ---------------------------------------------------------------------------
+// min_days_between — the FLOOR on the same boundary `max_days_between` caps.
+//
+// The family that would have been `NextDay`/`TwoDaysAfter` kinds. Why it is
+// one scalar instead, and why no `min_gap_minutes` can stand in for it, is
+// argued and pinned in `day_counted_relations.rs`; what follows mirrors this
+// file's own ceiling and gap sections so the two bounds cannot drift.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn zero_min_days_between_is_todays_behaviour() {
+    // proto3's scalar default, and therefore what every v0.17.0 peer sends.
+    // A same-day ordered boundary must stay silent.
+    let problem = chain(day_floor(0), 1, 2, 1, false);
+    let solution = place(&problem, &[0], &[1]);
+
+    assert_eq!(recompute_objective(&problem, &solution).precedence_violations, 0);
+}
+
+#[test]
+fn a_boundary_closer_than_the_floor_is_a_violation() {
+    // `grid_5day(2, 1)`: slots 0,1 are Monday, 2,3 are Tuesday.
+    let problem = chain(day_floor(2), 1, 2, 1, true);
+    let solution = place(&problem, &[0], &[2]);
+
+    assert_eq!(recompute_objective(&problem, &solution).precedence_violations, 1);
+}
+
+#[test]
+fn a_boundary_exactly_on_the_floor_is_satisfied() {
+    // `>=`, not `>` — the mirror of the ceiling's own inclusive bound.
+    let problem = chain(day_floor(1), 1, 2, 1, true);
+    let solution = place(&problem, &[0], &[2]);
+
+    assert_eq!(recompute_objective(&problem, &solution).precedence_violations, 0);
+}
+
+#[test]
+fn the_floor_counts_calendar_days_not_teaching_days() {
+    // The exact mirror of `the_ceiling_counts_calendar_days_not_teaching_days`,
+    // so floor and ceiling cannot drift on the unit. Friday (day 4, slot 8) to
+    // the next Monday (slot 10) is 3 CALENDAR days and 1 teaching day.
+    let met = chain(day_floor(3), 1, 2, 2, true);
+    assert_eq!(recompute_objective(&met, &place(&met, &[8], &[10])).precedence_violations, 0);
+
+    let unmet = chain(day_floor(4), 1, 2, 2, true);
+    assert_eq!(recompute_objective(&unmet, &place(&unmet, &[8], &[10])).precedence_violations, 1);
+}
+
+#[test]
+fn a_day_floor_breach_is_reported_once_not_also_as_a_short_gap() {
+    // The floor excludes the minute gap the way `OutOfOrder` excludes both: a
+    // boundary on the wrong DAY has no meaningful minute gap to be short.
+    // Without the exclusion one mistake would be charged TWICE at
+    // `hard_penalty`, since `Objective::hard` sums this counter.
+    //
+    // Both bounds fail here: same-day placement, a floor of one day, and a
+    // 10-hour minimum gap the boundary also misses.
+    let problem = timed(
+        RelationKind::Precedence { min_gap_minutes: 600, min_days_between: 1, max_days_between: 0 },
+        2,
+        1,
+    );
+    let solution = place(&problem, &[0], &[1]);
+
+    assert_eq!(recompute_objective(&problem, &solution).precedence_violations, 1);
+}
+
+#[test]
+fn a_contradictory_floor_and_ceiling_report_both() {
+    // The floor does NOT suppress the ceiling, unlike the minute gap. Under
+    // `min_days_between > max_days_between` the input is self-contradicting
+    // and BOTH bounds are genuinely breached — the timetabler needs to see
+    // both to understand why nothing can satisfy it. Tolerated and reported,
+    // never refused, exactly as an over-long `min_gap_minutes` is.
+    // Both fire only where `max < days < min`, which is exactly the
+    // contradictory region: Monday to Wednesday is 2 days, below a floor of 5
+    // and above a ceiling of 1.
+    let problem = chain(
+        RelationKind::Precedence { min_gap_minutes: 0, min_days_between: 5, max_days_between: 1 },
+        1,
+        2,
+        1,
+        true,
+    );
+    let solution = place(&problem, &[0], &[4]);
+
+    assert_eq!(
+        recompute_objective(&problem, &solution).precedence_violations,
+        2,
+        "2 days is below the floor of 5 and above the ceiling of 1 — both are real \
+         findings, and suppressing either would hide half of why nothing fits"
+    );
+}
+
+#[test]
+fn the_counter_still_equals_the_number_of_reported_violations_with_a_floor() {
+    // Extends the shared-walk invariant over the new breach variant.
+    let problem = chain(day_floor(2), 2, 2, 2, true);
+    let solution = place(&problem, &[0, 2], &[4, 6]);
+
+    let counted = recompute_objective(&problem, &solution).precedence_violations;
+    let reported = evaluate_hard(&problem, &solution)
+        .iter()
+        .filter(|v| v.constraint_type == ConstraintType::PrecedenceRelation)
+        .count();
+    assert_eq!(counted as usize, reported);
+    assert!(counted > 0, "the fixture is supposed to breach");
+}
+
+#[test]
+fn a_locked_predecessor_counts_toward_the_floor() {
+    // The floor inherits ADR-0028's locks-count stance rather than quietly
+    // diverging from it: `precedence_extents` reads `problem.fixed` too, and a
+    // repair run locks every out-of-scope Session, so a placed-only scan would
+    // make a relation with an out-of-scope predecessor silently inert.
+    let mut spec = ProblemSpec {
+        rooms: vec![room("r0"), room("r1")],
+        // "a" needs no PLACEMENT: its one Session is the locked one below, so
+        // the only placement variable in this fixture belongs to "b".
+        offerings: vec![offering("a", 0, &[0, 1]), offering("b", 1, &[0, 1])],
+        relations: vec![RelationSpec {
+            id: "rel-1".to_string(),
+            kind: day_floor(2),
+            members: vec![OfferingIdx(0), OfferingIdx(1)],
+        }],
+        ..fixture(grid_5day(2, 2), structural_room_only())
+    };
+    // "a"'s Session is LOCKED on Tuesday (slot 2), not placed.
+    let mut locked = fixed_session("a-locked", Some(0), 2);
+    locked.offering = Some(OfferingIdx(0));
+    spec.fixed = vec![locked];
+    spec.expand_placements();
+    let problem = Problem::build(spec).unwrap();
+
+    // "b" on Wednesday (slot 4) is one calendar day after the LOCKED Tuesday
+    // Session, below the floor of two.
+    let mut solution = Solution::empty(&problem);
+    solution.set(PlacementIdx(0), Some(Placement::single(SlotIdx(4), RoomIdx(1))));
+
+    assert_eq!(
+        recompute_objective(&problem, &solution).precedence_violations,
+        1,
+        "the locked predecessor must be inside the boundary the floor measures"
+    );
+}
+
+#[test]
+fn an_unsatisfiable_day_floor_does_not_dead_end_construction() {
+    // Still PRICED, not filtered: a floor no placement can satisfy must still
+    // yield a full solution plus a reported breach (ADR-0025's stance).
+    let problem = chain(day_floor(99), 1, 2, 1, true);
+
+    let outcome = solve(&problem, SEED, moves(1_000), &NeverHalt);
+    assert_eq!(outcome.objective.unplaced, 0, "a HARD-but-priced floor must not refuse to place");
+    assert_eq!(outcome.objective.precedence_violations, 1, "and must report the breach");
 }
 
 // ---------------------------------------------------------------------------

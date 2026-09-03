@@ -318,13 +318,23 @@ styles, which is the thing to know before adding a seventh:
   ADR-0025 records for `MaxOnlineShare`.
 
 `Precedence` is the ONLY kind that reads member order, which is what ADR-0028
-kept the set ordered for. It is term-wide and all-pairs (all lectures finish
-before any lab starts — not a per-week pairing, not `UniTime`'s
-first-meetings-only), it decides ordering structurally but measures
-`min_gap_minutes` in wall-clock minutes through `GridTime` and
-`max_days_between` in CALENDAR days, and it counts LOCKED Sessions where the
-`SameTime` family does not. All four decisions, and the one open divergence,
-are in ADR-0028's "`Precedence` landed" addendum.
+kept the set ordered for — and it is now the only kind that ever will, since
+the `NextDay`/`TwoDaysAfter` family turned out to be its parameters. It is
+term-wide and all-pairs (all lectures finish before any lab starts — not a
+per-week pairing, not `UniTime`'s first-meetings-only), it decides ordering
+structurally but measures `min_gap_minutes` in wall-clock minutes through
+`GridTime` and both `min_days_between` and `max_days_between` in CALENDAR
+days, and it counts LOCKED Sessions where the `SameTime` family does not. All
+four decisions, and the one open divergence, are in ADR-0028's "`Precedence`
+landed" addendum; the day FLOOR and what it deliberately cannot say are in the
+day-floor addendum below it.
+
+THE ONE EXCLUSIVITY TO KEEP: a day-floor breach SUPPRESSES the minute-gap
+check, the way `OutOfOrder` suppresses both — a boundary on the wrong day has
+no meaningful minute gap to be short, and `Objective::hard` sums the violation
+count, so charging one mistake twice mis-prices it. It does NOT suppress the
+ceiling: under `min_days_between > max_days_between` both bounds are genuinely
+breached and the timetabler needs to see both.
 
 **Convergence is never declared over unplaced demand (issue #120,
 [ADR-0031](docs/adr/0031-convergence-is-never-declared-over-unplaced-demand.md)).**
@@ -424,14 +434,37 @@ Deliberately not built:
 
 * **A GPU move-evaluation backend.** The seam exists and has two adapters; the
   backend does not. [ADR-0013](docs/adr/0013-move-evaluation-behind-a-trait.md).
-* **`CanShareRoom`, and the "N hours between" relation family.** The last
-  unbuilt `OfferingRelation` types. `CanShareRoom` is `UniTime`'s weaker
-  `MeetTogether` — room sharing with no time binding — and nothing has
-  requested it independently of the full package; it would need its own answer
-  to what "sharing" means without `SameTime`/`SameDays` holding the pair
-  together. `Next Day` and `Two Days After` would each be a small evaluator on
-  the now-built mechanism, and would read member order the way `Precedence`
-  does. None is mechanism work.
+* **`CanShareRoom`** — and it is REFUSED rather than pending, with the
+  reasoning executable in `crates/core/tests/can_share_room.rs` and
+  [ADR-0035](docs/adr/0035-room-sharing-is-a-property-of-the-room.md). Its
+  honest reading is UniTime's PERMISSION primitive, which is an exemption with
+  no rule behind it: it can never be violated, so it has no evaluator and
+  nothing to report, and it puts a hole in a hard structural type that
+  ADR-0014 then obliges `check_pair` to mirror. The load-bearing finding is
+  that **`MeetTogether`'s `(relation, week)` anchor is chain-transitive** —
+  with `{A,B}` and `{B,C}`, `C` joins `A`'s cell — which is CORRECT, because
+  "is the same physical meeting" is an equivalence relation, and wrong for a
+  permission, which is only symmetric. So building it on that machinery is
+  ADR-0022's transitivity bug again, and building it properly needs per-cell
+  occupant identity `Occupancy` deliberately does not carry. The
+  capacity-relief reading ("this hall holds two seminars at once") is a ROOM
+  axis — `Room::is_exclusive()` is `!is_virtual`, so no non-exclusive physical
+  Room exists — and the preference reading is UniTime's separate `SameRoom`,
+  a different unbuilt kind that stays cheap if anyone asks.
+* **The "N hours between" family is not coming either, because it is already
+  here.** `Precedence.min_gap_minutes` says it exactly, and the day-counted
+  half is one scalar — `Precedence.min_days_between`, the FLOOR to
+  `max_days_between`'s ceiling — not `NextDay`/`TwoDaysAfter` kinds, which
+  would be the constants `1` and `2` welded into type names (ADR-0024). The
+  floor exists because a wall-clock value CANNOT express a day boundary: the
+  separating threshold is a function of the grid, and on a teaching day
+  spanning 12 hours or more no value works at all. Two readings stay refused
+  and both are pinned in `crates/core/tests/day_counted_relations.rs`: "the
+  next TEACHING day" is `Daybreak`'s unit rather than this type's (and
+  `min == max` in calendar days makes a Friday predecessor demand a
+  Saturday), and UniTime's PER-OCCURRENCE pairing is a new kind rather than a
+  parameter, since `Precedence` declares itself term-wide and all-pairs. See
+  ADR-0028's day-floor addendum.
 
 Outside this repo: the Nuxt integration session, including the one part of the
 schema pipeline never exercised end to end. See
