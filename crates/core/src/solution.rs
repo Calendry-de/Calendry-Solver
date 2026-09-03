@@ -972,11 +972,48 @@ impl SearchState {
             return true;
         }
 
+        // `LecturerRoomPin`: this Session's lecturers may be pinned to Rooms,
+        // and EVERY Room of the candidate must satisfy EVERY pinned lecturer.
+        //
+        // Read live off the candidate's CHOSEN lecturers rather than from a
+        // precomputed per-Offering mask, which is the one decision in this
+        // rule that matters. Where an Offering has a genuine lecturer pool the
+        // lecturer set is a search-time choice, so an Offering-level mask
+        // would have to be either the union of its candidates' pins
+        // (permissive: it would admit a Room no eventual lecturer may use) or
+        // their intersection (restrictive: it would bar a Room the chosen
+        // lecturer may). `LecturerVeto` carries exactly that Offering-level
+        // mask, which is why `LecturerVeto` plus a pool has to be refused at
+        // conversion — and why copying its shape here would be silently wrong
+        // for precisely the pool case this rule exists to serve.
+        //
+        // "Every Room" rather than "at least one": a hard pin that only one
+        // Room had to satisfy could be escaped by requiring more Rooms.
+        //
+        // NOT expanded through `Room::footprint_siblings`. A footprint expands
+        // a BLOCKING question — booking one identity of a physical space
+        // consumes the others — and a permission never expands: being allowed
+        // in room 1.1 says nothing about being allowed in the Audimax that
+        // subsumes it (ADR-0022, ADR-0034).
         // Same shape, separate switch: a tenant may enforce one of the two
         // vetoes without the other, so these cannot share a mask or a flag.
         if who.enforce.group_veto
             && let Some(veto) = who.group_veto_slots
             && span.iter().any(|s| veto.contains(s.get()))
+        {
+            return true;
+        }
+
+        // `LecturerRoomPin`: every Room of the candidate must satisfy every
+        // pinned lecturer of the candidate. Span-independent, so it stays out
+        // of the per-slot loops above.
+        //
+        // The whole rule is in `room_pin_blocks`, which is also what the
+        // authoritative report calls — see it for why the question is asked
+        // against the CHOSEN lecturers rather than a per-Offering mask, and
+        // why that is the one decision here that matters.
+        if who.enforce.lecturer_room_pin
+            && problem.room_pin_blocks(who.all_lecturers(), who.all_rooms())
         {
             return true;
         }

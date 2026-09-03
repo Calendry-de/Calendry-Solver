@@ -114,6 +114,9 @@ pub fn person(id: &str) -> pb::Person {
         // preference here would be data nothing reads. See
         // `tests/person_preference_wire.rs`, which supplies its own.
         preferred: None,
+        // Empty = any Room the Offering allows, which is every Person before
+        // this field existed. `tests/lecturer_room_pin.rs` supplies its own.
+        allowed_room_ids: vec![],
     }
 }
 

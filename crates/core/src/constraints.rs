@@ -57,6 +57,7 @@ pub enum ConstraintType {
     SameStartRelation,
     MeetTogetherRelation,
     PrecedenceRelation,
+    LecturerRoomPin,
     /// Carried in [`crate::soft::SoftComponent`] rather than in a
     /// [`Violation`], like `OnlineOnsiteSameDay` and `PersonPreferenceFit`
     /// above: it is priced, not filtered. It is here rather than reached
@@ -89,6 +90,7 @@ impl ConstraintType {
             Self::SameStartRelation => "SameStartRelation",
             Self::MeetTogetherRelation => "MeetTogetherRelation",
             Self::PrecedenceRelation => "PrecedenceRelation",
+            Self::LecturerRoomPin => "LecturerRoomPin",
             Self::MinimizeExamWeek => "MinimizeExamWeek",
         }
     }
@@ -188,6 +190,7 @@ pub fn evaluate_hard(problem: &Problem, solution: &Solution) -> Vec<Violation> {
     structural(problem, solution, &mut out);
     lecturer_veto(problem, solution, &mut out);
     group_veto(problem, solution, &mut out);
+    lecturer_room_pin(problem, solution, &mut out);
     group_size_fits_room(problem, solution, &mut out);
     max_concurrent_online_sessions(problem, solution, &mut out);
     aggregates(problem, solution, &mut out);
@@ -313,6 +316,74 @@ pub fn group_size_fits_room(problem: &Problem, solution: &Solution, out: &mut Ve
 /// caller's own data, and re-reporting a locked Session the solver cannot move
 /// would be noise. Blackout VALUES live on `Person.blackouts`; the constraint
 /// instance only switches enforcement on.
+/// `LecturerRoomPin`: a lecturer pinned to a set of Rooms leads Sessions only
+/// in those Rooms.
+///
+/// The search cannot violate this — it is a filter in
+/// [`crate::solution::SearchState::statically_blocked`] — and this check
+/// exists anyway, for ADR-0014's reason: an authoritative report that shares
+/// no code with the occupancy index is the only thing that can catch the
+/// index being wrong. Both sides call [`Problem::room_pin_blocks`], so the
+/// solver cannot refuse a placement it then declines to report (ADR-0022).
+///
+/// PLACED placements only, mirroring [`lecturer_veto`] and [`group_veto`]
+/// rather than `collect_views`. A locked Session's Room was chosen by the
+/// caller, who has the app's own checker for it, and this rule's two nearest
+/// siblings — same entity, same values-on-`Person` split — both report
+/// placements only. (`Precedence` takes the other stance and counts locked
+/// Sessions; consistency with the siblings wins here, and reversing it is a
+/// `collect_views` swap in this one function.)
+///
+/// The detail names the PERSON and the ROOM, not just the Session: ADR-0027's
+/// lesson that a report must name whoever declared the rule, since the
+/// Session itself looks perfectly ordinary.
+pub fn lecturer_room_pin(problem: &Problem, solution: &Solution, out: &mut Vec<Violation>) {
+    if problem.constraints.lecturer_room_pin.is_empty() {
+        return;
+    }
+    for instance in &problem.constraints.lecturer_room_pin {
+        for p in problem.placement_ids() {
+            let Some(pl) = solution.get(p) else { continue };
+            let o = problem.offering_of(p);
+            if !instance.covers(&o.kind) {
+                continue;
+            }
+            // The EFFECTIVE lecturer set: a pool Offering's choice lives on
+            // the Placement, a fixed assignment's on the Offering, and
+            // exactly one of the two is ever non-empty.
+            let lecturers = || {
+                o.lecturers
+                    .iter()
+                    .copied()
+                    .chain(pl.lecturers.iter().flatten().copied())
+            };
+            if !problem.room_pin_blocks(lecturers(), pl.all_rooms()) {
+                continue;
+            }
+            // Name the specific (Person, Room) pair that failed, rather than
+            // reporting that something about this Session's rooms is wrong.
+            let culprit = lecturers()
+                .flat_map(|l| pl.all_rooms().map(move |r| (l, r)))
+                .find(|&(l, r)| problem.room_pin_blocks(std::iter::once(l), std::iter::once(r)));
+            let detail = match culprit {
+                Some((l, r)) => format!(
+                    "lecturer '{}' may not teach in room '{}'",
+                    problem.persons[l.get()].id,
+                    problem.rooms[r.get()].id
+                ),
+                None => "a pinned lecturer may not use this room".to_string(),
+            };
+            out.push(Violation {
+                constraint_id: instance.id.clone(),
+                constraint_type: ConstraintType::LecturerRoomPin,
+                session_ids: vec![problem.placement_label(p)],
+                offering_ids: vec![o.id.clone()],
+                detail,
+            });
+        }
+    }
+}
+
 pub fn lecturer_veto(problem: &Problem, solution: &Solution, out: &mut Vec<Violation>) {
     if problem.constraints.lecturer_veto.is_empty() {
         return;

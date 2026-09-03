@@ -50,6 +50,7 @@ Check any change against these. Each links to the decision behind it.
 - [ ] No exam-week or holiday logic by array slicing; resolve against the Academic Calendar
 - [ ] No per-person timezone anywhere in grid or constraint logic
 - [ ] No expression evaluation of tenant-supplied strings; typed parameters only — [ADR-0007](docs/adr/0007-fourteen-typed-constraint-types-no-dsl.md)
+- [ ] A Person's room pin is checked against the CHOSEN lecturers through `Problem::room_pin_blocks`, never precomputed into a per-Offering mask — the `LecturerVeto` shape is empty for a lecturer pool and silently permits everything — [ADR-0034](docs/adr/0034-a-room-pin-is-checked-against-the-candidate-not-precomputed-into-the-offering.md)
 - [ ] Room exclusivity is read from `Room::is_exclusive()`, never from a room id; exclusivity BETWEEN Rooms is `Problem::footprint_siblings`, expanded on the QUERY side only — marking a sibling's bit makes overlap transitive, and it is not — [ADR-0022](docs/adr/0022-a-virtual-room-is-not-an-exclusive-resource.md)
 - [ ] A preset never moves to make a violation count fall — [ADR-0025](docs/adr/0025-maxonlineshare-is-not-enforced-by-the-search.md)
 - [ ] Past Sessions excluded from recalculation, always — [ADR-0008](docs/adr/0008-one-solve-mechanism-scope-plus-lock-policy.md)
@@ -362,6 +363,31 @@ repair and `ruin_blocking`. Core `reference: None` masks NOTHING (fixtures,
 generator); the wire's "no reference / beyond the term" case maps to
 one-past-the-last-slot and masks EVERYTHING, matching what
 `classify_immovable` already said it meant.
+
+**A fixed Room for a Person is built (Calendry #124 v2, [ADR-0034](docs/adr/0034-a-room-pin-is-checked-against-the-candidate-not-precomputed-into-the-offering.md)).**
+"The workshop lead always teaches in the workshop." `Person.allowed_room_ids`
+plus a `LecturerRoomPin` switch — the `Person.blackouts` + `LecturerVeto`
+split, because a bare field has nowhere to put `applies_to_kinds`. HARD and a
+FILTER in `SearchState::statically_blocked`, not priced: it is candidate-local
+and monotone, so none of ADR-0023/0025's priced-hard reasons apply, and the
+soft reading of this axis already shipped as
+`Preference.preferred_room_features` (which two documents wrongly called
+unbuilt until this change). THE THING NOT TO UNDO: the pin is checked against
+the placement's CHOSEN lecturers via `Problem::room_pin_blocks`, NEVER
+precomputed into a per-Offering mask. `LecturerVeto` is the tempting sibling
+and the wrong one — its mask comes from `Offering::lecturers`, which is empty
+for a genuine pool, which is exactly why `LecturerVeto` + a pool has to be
+refused. A per-Offering mask here passes every fixed-assignment test and is
+silently permissive for the pool case the feature exists for; the guard is the
+mirrored pair `a_pin_binds_a_fixed_assignment` /
+`a_pin_binds_a_pool_offering`. Also: the whitelist is inverted ONCE in
+`Problem::build` into `person_room_veto`, so "empty blocks nothing" holds as
+it does for every other mask; EVERY Room of a multi-room Session must satisfy
+the pin, since "at least one" lets a hard rule be escaped by asking for more
+Rooms; and a pin never expands through `footprint_siblings` — ADR-0022 expands
+a BLOCKING question, and a permission never expands. A pin on a VIRTUAL Room
+is honoured, not refused, which is the opposite call to
+`FootprintOnVirtualRoom` and one word from being misapplied.
 
 **A scoped exam week is built (Calendry #126 sub-ask 3, [ADR-0033](docs/adr/0033-an-exam-week-is-scoped-on-the-calendar-and-charged-per-offering.md)).**
 A calendar period was term-global, so two cohorts sitting exams in different

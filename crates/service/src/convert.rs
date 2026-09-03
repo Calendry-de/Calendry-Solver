@@ -67,7 +67,7 @@ pub fn convert(input: &pb::SolverInput, scope: &pb::SolveScope) -> Result<Proble
     let room_index = index_by(&input.rooms, |r| r.id.clone());
 
     let (groups, group_index) = build_groups(input)?;
-    let persons = build_persons(input, &group_index)?;
+    let persons = build_persons(input, &group_index, &room_index)?;
     let person_index = index_by(&input.persons, |p| p.id.clone());
 
     let movement_overrides = build_movement_overrides(scope, &group_index, &person_index)?;
@@ -578,8 +578,10 @@ fn build_groups(input: &pb::SolverInput) -> Result<GroupBuild, ConvertError> {
 fn build_persons(
     input: &pb::SolverInput,
     group_index: &HashMap<String, u32>,
+    room_index: &HashMap<String, u32>,
 ) -> Result<Vec<calendry_solver_core::problem::Person>, ConvertError> {
     let groups = Resolver::new(group_index);
+    let rooms = Resolver::new(room_index);
     input
         .persons
         .iter()
@@ -630,6 +632,28 @@ fn build_persons(
                         weeks: b.weeks.clone(),
                     })
                     .collect(),
+                // REQUIRED, like `group_ids` above and unlike
+                // `preferred_room_features`. Dropping an unresolvable id
+                // SHRINKS the whitelist, and shrinking it to empty means
+                // "any Room" — so a pin that was real in the database would
+                // arrive as no pin at all, with the run reporting nothing.
+                // The inverted emptiness makes silent-drop the one reading
+                // this field cannot afford.
+                //
+                // A VIRTUAL Room is honoured here rather than refused, which
+                // is the opposite of `FootprintOnVirtualRoom` and worth
+                // saying: a footprint tag on a virtual Room could only ever
+                // be inert, because a virtual Room's occupancy row is never
+                // consulted. A pin naming one is not inert at all — "this
+                // person only ever teaches online" is a real, enforceable
+                // statement, and the pin is checked against the candidate's
+                // Room whether that Room is exclusive or not.
+                allowed_rooms: rooms.require_all(&p.allowed_room_ids, RoomIdx, |room| {
+                    ConvertError::UnknownRoom {
+                        context: format!("person '{}' allowed_room_ids", p.id),
+                        room,
+                    }
+                })?,
             })
         })
         .collect()
@@ -1357,6 +1381,13 @@ fn build_constraints(input: &pb::SolverInput) -> Result<ConstraintSet, ConvertEr
             Some(Params::ExactFrequency(_)) => set.exact_frequency.push(instance),
 
             Some(Params::LecturerVeto(_)) => set.lecturer_veto.push(instance),
+            // The room-pin counterpart. Same empty message, same split — the
+            // pin VALUES live on `Person.allowed_room_ids`, this switches
+            // enforcement on. Unlike `LecturerVeto` it needs no pool refusal:
+            // it is checked against the placement's CHOSEN lecturers rather
+            // than through a per-Offering mask, so a genuine pool is the case
+            // it handles rather than the case it breaks (ADR-0034).
+            Some(Params::LecturerRoomPin(_)) => set.lecturer_room_pin.push(instance),
             // The Group counterpart. Same empty message, same "values live on
             // the entity, this switches enforcement on" split.
             Some(Params::GroupVeto(_)) => set.group_veto.push(instance),

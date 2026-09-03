@@ -444,6 +444,9 @@ fn build_persons(params: &InstanceParams, rng: &mut Rng) -> Vec<Person> {
             groups: vec![],
             blackouts,
             preferred,
+            // No preset pins a lecturer to a Room — see the empty
+            // `lecturer_room_pin` in `build_constraints`.
+            allowed_rooms: vec![],
         });
     }
 
@@ -480,6 +483,7 @@ fn build_persons(params: &InstanceParams, rng: &mut Rng) -> Vec<Person> {
                         // lecturers only, so student preferences would be
                         // generated data nothing reads.
                         preferred: None,
+                        allowed_rooms: vec![],
                     });
                 }
             }
@@ -798,6 +802,10 @@ fn build_constraints(params: &InstanceParams, slots: &SlotTable) -> ConstraintSe
     ];
 
     ConstraintSet {
+        // Never generated: no preset pins a lecturer to a Room, so an
+        // instance here could never fire — the same reason
+        // `minimize_specialized_room_use` is empty below.
+        lecturer_room_pin: Vec::new(),
         // Never generated: the presets do not mark any Room specialized, so
         // an instance here could never fire — see `build_rooms`.
         minimize_specialized_room_use: Vec::new(),

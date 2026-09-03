@@ -130,6 +130,7 @@ pub fn person(id: &str, groups: &[u32]) -> Person {
         groups: groups.iter().map(|&g| GroupIdx(g)).collect(),
         blackouts: vec![],
         preferred: None,
+        allowed_rooms: vec![],
     }
 }
 
@@ -328,6 +329,7 @@ pub fn all_constraints() -> ConstraintSet {
         // something else entirely. `specialized_room_use` opts a fixture in.
         minimize_specialized_room_use: vec![],
         minimize_exam_week: vec![],
+        lecturer_room_pin: vec![],
         // Included, unlike `person_preference_fit` below, and the asymmetry is
         // the precedent `lecturer_veto` already set: a veto with no declared
         // windows produces an EMPTY mask, so it cannot change any fixture's
@@ -716,6 +718,23 @@ pub fn soft(id: &str, weight: f64, params: SoftParams) -> SoftInstance {
 /// Structural checks plus the given soft instances.
 pub fn with_soft(soft: Vec<SoftInstance>) -> ConstraintSet {
     ConstraintSet { soft, ..all_constraints() }
+}
+
+/// A Person pinned to the given Rooms — `LecturerRoomPin`'s values. An empty
+/// list is deliberately expressible: it is the "no pin" case, and the one a
+/// complement built without its empty guard gets wrong.
+pub fn person_pinned_to(id: &str, rooms: &[u32]) -> Person {
+    Person { allowed_rooms: rooms.iter().map(|&r| RoomIdx(r)).collect(), ..person(id, &[]) }
+}
+
+/// `all_constraints` plus the `LecturerRoomPin` switch. The pin VALUES live on
+/// the Person; this only enables enforcement, exactly as `LecturerVeto` does.
+pub fn with_room_pin(mut base: ConstraintSet, kinds: &[&str]) -> ConstraintSet {
+    base.lecturer_room_pin = vec![ConstraintInstance {
+        id: "c-room-pin".to_string(),
+        kinds: kinds.iter().map(|k| (*k).to_string()).collect(),
+    }];
+    base
 }
 
 /// `all_constraints` plus one `MinimizeExamWeek` instance. Its own helper

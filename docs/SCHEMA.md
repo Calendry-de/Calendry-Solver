@@ -111,6 +111,18 @@ about for a tracked-gap entry.
   `Problem::exam_week_cost`. `invert` and the falsification test above are
   unchanged, and both directions still read one per-Offering mask.
 
+* **`Person.allowed_room_ids`** (field 6, `repeated string`) and
+  **`LecturerRoomPin`** (`oneof params` entry 58). Rooms a Person may teach
+  in; empty means any Room the Offering allows, which is every Person before
+  the field existed. **Solver-side: done** — HARD and a FILTER, checked
+  against the placement's CHOSEN lecturers rather than precomputed into the
+  Offering, which is what makes it work for a genuine lecturer pool where
+  `LecturerVeto` has to be refused. See
+  [ADR-0034](adr/0034-a-room-pin-is-checked-against-the-candidate-not-precomputed-into-the-offering.md).
+  One refusal (an unknown Room id, since dropping it widens a whitelist);
+  three deliberate non-refusals (a virtual Room is honoured, a lecturer pool
+  is accepted, an empty list is inert). Calendry #124 v2; v1 is app-only.
+
 * **`Week.exam_group_ids`** (field 4, `repeated string`). Which Groups a week
   is an EXAM week FOR; empty means every Group, so every peer on an earlier
   pin keeps today's term-global behaviour exactly. **Solver-side: done** —
@@ -135,8 +147,18 @@ about for a tracked-gap entry.
   `per-person-preferences-design.md` §1's own criterion (grid-shaped, widens
   the row rather than needing a new table). References `Room.feature_tags`'
   vocabulary by key, the same tradeoff `required_room_features` already
-  accepts. Solver-side: not started — `PersonPreferenceFit` counts
-  `days`/`blocks` only. "Room-type preference kind".
+  accepts. **Solver-side: done** — corrected 2026-09-03, having said "not
+  started" for several releases after it shipped. `PreferenceModel::build`
+  carries `room_features` as its own axis FAMILY, and it is priced on both
+  paths: the precomputed per-placement table and, for a genuine lecturer
+  pool, the live per-person one, through
+  `Problem::preference_cost_for_placement`. "Room-type preference kind".
+
+  The staleness mattered rather than being untidy: while this sentence stood,
+  a soft person-to-room constraint looked like an open option instead of a
+  duplicate of a shipped one — see
+  [ADR-0034](adr/0034-a-room-pin-is-checked-against-the-candidate-not-precomputed-into-the-offering.md),
+  which had to establish this before it could rule the soft variant out.
 
 * **`SolverOutput.candidates`** (`SolverCandidate`). Marked **DRAFT — NOT
   COMMITTED** in the proto itself, not just here: unlike everything above,

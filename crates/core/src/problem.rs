@@ -126,6 +126,20 @@ pub struct Person {
     /// "no preference", where an empty axis on an `Unavailability` means "every
     /// value on that axis". See [`crate::preferences::Preference`].
     pub preferred: Option<Preference>,
+    /// Rooms this Person may teach in — HARD, and enforced only for Sessions
+    /// they LEAD, exactly like `blackouts` above.
+    ///
+    /// A WHITELIST, so empty means "any Room the Offering itself allows",
+    /// which is every Person before this field existed. That emptiness is
+    /// inverted relative to every mask in this module, where empty means
+    /// "nothing", so `Problem::build` stores the COMPLEMENT once — see
+    /// [`Problem::room_is_barred`]. Doing it anywhere else puts the trap
+    /// (empty = everything, or empty = nothing?) in the hot path.
+    ///
+    /// Enablement is `ConstraintSet::lecturer_room_pin`, not this field: the
+    /// values are Person data, the switch is tenant policy, and the split is
+    /// `LecturerVeto`'s.
+    pub allowed_rooms: Vec<RoomIdx>,
 }
 
 /// A blackout window.
@@ -331,6 +345,11 @@ pub struct ConstraintSet {
     /// The blackout VALUES live on `Person.blackouts`; this list only switches
     /// enforcement on.
     pub lecturer_veto: Vec<ConstraintInstance>,
+    /// HARD, filterable: a lecturer pinned to a Room only leads Sessions
+    /// placed there. The pin VALUES live on `Person::allowed_rooms`; this
+    /// list only switches enforcement on — the same split `lecturer_veto`
+    /// makes, one axis over. See [`Problem::room_is_barred`].
+    pub lecturer_room_pin: Vec<ConstraintInstance>,
     /// HARD, unary: a Session is never placed during a blackout of a Group
     /// attending it. Exactly `lecturer_veto` one entity across — the windows
     /// live on `Group.blackouts`, this list only switches enforcement on.
@@ -669,6 +688,7 @@ pub struct Enforce {
     pub group: bool,
     pub person: bool,
     pub lecturer_veto: bool,
+    pub lecturer_room_pin: bool,
     pub group_veto: bool,
     pub day_mix: bool,
     pub compactness_group: bool,
@@ -714,6 +734,7 @@ impl ConstraintSet {
             group: any_covers(&self.group_double_booking, kind),
             person: any_covers(&self.person_double_booking, kind),
             lecturer_veto: any_covers(&self.lecturer_veto, kind),
+            lecturer_room_pin: any_covers(&self.lecturer_room_pin, kind),
             group_veto: any_covers(&self.group_veto, kind),
             // Own predicate: `DayMixInstance` is not a `ConstraintInstance`
             // any more, since it carries a weight.
@@ -1426,6 +1447,7 @@ impl ProblemSpec {
 ///     groups: vec![class],
 ///     blackouts: vec![],
 ///     preferred: None,
+///     allowed_rooms: vec![],
 /// });
 /// let problem = b.build().unwrap();
 /// ```
@@ -1534,6 +1556,17 @@ pub struct Problem {
     pub rooms: Vec<Room>,
     pub groups: Vec<Group>,
     pub persons: Vec<Person>,
+    /// Per-Person room vetoes, indexed by [`PersonIdx`] — the COMPLEMENT of
+    /// [`Person::allowed_rooms`], so an empty veto blocks nothing exactly as
+    /// `veto_slots`, `group_veto_slots`, `protected_block_slots` and
+    /// `footprint_siblings` do. The inversion happens once, in `build`, so no
+    /// read site ever has to know which polarity it is holding.
+    ///
+    /// EMPTY when no Person states a pin, which is nearly every tenant.
+    ///
+    /// Read through [`Self::room_pin_blocks`] against the placement's CHOSEN
+    /// lecturers, never precomputed into the Offering — see that method.
+    person_room_veto: Vec<BitSet>,
     pub closure: GroupClosure,
     pub offerings: Vec<Offering>,
     pub placements: Vec<PlacementVar>,
@@ -2510,6 +2543,47 @@ impl Problem {
             }
         }
 
+        // THE ONE PLACE THE WHITELIST BECOMES A BLACKLIST. `Person::
+        // allowed_rooms` is a whitelist where empty means EVERY Room; every
+        // mask in this module is a blacklist where empty means NOTHING. Doing
+        // the inversion here, once, keeps that trap out of the hot path — and
+        // out of every future reader's way, since an empty row now means what
+        // an empty row means everywhere else.
+        //
+        // A Person with no pin gets a zero-capacity row: no allocation, and
+        // `BitSet::contains` is false for every index.
+        let person_room_veto: Vec<BitSet> = if persons.iter().all(|p| p.allowed_rooms.is_empty()) {
+            Vec::new()
+        } else {
+            persons
+                .iter()
+                .map(|p| {
+                    let mut veto = BitSet::new(rooms.len());
+                    // AN EMPTY PIN VETOES NOTHING, and this early return is
+                    // the whole reason the inversion lives here: the wire's
+                    // whitelist has empty meaning EVERY Room, so inverting it
+                    // naively would veto every Room and make one unconfigured
+                    // Person unplaceable everywhere.
+                    //
+                    // Full width even when there is no pin, rather than a
+                    // zero-capacity row: `BitSet::contains` debug-asserts its
+                    // index against the capacity, so a narrow row would panic
+                    // the moment anyone asked about it. The saving that
+                    // matters is the `Vec::new()` above, which covers every
+                    // tenant that pins nobody.
+                    if p.allowed_rooms.is_empty() {
+                        return veto;
+                    }
+                    for r in 0..rooms.len() {
+                        if !p.allowed_rooms.contains(&RoomIdx(r as u32)) {
+                            veto.insert(r);
+                        }
+                    }
+                    veto
+                })
+                .collect()
+        };
+
         let problem = Self {
             slots,
             reference,
@@ -2517,6 +2591,7 @@ impl Problem {
             rooms,
             groups,
             persons,
+            person_room_veto,
             closure,
             offerings: derived_offerings,
             placements,
@@ -2800,6 +2875,53 @@ impl Problem {
         if charged { offering.specialized_room_charge } else { 0.0 }
     }
 
+    /// Is any of `lecturers` pinned away from any of `rooms`? HARD — see
+    /// [`Person::allowed_rooms`] and [`ConstraintSet::lecturer_room_pin`].
+    ///
+    /// `false` outright when no Person carries a pin, which is the common
+    /// case and costs one `is_empty`.
+    ///
+    /// TAKES THE CANDIDATE'S LECTURERS, not an Offering. Where an Offering has
+    /// a genuine lecturer pool the lecturer set is chosen during the search,
+    /// so an Offering-level mask could only hold the union of its candidates'
+    /// pins (permissive — it admits a Room no eventual lecturer may use) or
+    /// their intersection (restrictive — it bars a Room the chosen lecturer
+    /// may use). `LecturerVeto` holds exactly such a mask, which is why
+    /// `LecturerVeto` plus a pool has to be refused at conversion; asking the
+    /// question against the chosen set instead is what makes a pool the case
+    /// this rule SERVES rather than the case it breaks.
+    ///
+    /// EVERY Room must satisfy EVERY pinned lecturer: a pin that only one Room
+    /// had to satisfy could be escaped by requiring more Rooms.
+    ///
+    /// The single predicate behind both the search filter
+    /// ([`crate::solution::SearchState::statically_blocked`]) and the
+    /// authoritative report ([`crate::constraints::lecturer_room_pin`]), so
+    /// the solver cannot refuse a placement it then declines to report
+    /// (ADR-0014, ADR-0022).
+    #[inline]
+    pub fn room_pin_blocks(
+        &self,
+        lecturers: impl Iterator<Item = PersonIdx>,
+        rooms: impl Iterator<Item = RoomIdx>,
+    ) -> bool {
+        if self.person_room_veto.is_empty() {
+            return false;
+        }
+        // Collected onto the stack rather than cloned per lecturer: a Session
+        // holds at most `1 + MAX_ADDITIONAL_ROOMS` Rooms, and this way the
+        // callers' iterators need not be `Clone`.
+        let mut held = [None; 1 + MAX_ADDITIONAL_ROOMS];
+        for (i, r) in rooms.take(held.len()).enumerate() {
+            held[i] = Some(r);
+        }
+        lecturers.into_iter().any(|l| {
+            self.person_room_veto
+                .get(l.get())
+                .is_some_and(|veto| held.iter().flatten().any(|r| veto.contains(r.get())))
+        })
+    }
+
     /// SOFT. Charges a placement for sitting inside this Offering's exam
     /// period — or, with an `invert` instance, for sitting outside it.
     /// ADR-0033.
@@ -2945,6 +3067,7 @@ mod tests {
                 groups: vec![GroupIdx(0)],
                 blackouts: vec![],
                 preferred: None,
+                allowed_rooms: vec![],
             },
             Person {
                 id: "pb".into(),
@@ -2952,6 +3075,7 @@ mod tests {
                 groups: vec![GroupIdx(1)],
                 blackouts: vec![],
                 preferred: None,
+                allowed_rooms: vec![],
             },
             Person {
                 id: "pc".into(),
@@ -2959,6 +3083,7 @@ mod tests {
                 groups: vec![GroupIdx(2)],
                 blackouts: vec![],
                 preferred: None,
+                allowed_rooms: vec![],
             },
         ];
 
@@ -3234,6 +3359,7 @@ mod tests {
             groups: groups.iter().map(|&g| GroupIdx(g)).collect(),
             blackouts: vec![],
             preferred: None,
+            allowed_rooms: vec![],
         }
     }
 

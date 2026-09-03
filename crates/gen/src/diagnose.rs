@@ -104,6 +104,10 @@ fn single(axis: fn(&mut Enforce), base: Enforce) -> Enforce {
     let mut probe = Enforce {
         room: true,
         lecturer: true,
+        // Gates `is_free` like the four above, so it belongs here — but no
+        // entry in `axes` probes it, deliberately: no generated instance pins
+        // a lecturer to a Room, so a sixth axis could only ever print 0.00%.
+        lecturer_room_pin: true,
         group: true,
         person: true,
         lecturer_veto: true,
@@ -166,6 +170,7 @@ fn single(axis: fn(&mut Enforce), base: Enforce) -> Enforce {
         group: e.group && base.group,
         person: e.person && base.person,
         lecturer_veto: e.lecturer_veto && base.lecturer_veto,
+        lecturer_room_pin: e.lecturer_room_pin && base.lecturer_room_pin,
         group_veto: e.group_veto && base.group_veto,
         day_mix: e.day_mix && base.day_mix,
         compactness_group: e.compactness_group && base.compactness_group,

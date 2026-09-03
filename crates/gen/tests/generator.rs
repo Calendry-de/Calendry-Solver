@@ -272,6 +272,7 @@ fn overlapping_problem(offerings: u32, sessions: u32, shared: usize) -> Problem 
         groups: vec![],
         blackouts: vec![],
         preferred: None,
+        allowed_rooms: vec![],
     };
 
     // `shared` people common to every Offering...
