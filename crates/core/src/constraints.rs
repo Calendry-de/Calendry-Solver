@@ -310,12 +310,6 @@ pub fn group_size_fits_room(problem: &Problem, solution: &Solution, out: &mut Ve
     }
 }
 
-/// HARD, unary. A lecturer is never assigned during their own blackout.
-///
-/// Evaluated over placed Sessions only: immovable occupancy is reported by the
-/// caller's own data, and re-reporting a locked Session the solver cannot move
-/// would be noise. Blackout VALUES live on `Person.blackouts`; the constraint
-/// instance only switches enforcement on.
 /// `LecturerRoomPin`: a lecturer pinned to a set of Rooms leads Sessions only
 /// in those Rooms.
 ///
@@ -384,6 +378,19 @@ pub fn lecturer_room_pin(problem: &Problem, solution: &Solution, out: &mut Vec<V
     }
 }
 
+/// HARD, unary. A lecturer is never assigned during their own blackout.
+///
+/// Evaluated over placed Sessions only: immovable occupancy is reported by the
+/// caller's own data, and re-reporting a locked Session the solver cannot move
+/// would be noise. Blackout VALUES live on `Person.blackouts`; the constraint
+/// instance only switches enforcement on.
+///
+/// Asked against the placement's EFFECTIVE lecturers — a fixed assignment's
+/// `Offering::lecturers` or a pool Offering's chosen `Placement::lecturers`,
+/// exactly one of which is non-empty — through [`Problem::lecturer_veto_blocks`],
+/// the same predicate the search filter's pool half uses (ADR-0014, ADR-0022).
+/// NOT through `Offering::veto_slots`, which is empty for a pool: reading it
+/// here would silently never report the case Calendry #131 exists for.
 pub fn lecturer_veto(problem: &Problem, solution: &Solution, out: &mut Vec<Violation>) {
     if problem.constraints.lecturer_veto.is_empty() {
         return;
@@ -398,22 +405,22 @@ pub fn lecturer_veto(problem: &Problem, solution: &Solution, out: &mut Vec<Viola
             let Some(span) = problem.slots.span(pl.start, o.duration_blocks) else {
                 continue;
             };
-            for &s in &span {
-                if !o.veto_slots.contains(s.get()) {
-                    continue;
-                }
-                let f = problem.slots.flags(s);
-                let who = o
-                    .lecturers
+            let lecturers = || {
+                o.lecturers
                     .iter()
-                    .find(|l| {
-                        problem.persons[l.get()]
-                            .blackouts
-                            .iter()
-                            .any(|b| b.matches(f))
-                    })
-                    .map(|l| problem.persons[l.get()].id.clone())
-                    .unwrap_or_default();
+                    .copied()
+                    .chain(pl.lecturers.iter().flatten().copied())
+            };
+            for &s in &span {
+                // Name the specific Person who is away, not just the Session:
+                // a Session in a blackout looks perfectly ordinary on its own.
+                let Some(culprit) =
+                    lecturers().find(|&l| problem.lecturer_veto_blocks(std::iter::once(l), &[s]))
+                else {
+                    continue;
+                };
+                let f = problem.slots.flags(s);
+                let who = problem.persons[culprit.get()].id.clone();
                 out.push(Violation {
                     constraint_id: instance.id.clone(),
                     constraint_type: ConstraintType::LecturerVeto,

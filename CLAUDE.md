@@ -50,7 +50,7 @@ Check any change against these. Each links to the decision behind it.
 - [ ] No exam-week or holiday logic by array slicing; resolve against the Academic Calendar
 - [ ] No per-person timezone anywhere in grid or constraint logic
 - [ ] No expression evaluation of tenant-supplied strings; typed parameters only — [ADR-0007](docs/adr/0007-fourteen-typed-constraint-types-no-dsl.md)
-- [ ] A Person's room pin is checked against the CHOSEN lecturers through `Problem::room_pin_blocks`, never precomputed into a per-Offering mask — the `LecturerVeto` shape is empty for a lecturer pool and silently permits everything — [ADR-0034](docs/adr/0034-a-room-pin-is-checked-against-the-candidate-not-precomputed-into-the-offering.md)
+- [ ] A Person's room pin is checked against the CHOSEN lecturers through `Problem::room_pin_blocks`, never precomputed into a per-Offering mask — a per-Offering mask is empty for a lecturer pool and silently permits everything — [ADR-0034](docs/adr/0034-a-room-pin-is-checked-against-the-candidate-not-precomputed-into-the-offering.md)
 - [ ] Room exclusivity is read from `Room::is_exclusive()`, never from a room id; exclusivity BETWEEN Rooms is `Problem::footprint_siblings`, expanded on the QUERY side only — marking a sibling's bit makes overlap transitive, and it is not — [ADR-0022](docs/adr/0022-a-virtual-room-is-not-an-exclusive-resource.md)
 - [ ] A preset never moves to make a violation count fall — [ADR-0025](docs/adr/0025-maxonlineshare-is-not-enforced-by-the-search.md)
 - [ ] Past Sessions excluded from recalculation, always — [ADR-0008](docs/adr/0008-one-solve-mechanism-scope-plus-lock-policy.md)
@@ -61,7 +61,7 @@ Check any change against these. Each links to the decision behind it.
 - [ ] Group blackouts resolve through `expand_ancestry`, never `expand_subtree`/`expand_conflict` — [ADR-0027](docs/adr/0027-group-blackouts-inherit-downward.md)
 - [ ] A rule relating two named Offerings uses the ONE relation mechanism — an ordered set plus a type — never a reference of its own — [ADR-0028](docs/adr/0028-a-relation-is-an-ordered-set-of-offerings.md)
 - [ ] Lecturer-pool selection is built: a pool Offering's `PersonPreferenceFit` cost MUST go through `PreferenceModel::cost_for` (per-person, live), never the static `table` — `Problem::preference_cost_for_placement` is the one place that decides which, and `Offering::has_lecturer_pool` is the read — [ADR-0026](docs/adr/0026-personpreferencefit-charges-the-unmet-fraction.md)
-- [ ] `LecturerVeto` combined with a genuine lecturer pool is refused at conversion, never silently inert — [ADR-0026](docs/adr/0026-personpreferencefit-charges-the-unmet-fraction.md)
+- [ ] `LecturerVeto` for a pool Offering's CHOSEN lecturers goes through `Problem::lecturer_veto_blocks` against the per-Person masks, never through `Offering::veto_slots`, which is EMPTY for a pool (it is the fixed assignment's precomputed union). The pair `a_veto_binds_a_fixed_assignment` / `a_veto_binds_a_pool_offering` guards it; the pre-#131 refusal at conversion is gone — [ADR-0034](docs/adr/0034-a-room-pin-is-checked-against-the-candidate-not-precomputed-into-the-offering.md)
 - [ ] `required_lecturer_count: 0` WITH candidates listed is refused, because the pool branch needs `required >= 1` and a zero count silently assigns EVERY candidate to every Session — the opposite of "the solver picks one". Zero with an EMPTY pool stays legitimate (a study period), and the solver cannot tell it from "not yet staffed": `required_lecturer_count` is a plain `uint32`, so absent and zero are the same bytes (Calendry #130, `crates/service/tests/zero_lecturers.rs`)
 - [ ] The solver tolerates infeasible input; the app's "warn and allow" UX produces it
 - [ ] A run with unplaced demand never reports `converged`: stagnation escalates instead, and an exhausted ladder reports `stagnated` — gated on `unplaced` alone, never the other hard counts — [ADR-0031](docs/adr/0031-convergence-is-never-declared-over-unplaced-demand.md)
@@ -100,7 +100,7 @@ the behaviour they exercise, and kept separate from the generator on purpose
 ```bash
 git clone --recurse-submodules …     # or: git submodule update --init --recursive
 
-cargo test --workspace               # 728 tests
+cargo test --workspace               # 739 tests
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo fmt --all --check
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features --locked
@@ -295,8 +295,16 @@ remembers which one a Session got, since a pool Offering's `Offering.
 lecturers` is empty — there is no fixed assignment to fall back on. See
 ADR-0026's "Lecturer-pool selection landed" addendum for what this did to
 `PersonPreferenceFit`'s precomputed table (the trap the ADR had already
-named) and why `LecturerVeto` combined with a pool is refused instead of
-fixed alongside it.
+named). `LecturerVeto` was the one instance of that trap left unfixed — a
+pool combined with it was REFUSED at conversion — until Calendry #131, when a
+real tenant's two co-teaching lecturers hit the refusal; it now reads the
+CHOSEN lecturers' per-Person masks live (`Problem::lecturer_veto_blocks`),
+ADR-0034's shape one axis over. The ticket's own proposal, a "choose one
+lecturer per Offering, then place" pre-pass, was NOT built: it would need a
+heuristic that cannot see the placement it decides ahead of, and it would
+make `LecturerConsistency` structurally inert for every pool Offering. The
+live check keeps per-Session choice and lets each person's own calendar
+decide. Part A of that ticket (a per-Group "Klassenlehrer" pin) is app-only.
 
 **`OfferingRelation` (ADR-0028) and every relation type on it are built.** A
 relation is an ordered set of Offering references plus a type —
@@ -389,10 +397,10 @@ soft reading of this axis already shipped as
 `Preference.preferred_room_features` (which two documents wrongly called
 unbuilt until this change). THE THING NOT TO UNDO: the pin is checked against
 the placement's CHOSEN lecturers via `Problem::room_pin_blocks`, NEVER
-precomputed into a per-Offering mask. `LecturerVeto` is the tempting sibling
-and the wrong one — its mask comes from `Offering::lecturers`, which is empty
-for a genuine pool, which is exactly why `LecturerVeto` + a pool has to be
-refused. A per-Offering mask here passes every fixed-assignment test and is
+precomputed into a per-Offering mask. `LecturerVeto` WAS the tempting sibling
+and the wrong one — its mask came from `Offering::lecturers`, which is empty
+for a genuine pool, which is exactly why `LecturerVeto` + a pool had to be
+refused until #131 gave it this shape. A per-Offering mask here passes every fixed-assignment test and is
 silently permissive for the pool case the feature exists for; the guard is the
 mirrored pair `a_pin_binds_a_fixed_assignment` /
 `a_pin_binds_a_pool_offering`. Also: the whitelist is inverted ONCE in

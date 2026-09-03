@@ -45,8 +45,9 @@ look like the model: a pin is unary in `(rooms, lecturers)` the same way. The
 `Offering::veto_slots` is a per-Offering slot mask built once in `Problem::build`
 from `veto_mask(&o.lecturers)`. A genuine pool Offering's `Offering::lecturers`
 is **empty**, so that mask is unconditionally empty and can never block anything
-— which is why **`LecturerVeto` combined with a pool is refused at conversion**,
-the one instance of ADR-0026's precomputation trap that was never fixed.
+— which is why **`LecturerVeto` combined with a pool was refused at conversion**,
+the one instance of ADR-0026's precomputation trap that had not been fixed when
+this was written. (It has been since — see the addendum at the end.)
 
 A `pinned_rooms: BitSet` on `Offering`, built the same way, is shorter than the
 predicate above and passes every fixed-assignment test. It is **silently
@@ -212,10 +213,10 @@ The classification rule behind every degenerate case.
 
 ## Consequences
 
-* **The pool case is supported rather than refused**, which is the whole delta
+* **The pool case is supported rather than refused**, which was the whole delta
   over `LecturerVeto` and the reason no analogue of its pool refusal is added.
   That absence has its own test, in negative space, next to the refusal it
-  deliberately does not copy.
+  deliberately did not copy.
 * **No objective term.** `Objective::soft` is untouched, the aggregate-drift
   assertion gains nothing to drift, `ruin_worst` gains no blind spot, and the
   breakdown gains no row. Filtering is cheaper than pricing here in machinery as
@@ -247,3 +248,24 @@ The classification rule behind every degenerate case.
   correction matters beyond tidiness: while those two sentences stood, "add a
   soft `PersonRoomAffinity`" looked like an open option rather than a duplicate
   type.
+
+## The wrong sibling was fixed the way this ADR said (Calendry #131)
+
+`LecturerVeto` now asks its question the way the pin does. `Problem::build`
+resolves every Person's blackouts into a per-Person slot mask once
+(`person_veto_slots`, the exact analogue of `person_room_veto`, and likewise an
+empty `Vec` when nobody states one), and `Problem::lecturer_veto_blocks` asks it
+against the candidate's chosen lecturers — the single predicate behind the
+filter's pool half and the whole authoritative report. `Offering::veto_slots`
+survives as the fixed assignment's precomputed union of those rows: one source
+of truth, and the hot path unchanged for the Offerings that have no choice to
+make. The refusal at conversion is gone, and with it the negative-space test
+above lost its contrast — it now pins that the refusal was never copied, rather
+than that a sibling still carries it.
+
+The guard is the same mirrored pair, one axis over:
+`a_veto_binds_a_fixed_assignment` / `a_veto_binds_a_pool_offering` in
+`crates/core/tests/lecturer_veto_pool.rs`, plus an end-to-end fixture where the
+only feasible timetable hands each block to whichever candidate is not away
+that block. Why the ticket's own pre-selection proposal was declined is in
+ADR-0026's matching addendum.

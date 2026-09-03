@@ -434,35 +434,6 @@ fn too_many_lecturers_required_is_refused() {
     assert_eq!(code_of(&e), Code::InvalidArgument);
 }
 
-#[test]
-fn lecturer_veto_combined_with_a_genuine_pool_is_unimplemented() {
-    // `Offering::veto_slots` is precomputed from a FIXED lecturer list before
-    // the search starts; a pool Offering has none, so the mask would be
-    // silently empty and the veto would never fire. Refused rather than
-    // silently inert.
-    let mut input = base_input();
-    input.persons = vec![common::person("p1"), common::person("p2")];
-    input.offerings = vec![pb::Offering {
-        candidate_lecturer_ids: vec!["p1".into(), "p2".into()],
-        required_lecturer_count: 1,
-        ..offering("o1", 1)
-    }];
-    input
-        .constraints
-        .push(enabled("c-veto", pb::constraint_config::Params::LecturerVeto(pb::LecturerVeto {})));
-
-    let e = reject(&input, &scope(&["o1"]));
-    assert!(
-        matches!(
-            &e,
-            ConvertError::LecturerVetoUnsupportedWithPool { offering, constraint }
-            if offering == "o1" && constraint == "c-veto"
-        ),
-        "{e}"
-    );
-    assert_eq!(code_of(&e), Code::Unimplemented);
-}
-
 // ---------------------------------------------------------------------------
 // Constraints
 // ---------------------------------------------------------------------------

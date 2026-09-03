@@ -6,12 +6,14 @@
 //! work at all, plus two inversions that look right and are not:
 //!
 //! * **The question is asked against the placement's CHOSEN lecturers**, never
-//!   a mask precomputed onto the Offering. `LecturerVeto` is the tempting
-//!   sibling to copy and is the wrong one: its mask is built from
+//!   a mask precomputed onto the Offering. `LecturerVeto` was the tempting
+//!   sibling to copy and the wrong one: its mask was built from
 //!   `Offering::lecturers`, which is EMPTY for a genuine lecturer pool — which
-//!   is why `LecturerVeto` plus a pool has to be refused at conversion, and
+//!   is why `LecturerVeto` plus a pool had to be refused at conversion, and
 //!   why copying its shape would be silently permissive for exactly the case
-//!   this rule exists to serve. `a_pin_binds_a_fixed_assignment` /
+//!   this rule exists to serve. (Calendry #131 later gave the veto this
+//!   rule's shape; `lecturer_veto_pool.rs` carries the same guard pair.)
+//!   `a_pin_binds_a_fixed_assignment` /
 //!   `a_pin_binds_a_pool_offering` are the mirrored pair that catches it, built
 //!   the way ADR-0027 builds its expansion guard: the first passes under both
 //!   implementations and exists only so the second is not vacuously green.

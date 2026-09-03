@@ -116,8 +116,9 @@ about for a tracked-gap entry.
   in; empty means any Room the Offering allows, which is every Person before
   the field existed. **Solver-side: done** — HARD and a FILTER, checked
   against the placement's CHOSEN lecturers rather than precomputed into the
-  Offering, which is what makes it work for a genuine lecturer pool where
-  `LecturerVeto` has to be refused. See
+  Offering, which is what makes it work for a genuine lecturer pool — where
+  `LecturerVeto` had to be refused until Calendry #131 gave it the same
+  shape. See
   [ADR-0034](adr/0034-a-room-pin-is-checked-against-the-candidate-not-precomputed-into-the-offering.md).
   One refusal (an unknown Room id, since dropping it widens a whitelist);
   three deliberate non-refusals (a virtual Room is honoured, a lecturer pool

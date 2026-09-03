@@ -173,15 +173,6 @@ pub enum ConvertError {
         required: u32,
         candidates: usize,
     },
-    #[error(
-        "offering '{offering}' has a genuine lecturer pool, but constraint '{constraint}' \
-         (LecturerVeto) covers its kind; a pool Offering's veto mask cannot be precomputed \
-         before the search chooses who leads each Session"
-    )]
-    LecturerVetoUnsupportedWithPool {
-        offering: String,
-        constraint: String,
-    },
 
     // -- offering relations ---------------------------------------------------
     #[error(
@@ -293,7 +284,6 @@ impl ConvertError {
             Self::PreferenceRolesUnsupported { .. }
                 | Self::ConstraintTypeUnimplemented { .. }
                 | Self::RelationKindUnimplemented { .. }
-                | Self::LecturerVetoUnsupportedWithPool { .. }
         )
     }
 }

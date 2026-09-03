@@ -196,11 +196,12 @@ that decides which of the two paths a placement gets, so
 `search::Trial::place`/`unplace` and `evaluator::score_one` cannot drift on
 it.
 
-`LecturerVeto`'s mask (`Offering::veto_slots`) has the identical precomputed-
+`LecturerVeto`'s mask (`Offering::veto_slots`) had the identical precomputed-
 before-the-search shape and was not fixed alongside it — a pool Offering
-combined with `LecturerVeto` is refused at conversion
+combined with `LecturerVeto` was refused at conversion
 (`ConvertError::LecturerVetoUnsupportedWithPool`) rather than silently
-producing an always-empty mask that can never block anything.
+producing an always-empty mask that can never block anything. That refusal
+stood until Calendry #131; see the addendum at the end of this file.
 
 ## `LecturerConsistency` landed — the type this ADR kept naming is now built
 
@@ -239,3 +240,42 @@ The wire needed no new field: `LecturerConsistency` (`oneof params` entry 30)
 had shipped empty since it was staged, on the same "id/kinds/weight and
 nothing else" shape `RoomConsistency` uses, so only the solver-side refusal
 (`ConvertError::ConstraintTypeUnimplemented`) needed to come out.
+
+## `LecturerVeto` over a pool landed (Calendry #131) — the last instance of the trap
+
+The refusal above was hit by real data: an Offering created from a template
+naming two co-teaching lecturers, `required_lecturer_count` deriving to 1 of 2,
+under a tenant whose `LecturerVeto` is on by default. Every unblocking option
+the ticket lists was refused by the tenant — drop a lecturer, switch off the
+rule, or require both — because the rule is what makes the solver honour
+everyone's stated unavailability, and "both" is not what a pool is for.
+
+The fix is the one this ADR made for `PersonPreferenceFit` and ADR-0034 then
+made for the Room pin, applied to the third and last Person-scoped rule:
+`Problem::person_veto_slots`, a per-Person blackout mask built once in
+`Problem::build`, read live against the candidate's CHOSEN lecturers through
+`Problem::lecturer_veto_blocks`. `Offering::veto_slots` stays as the fixed
+assignment's fast path and is now derived from those per-Person rows, so the
+two paths cannot disagree; `SearchState::statically_blocked` reads the mask
+for a fixed assignment and asks `lecturer_veto_blocks` for the pool's chosen
+lecturers, and the authoritative report (`constraints::lecturer_veto`) asks
+the same predicate for the placement's effective lecturers. Both presets'
+outputs are byte-identical, since no generated Offering has a pool.
+
+**The ticket asked for something else, and it was not built.** #131's Part B
+proposes a PRE-SELECTION pass: choose one lecturer per pool Offering before
+placement, then hand the search a fixed assignment so every per-Offering mask
+precomputes as before. That is the wrong layer for the same reason this ADR
+gave for the preference table: it re-fixes the lecturer set so a build-time
+structure can stay build-time, at the cost of the choice the pool exists to
+make. Concretely it needs a heuristic that decides before it can see the
+placement it decides for (the ticket names three candidates and cannot pick),
+and it makes `LecturerConsistency` structurally inert for every pool Offering
+— a question the ticket itself raises and the live check makes moot: the
+search still chooses per Session, each person's own blackouts decide where
+each candidate CAN lead, and consistency keeps pricing how often the choice
+changes. Nothing on the wire changes; `candidates.len() == required` keeps
+meaning "fixed" regardless of who fixed it.
+
+`ConvertError::LecturerVetoUnsupportedWithPool` is deleted rather than kept
+dormant: an error variant nothing can produce is documentation that lies.

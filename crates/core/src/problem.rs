@@ -358,7 +358,8 @@ pub struct ConstraintSet {
     pub exact_frequency: Vec<ConstraintInstance>,
     /// HARD, unary: a lecturer is never assigned during their own blackout.
     /// The blackout VALUES live on `Person.blackouts`; this list only switches
-    /// enforcement on.
+    /// enforcement on. Asked against the placement's CHOSEN lecturers for a
+    /// pool Offering — see [`Problem::lecturer_veto_blocks`].
     pub lecturer_veto: Vec<ConstraintInstance>,
     /// HARD, filterable: a lecturer pinned to a Room only leads Sessions
     /// placed there. The pin VALUES live on `Person::allowed_rooms`; this
@@ -995,8 +996,18 @@ pub struct Offering {
     pub enforce: Enforce,
     /// Index into the soft cost tables for this Offering's `kind`.
     pub soft_profile: usize,
-    /// Slots blocked by the blackouts of this Offering's lecturers. Unary, so
-    /// it precomputes into a mask exactly like the soft costs do.
+    /// Slots blocked by the blackouts of this Offering's FIXED lecturers —
+    /// the union of their rows in `Problem::person_veto_slots`, precomputed
+    /// once because a fixed assignment never changes. Unary, so it is a mask
+    /// exactly like the soft costs are.
+    ///
+    /// EMPTY FOR A GENUINE LECTURER POOL, whose `lecturers` is empty: the
+    /// chosen lecturers are a search-time choice carried on the Placement, so
+    /// their blackouts are read live through
+    /// [`Problem::lecturer_veto_blocks`] instead — the same two-path split
+    /// `PersonPreferenceFit` uses (ADR-0026) and `LecturerRoomPin` asks
+    /// against the candidate for (ADR-0034). Reading this mask as "the veto"
+    /// for a pool Offering is the trap: it is empty, and empty blocks nothing.
     pub veto_slots: BitSet,
     /// Slots blocked by the blackouts of this Offering's own Groups and their
     /// ANCESTORS. Separate mask from `veto_slots` rather than one union,
@@ -1582,6 +1593,21 @@ pub struct Problem {
     /// Read through [`Self::room_pin_blocks`] against the placement's CHOSEN
     /// lecturers, never precomputed into the Offering — see that method.
     person_room_veto: Vec<BitSet>,
+    /// Per-Person blackout slot masks, indexed by [`PersonIdx`] — the
+    /// `Person::blackouts` windows resolved against the grid, once. Same
+    /// polarity as every other mask here: an empty row blocks nothing.
+    ///
+    /// EMPTY when no Person states a blackout.
+    ///
+    /// The one source of truth for `LecturerVeto`. A fixed assignment's
+    /// `Offering::veto_slots` is the union of its lecturers' rows here,
+    /// precomputed because that set never changes; a pool Offering's CHOSEN
+    /// lecturers are read live through [`Self::lecturer_veto_blocks`], the
+    /// way [`Self::room_pin_blocks`] reads the Room pin (ADR-0034). Before
+    /// Calendry #131 only the precomputed half existed, and `LecturerVeto`
+    /// combined with a pool had to be refused at conversion because the
+    /// Offering's mask was unconditionally empty for it.
+    person_veto_slots: Vec<BitSet>,
     pub closure: GroupClosure,
     pub offerings: Vec<Offering>,
     pub placements: Vec<PlacementVar>,
@@ -1863,20 +1889,47 @@ impl Problem {
             })
             .collect();
 
-        // Blackout -> slot mask, resolved against the tenant's grid. Unary, so
-        // it precomputes once per Offering.
+        // Blackout -> slot mask, resolved against the tenant's grid ONCE PER
+        // PERSON. This is what `LecturerVeto` reads for a pool Offering's
+        // chosen lecturers at search time, and what a fixed assignment's
+        // per-Offering mask below is the union of — one source of truth, two
+        // read paths (ADR-0026's split, ADR-0034's shape).
+        //
+        // Empty outer `Vec` when nobody states a blackout, so a tenant that
+        // never uses the rule pays one `is_empty` per candidate. A Person with
+        // no blackout gets a full-width empty row rather than a narrow one:
+        // `BitSet::contains` debug-asserts its index against the capacity.
+        let person_veto_slots: Vec<BitSet> = if persons.iter().all(|p| p.blackouts.is_empty()) {
+            Vec::new()
+        } else {
+            persons
+                .iter()
+                .map(|p| {
+                    let mut mask = BitSet::new(slots.len());
+                    if p.blackouts.is_empty() {
+                        return mask;
+                    }
+                    for slot in slots.all() {
+                        let f = slots.flags(slot);
+                        if p.blackouts.iter().any(|b| b.matches(f)) {
+                            mask.insert(slot.get());
+                        }
+                    }
+                    mask
+                })
+                .collect()
+        };
+
+        // A FIXED assignment's lecturers never change, so their union
+        // precomputes once per Offering. A pool Offering's `lecturers` is
+        // empty and this yields an empty mask for it — correct, since its
+        // chosen lecturers are checked live instead, and NOT a statement
+        // that it has no veto.
         let veto_mask = |lecturers: &[PersonIdx]| -> BitSet {
             let mut mask = BitSet::new(slots.len());
             for l in lecturers {
-                let blackouts = &persons[l.get()].blackouts;
-                if blackouts.is_empty() {
-                    continue;
-                }
-                for slot in slots.all() {
-                    let f = slots.flags(slot);
-                    if blackouts.iter().any(|b| b.matches(f)) {
-                        mask.insert(slot.get());
-                    }
+                if let Some(row) = person_veto_slots.get(l.get()) {
+                    mask.union_with(row);
                 }
             }
             mask
@@ -2607,6 +2660,7 @@ impl Problem {
             groups,
             persons,
             person_room_veto,
+            person_veto_slots,
             closure,
             offerings: derived_offerings,
             placements,
@@ -2901,10 +2955,11 @@ impl Problem {
     /// so an Offering-level mask could only hold the union of its candidates'
     /// pins (permissive — it admits a Room no eventual lecturer may use) or
     /// their intersection (restrictive — it bars a Room the chosen lecturer
-    /// may use). `LecturerVeto` holds exactly such a mask, which is why
-    /// `LecturerVeto` plus a pool has to be refused at conversion; asking the
-    /// question against the chosen set instead is what makes a pool the case
-    /// this rule SERVES rather than the case it breaks.
+    /// may use). `LecturerVeto` used to hold exactly such a mask and had to
+    /// refuse a pool at conversion for it; since Calendry #131 it asks its
+    /// question the same way this one does — [`Self::lecturer_veto_blocks`]
+    /// — which is what makes a pool the case a Person-scoped rule SERVES
+    /// rather than the case it breaks.
     ///
     /// EVERY Room must satisfy EVERY pinned lecturer: a pin that only one Room
     /// had to satisfy could be escaped by requiring more Rooms.
@@ -2934,6 +2989,42 @@ impl Problem {
             self.person_room_veto
                 .get(l.get())
                 .is_some_and(|veto| held.iter().flatten().any(|r| veto.contains(r.get())))
+        })
+    }
+
+    /// Is any of `lecturers` blacked out at any slot of `span`? HARD — see
+    /// [`Person::blackouts`] and [`ConstraintSet::lecturer_veto`].
+    ///
+    /// `false` outright when no Person carries a blackout, which costs one
+    /// `is_empty`.
+    ///
+    /// TAKES THE CANDIDATE'S LECTURERS, not an Offering, for the reason
+    /// [`Self::room_pin_blocks`] gives: a pool Offering's lecturer set is
+    /// chosen during the search, so no per-Offering mask can hold it, and the
+    /// one `LecturerVeto` used to hold was unconditionally EMPTY for a pool —
+    /// which is why the combination had to be refused at conversion until
+    /// Calendry #131. A fixed assignment still reads its precomputed union,
+    /// `Offering::veto_slots`, in the hot path; that mask is built from the
+    /// same rows this reads, so the two cannot disagree.
+    ///
+    /// The single predicate behind the pool half of the search filter
+    /// ([`crate::solution::SearchState::statically_blocked`]) and the whole
+    /// of the authoritative report ([`crate::constraints::lecturer_veto`]),
+    /// so the solver cannot refuse a placement it then declines to report
+    /// (ADR-0014, ADR-0022).
+    #[inline]
+    pub fn lecturer_veto_blocks(
+        &self,
+        lecturers: impl Iterator<Item = PersonIdx>,
+        span: &[SlotIdx],
+    ) -> bool {
+        if self.person_veto_slots.is_empty() {
+            return false;
+        }
+        lecturers.into_iter().any(|l| {
+            self.person_veto_slots
+                .get(l.get())
+                .is_some_and(|veto| span.iter().any(|s| veto.contains(s.get())))
         })
     }
 

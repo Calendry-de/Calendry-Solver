@@ -12,8 +12,9 @@
 //!   `FootprintOnVirtualRoom` — a footprint tag on a virtual Room could only
 //!   ever be inert, while "this person only teaches online" is a real
 //!   statement;
-//! * a pin combined with a genuine lecturer POOL is ACCEPTED, in deliberate
-//!   contrast to `LecturerVeto`, which is refused in that combination;
+//! * a pin combined with a genuine lecturer POOL is ACCEPTED — the precedent
+//!   `LecturerVeto` now follows too (Calendry #131), having been refused in
+//!   that combination while its mask was still precomputed per Offering;
 //! * an empty list is inert, not a lockout.
 
 use calendry_solver::convert::convert;
@@ -95,12 +96,13 @@ fn a_pin_naming_a_virtual_room_is_accepted() {
 
 #[test]
 fn a_pin_combined_with_a_lecturer_pool_is_accepted() {
-    // NEGATIVE-SPACE TEST. `LecturerVeto` plus a genuine pool is refused
-    // (`rejections.rs`), because its mask is precomputed from
-    // `Offering::lecturers`, which a pool leaves empty. This rule asks the
-    // question against the CHOSEN lecturers instead, so a pool is the case it
-    // serves rather than the case it breaks — and this test exists to pin that
-    // we chose not to copy the refusal along with the shape.
+    // NEGATIVE-SPACE TEST. `LecturerVeto` plus a genuine pool WAS refused
+    // while its mask was precomputed from `Offering::lecturers`, which a pool
+    // leaves empty. This rule asked the question against the CHOSEN lecturers
+    // from the start, so a pool is the case it serves rather than the case it
+    // breaks — and this test exists to pin that the refusal was never copied
+    // along with the shape. (Since Calendry #131 the veto asks the same way;
+    // see `lecturer_veto_pool.rs` next door.)
     let mut input = base_input();
     input.persons = vec![pinned("p1", &["r0"]), pinned("p2", &["r1"])];
     input.offerings = vec![pb::Offering {

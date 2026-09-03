@@ -137,8 +137,11 @@ pub struct Occupant<'a> {
     /// than by Group or Person.
     pub offering: Option<crate::ids::OfferingIdx>,
     pub scheduling_pattern: crate::problem::SchedulingPattern,
-    /// Slots blocked by this Session's lecturers' blackouts. `None` for
-    /// immovable occupancy, which is never re-placed.
+    /// Slots blocked by this Session's FIXED lecturers' blackouts — see
+    /// [`Offering::veto_slots`](crate::problem::Offering::veto_slots), which
+    /// is empty for a pool Offering. `None` for immovable occupancy, which is
+    /// never re-placed. A pool Offering's CHOSEN lecturers (`pool_lecturers`)
+    /// are checked live through `Problem::lecturer_veto_blocks` instead.
     pub veto_slots: Option<&'a crate::bitset::BitSet>,
     /// The same, for the blackouts of this Session's Groups and their
     /// ancestors. `None` for the same reason.
@@ -965,38 +968,34 @@ impl SearchState {
             return true;
         }
 
-        if who.enforce.lecturer_veto
-            && let Some(veto) = who.veto_slots
-            && span.iter().any(|s| veto.contains(s.get()))
-        {
-            return true;
+        // `LecturerVeto`, in two halves over ONE set of per-Person masks.
+        //
+        // A FIXED assignment reads its Offering's precomputed union,
+        // `veto_slots`: those lecturers never change, so the mask is exact and
+        // one bit test per slot. A genuine POOL Offering's `veto_slots` is
+        // EMPTY — its lecturers are a search-time choice carried in
+        // `pool_lecturers` — so its chosen lecturers are asked live, through
+        // `Problem::lecturer_veto_blocks`, exactly as the Room pin below asks
+        // its question against the candidate (ADR-0034). Until Calendry #131
+        // only the first half existed, and the empty mask was why
+        // `LecturerVeto` plus a pool had to be refused at conversion: it
+        // passed every fixed-assignment test and blocked nothing for a pool.
+        // `a_veto_binds_a_fixed_assignment` / `a_veto_binds_a_pool_offering`
+        // are the mirrored pair that catches a regression to that shape.
+        if who.enforce.lecturer_veto {
+            if let Some(veto) = who.veto_slots
+                && span.iter().any(|s| veto.contains(s.get()))
+            {
+                return true;
+            }
+            if problem.lecturer_veto_blocks(who.pool_lecturers.iter().flatten().copied(), span) {
+                return true;
+            }
         }
 
-        // `LecturerRoomPin`: this Session's lecturers may be pinned to Rooms,
-        // and EVERY Room of the candidate must satisfy EVERY pinned lecturer.
-        //
-        // Read live off the candidate's CHOSEN lecturers rather than from a
-        // precomputed per-Offering mask, which is the one decision in this
-        // rule that matters. Where an Offering has a genuine lecturer pool the
-        // lecturer set is a search-time choice, so an Offering-level mask
-        // would have to be either the union of its candidates' pins
-        // (permissive: it would admit a Room no eventual lecturer may use) or
-        // their intersection (restrictive: it would bar a Room the chosen
-        // lecturer may). `LecturerVeto` carries exactly that Offering-level
-        // mask, which is why `LecturerVeto` plus a pool has to be refused at
-        // conversion — and why copying its shape here would be silently wrong
-        // for precisely the pool case this rule exists to serve.
-        //
-        // "Every Room" rather than "at least one": a hard pin that only one
-        // Room had to satisfy could be escaped by requiring more Rooms.
-        //
-        // NOT expanded through `Room::footprint_siblings`. A footprint expands
-        // a BLOCKING question — booking one identity of a physical space
-        // consumes the others — and a permission never expands: being allowed
-        // in room 1.1 says nothing about being allowed in the Audimax that
-        // subsumes it (ADR-0022, ADR-0034).
-        // Same shape, separate switch: a tenant may enforce one of the two
-        // vetoes without the other, so these cannot share a mask or a flag.
+        // `GroupVeto`: same shape as the fixed half above, separate switch: a
+        // tenant may enforce one of the two vetoes without the other, so
+        // these cannot share a mask or a flag.
         if who.enforce.group_veto
             && let Some(veto) = who.group_veto_slots
             && span.iter().any(|s| veto.contains(s.get()))

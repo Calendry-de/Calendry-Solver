@@ -100,7 +100,6 @@ pub fn convert(input: &pb::SolverInput, scope: &pb::SolveScope) -> Result<Proble
     fixed.extend(build_external_occupancy(input, &slots, &room_index, &rooms)?);
 
     let constraints = build_constraints(input)?;
-    check_lecturer_veto_pool_conflict(&offerings, &constraints)?;
 
     // Scope membership is carried into `Problem` rather than thrown away.
     //
@@ -147,34 +146,6 @@ pub fn convert(input: &pb::SolverInput, scope: &pb::SolveScope) -> Result<Proble
         exam_week_groups,
         ..ProblemSpec::new(slots)
     })?)
-}
-
-/// `LecturerVeto`'s mask (`Offering::veto_slots`, ADR — precomputed once in
-/// `Problem::build` from an Offering's LECTURERS) is unsound for a pool
-/// Offering: those lecturers are chosen by the search, not known before it
-/// starts, so there is nobody's blackout to precompute against. Unlike a
-/// genuine pool itself (now supported), nothing makes this combination safe
-/// yet, so it is refused explicitly rather than silently producing an
-/// always-empty mask that never blocks anything.
-fn check_lecturer_veto_pool_conflict(
-    offerings: &[OfferingSpec],
-    constraints: &ConstraintSet,
-) -> Result<(), ConvertError> {
-    if constraints.lecturer_veto.is_empty() {
-        return Ok(());
-    }
-    for o in offerings {
-        if o.eligible_lecturer_combinations.is_empty() {
-            continue;
-        }
-        if let Some(instance) = constraints.lecturer_veto.iter().find(|i| i.covers(&o.kind)) {
-            return Err(ConvertError::LecturerVetoUnsupportedWithPool {
-                offering: o.id.clone(),
-                constraint: instance.id.clone(),
-            });
-        }
-    }
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
