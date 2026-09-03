@@ -688,6 +688,31 @@ fn build_offerings(
             });
         }
 
+        // Zero required WITH candidates attached does not mean "nobody
+        // teaches this" — it silently means EVERY candidate teaches every
+        // Session, because the pool branch below needs `required >= 1` and
+        // the fallback hands `candidates` over as a fixed assignment. That is
+        // the exact outcome the app's own count derivation exists to prevent:
+        // attaching several eligible lecturers means the solver PICKS one,
+        // never that all of them are forced onto every Session together.
+        //
+        // Refused rather than reinterpreted. Deriving `1` here would silently
+        // rewrite the caller's number, and accepting it as-is is worse than
+        // inert: it over-staffs every Session, and `lecturer_required_count()`
+        // of 0 then makes `LecturerConsistency` charge for the lecturers it
+        // just added. Calendry #130.
+        //
+        // An EMPTY pool with zero required is NOT refused — see
+        // `crates/service/tests/zero_lecturers.rs` for why the solver cannot
+        // tell "deliberately unstaffed" from "not yet staffed", and why that
+        // is a wire-presence question rather than a solver one.
+        if o.required_lecturer_count == 0 && !o.candidate_lecturer_ids.is_empty() {
+            return Err(ConvertError::ZeroLecturersRequiredWithCandidates {
+                offering: o.id.clone(),
+                candidates: o.candidate_lecturer_ids.len(),
+            });
+        }
+
         if o.duration_blocks == 0 {
             return Err(ConvertError::ZeroDurationOffering { offering: o.id.clone() });
         }

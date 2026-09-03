@@ -93,6 +93,24 @@ pub enum ConvertError {
     )]
     ExamGroupsOnNonExamWeek { week: u32, groups: Vec<String> },
 
+    // -- offerings -----------------------------------------------------------
+    /// `required_lecturer_count: 0` on an Offering that still lists candidate
+    /// lecturers.
+    ///
+    /// Refused because the alternative is not inert, it is WRONG: the pool
+    /// branch needs `required >= 1`, so a zero count falls through to the
+    /// fixed-assignment path and every listed candidate is assigned to every
+    /// Session — the opposite of the "the solver picks one" rule the count is
+    /// derived to express. Calendry #130.
+    #[error(
+        "offering '{offering}' requires 0 lecturers but lists {candidates} candidate(s); that \
+         does not mean 'nobody teaches this', it means every one of those candidates is \
+         assigned to every Session, which is the opposite of what a candidate POOL is for. \
+         Send required_lecturer_count >= 1 to have the solver choose, or send no candidates \
+         at all for a genuinely unstaffed Offering"
+    )]
+    ZeroLecturersRequiredWithCandidates { offering: String, candidates: usize },
+
     // -- sessions ------------------------------------------------------------
     /// A slotless Session realizing NO Offering.
     ///
