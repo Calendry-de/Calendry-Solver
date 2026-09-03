@@ -99,15 +99,19 @@ the behaviour they exercise, and kept separate from the generator on purpose
 ```bash
 git clone --recurse-submodules …     # or: git submodule update --init --recursive
 
-cargo test --workspace               # 670 tests
+cargo test --workspace               # 728 tests
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo fmt --all --check
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features --locked
 
 CALENDRY_SOLVER_ADDR=127.0.0.1:50051 cargo run -p calendry-solver
 ```
 
-CI runs all of the above plus rustdoc and a release benchmark smoke run
-([ADR-0020](docs/adr/0020-workspace-lints-and-ci-are-the-gate.md)). Lints live in
+CI runs all of the above plus a release benchmark smoke run
+([ADR-0020](docs/adr/0020-workspace-lints-and-ci-are-the-gate.md)). The rustdoc
+line is listed above because it is the one gate the other three cannot stand in
+for: `broken_intra_doc_links` is a rustdoc lint, so a doc comment left pointing
+at a renamed item passes `test`, `clippy` and `fmt` and fails CI. Lints live in
 the root `Cargo.toml` and are inherited by every crate.
 
 Every job that compiles goes through `.github/actions/rust-build-env`, which owns

@@ -133,7 +133,7 @@ pub struct Person {
     /// which is every Person before this field existed. That emptiness is
     /// inverted relative to every mask in this module, where empty means
     /// "nothing", so `Problem::build` stores the COMPLEMENT once — see
-    /// [`Problem::room_is_barred`]. Doing it anywhere else puts the trap
+    /// [`Problem::room_pin_blocks`]. Doing it anywhere else puts the trap
     /// (empty = everything, or empty = nothing?) in the hot path.
     ///
     /// Enablement is `ConstraintSet::lecturer_room_pin`, not this field: the
@@ -363,7 +363,7 @@ pub struct ConstraintSet {
     /// HARD, filterable: a lecturer pinned to a Room only leads Sessions
     /// placed there. The pin VALUES live on `Person::allowed_rooms`; this
     /// list only switches enforcement on — the same split `lecturer_veto`
-    /// makes, one axis over. See [`Problem::room_is_barred`].
+    /// makes, one axis over. See [`Problem::room_pin_blocks`].
     pub lecturer_room_pin: Vec<ConstraintInstance>,
     /// HARD, unary: a Session is never placed during a blackout of a Group
     /// attending it. Exactly `lecturer_veto` one entity across — the windows
