@@ -4,7 +4,53 @@ Status, not decisions. The decision this records is
 [ADR-0003](adr/0003-proto-schema-as-a-pinned-submodule.md) — the schema lives in
 a separate repo, consumed as a pinned submodule.
 
-## Current pin: `03aed98` = `v0.10.0`
+## Current pin: `c989038` = `v0.19.0`
+
+Checked 2026-09-04 directly against the submodule, not against this file:
+`git tag --contains HEAD` in `vendor/calendry-proto` answers `v0.19.0`, and
+`v0.19.0` is the newest tag in the contract repo, so there is nothing to bump.
+This header had said `v0.10.0` for nine releases while the per-field entries
+below were kept current — the same drift the `v0.8.0` correction further down
+records, one section up.
+
+Two things changed around the pin rather than in it:
+
+* **The org moved.** The contract repo is `github.com/Calendry-de/Calendry-Proto`
+  (`v0.15.1`, "Calendry.de umzug"), and the npm package is
+  **`@calendry-de/calendry-proto`**, not `@mindcollaps/calendry-proto`. Every
+  `MindCollaps` URL in the sections below was true when written.
+* **Every tag from `v0.11.0` to `v0.19.0` published for real.** `publish.yml`
+  runs on the tag pushes all completed `success` (`gh run list --workflow
+  publish.yml` in the contract repo), so the app can install any of them.
+
+What arrived between `v0.10.0` and `v0.19.0`, and where each is recorded.
+Solver-side, **all of it is built**; the catalogue has no `UNIMPLEMENTED`
+type left, only the one refused `PersonPreferenceFit.roles` parameter.
+
+| Tag | What it carried | Solver record |
+|---|---|---|
+| `v0.11.0` | P2 batch: 14 constraint types (room fit, day/week aggregates, tenant policy); `DistributedPatternAdherence` / `BlockPatternAdherence` reading `Offering.scheduling_pattern`; `required_room_count` / `room_ids` and `room_feature_requirements` marked Built | `CLAUDE.md`, [ADR-0024](adr/0024-one-type-per-axis-with-flags.md) |
+| `v0.12.0` | `OfferingRelation` + `DifferentTime`; `SolveScope.minimize_inscope_movement_weight` (issue #58) | [ADR-0028](adr/0028-a-relation-is-an-ordered-set-of-offerings.md), [ADR-0008](adr/0008-one-solve-mechanism-scope-plus-lock-policy.md) |
+| `v0.13.0` | `MaxDailySessionCount`; the `(Offering, day)` cluster (`MaxOfferingSessionsPerDay`, `MaxConsecutiveOfferingBlocks`, `MinimizeOfferingDaySplit`) | ADR-0024 |
+| `v0.14.0` = `v0.15.0` | P0 batch: `TimeGrid.breaks`, `Offering.prefer_fuller_days` + `MinimizeOfferingDistinctDays`, `Room.site` + `TravelTimeBetweenRooms`, day caps, `SameTime` / `SameDays` / `SameStart` | ADR-0028 |
+| `v0.15.1` | Org move only, no schema change | — |
+| `v0.16.0` | `Precedence` relation; `SolveScope.movement_overrides` (Calendry #70) | ADR-0028, ADR-0008 |
+| `v0.16.1` | `SolverOutput.unplaced_offerings` (Calendry #119, proto PR #1); `SolverOutput.retained_session_ids`; `MinimizeSpecializedRoomUse` (Calendry #121). NOTE: this tag is NOT an ancestor of `main` — the `retained_session_ids` commit was re-applied on `main` after the PR merge — so `git describe` on the pin skips it. Its schema content is byte-identical to `v0.17.0` minus `footprint_tags`, verified by `git diff v0.16.1 v0.17.0 -- proto` | [ADR-0031](adr/0031-convergence-is-never-declared-over-unplaced-demand.md), [ADR-0032](adr/0032-the-answer-accounts-for-every-session-it-was-given.md), ADR-0024 addendum |
+| `v0.17.0` | `Room.footprint_tags` (Calendry #122) | [ADR-0022](adr/0022-a-virtual-room-is-not-an-exclusive-resource.md) |
+| `v0.18.0` | `Week.exam_group_ids` (Calendry #126) | [ADR-0033](adr/0033-an-exam-week-is-scoped-on-the-calendar-and-charged-per-offering.md) |
+| `v0.19.0` | `Person.allowed_room_ids` + `LecturerRoomPin` (Calendry #124); `Precedence.min_days_between` (Calendry #55) | [ADR-0034](adr/0034-a-room-pin-is-checked-against-the-candidate-not-precomputed-into-the-offering.md), [ADR-0035](adr/0035-room-sharing-is-a-property-of-the-room.md) |
+
+Several of those fields have their own entries in the `v0.9.0` section
+below, because that is where they were first staged PROTO ONLY and the entry
+was updated in place when the evaluator landed. Each such entry names its own
+pin. They were left where they are rather than moved, so the history of
+"staged first, built later" stays readable.
+
+The one field on the wire that is still not consumed is
+`SolverOutput.candidates`, and it is marked DRAFT in the proto itself — see
+its entry below.
+
+## Earlier pin: `03aed98` = `v0.10.0`
 
 `SolveScope.minimize_movement_weight` (field 4) was added on top of `855c145`
 while building "v2 minimize-movement repair mode" — see the correction below,
@@ -22,7 +68,7 @@ push (run `33235914770`, not a dry run — verified from its own job log, same a
   "v2, landed 2026-08-29" section for the mechanism and the decisions that were
   not obvious from the enum alone.
 
-## Previous pin: `855c145` = `v0.9.0`
+## Earlier pin: `855c145` = `v0.9.0`
 
 Published 2026-08-29: `@mindcollaps/calendry-proto@0.9.0` is on GitHub
 Packages (`publish.yml` ran for real on the tag push, not a dry run — verified
@@ -61,9 +107,10 @@ about for a tracked-gap entry.
   tested in `Occupancy::is_free`, reported under `RoomDoubleBooking`. A tag on
   a virtual Room is REFUSED (`ConvertError::FootprintOnVirtualRoom`), since a
   virtual Room's occupancy row is never consulted and the tag could only be
-  inert. App-side: the schema needs a way to group Rooms, the provisioning UI
-  needs to set it, and `toWireRoom` needs to send it — none of that exists
-  yet. "Room exclusivity groups — movable-wall configs" (Calendry #122).
+  inert. App-side: **done** (Calendry #122, closed) — `room.footprint_tags`
+  with a CHECK refusing the tag on a virtual Room, mirroring this repo's
+  refusal, and `toWireRoom` sends the tags verbatim. "Room exclusivity groups
+  — movable-wall configs".
 
 * **`Room.feature_quantities`** and **`Offering.room_feature_requirements`**
   (with `RoomFeatureQuantity` / `RoomFeatureRequirement`). Today's
@@ -71,24 +118,35 @@ about for a tracked-gap entry.
   workstations" degrades to "needs a workstation". The new fields carry a
   count on both the supply (Room) and the demand (Offering) side;
   `min_quantity` is `optional` for the same zero-vs-absent reason
-  `Preference.weight_multiplier` is. Solver-side: not started — eligibility
-  still checks `feature_tags` membership alone. "Equipment quantity cannot
-  cross the wire".
+  `Preference.weight_multiplier` is. **Solver-side: done** (marked Built in
+  the contract at `v0.11.0`) — `crates/service/src/convert.rs` checks
+  `room_feature_requirements_met` against `Room.feature_quantities` as part
+  of per-Room eligibility, so "needs 24 workstations" excludes the room with
+  12. "Equipment quantity cannot cross the wire" (board: Done).
 
 * **`Session.room_ids`** and **`PlacedSession.room_ids`**, plus
   `Offering.required_room_count`. `room_id` (singular) remains the primary
   Room and is unchanged for a single-room Session; the plural field carries
   the full set, `room_id` included, only when more than one Room is occupied
-  simultaneously. Solver-side: not started — the search assigns exactly one
-  Room per placement regardless of `required_room_count`. "A Session with more
-  than one Room cannot cross the wire".
+  simultaneously. **Solver-side: done** (marked Built in the contract at
+  `v0.11.0`) — `convert.rs` enumerates `room_combinations` for
+  `required_room_count > 1` (refused above `MAX_ROOMS_PER_SESSION`),
+  construction and repair choose among them the same way they choose among
+  lecturer combinations, and every Room of the set must pass a Person's room
+  pin (ADR-0034). "A Session with more than one Room cannot cross the wire"
+  (Calendry #10, #59; both Done).
 
 * **`Offering.scheduling_pattern`** (`SchedulingPattern`: distributed vs.
-  block/intensive). Metadata only — nothing reads it yet, so every Offering
-  solves exactly as it does today regardless of what is set. Which
-  enforcement shape this takes (a per-Offering aggregate vs. a constraint type
-  per pattern) is still open; this stages the classification data without
-  committing to that answer. "Scheduling pattern per Offering".
+  block/intensive). Staged as metadata; **now read** — the enforcement shape
+  resolved to one constraint type per pattern, `DistributedPatternAdherence`
+  and `BlockPatternAdherence` (contract `v0.11.0`), each a per-Offering
+  aggregate priced only for Offerings tagged with its pattern. `DISTRIBUTED`
+  costs "distinct weekly `(weekday, block)` slots, minus one", which is also
+  the weekly-template primitive [ADR-0030](adr/0030-a-rotating-block-pattern-decomposes-into-parts-that-already-exist.md)
+  points at. "Scheduling pattern per Offering" (Calendry #1, Done). The
+  lecturer-facing control surface is Calendry #28, app-side; its third mode,
+  "multiple in a day", is `Offering.prefer_fuller_days` +
+  `MinimizeOfferingDistinctDays` (`v0.14.0`), already built here.
 
 * **`MinimizeExamWeek.invert`**. One flag, not a new type — the same
   `MinimizeRoomRank.invert` / `MinimizeBlockUsage` precedent. `false` (absent)
@@ -292,17 +350,25 @@ plus `package.json` — no `src/generated`, no `node_modules`, no `.proto`.
 
 **That repo is not checked out here. Do not attempt this from the solver repo.**
 
-* Add `calendry-proto` as a submodule there too, pinned to the same **`v0.7.0`**
-  this repo is on.
-* Install and import `@mindcollaps/calendry-proto@0.7.0`, and wire the gRPC
-  client. Note that only `0.2.0` was ever confirmed published — whether the later
-  tags reached GitHub Packages has not been checked from here.
-* **Add an `.npmrc` with a GitHub Packages token.** The registry requires
-  authentication even to *install* a public package — this hits local dev, the
-  docker-compose build, and CI. `calendry` has no `.npmrc` today. This is the one
-  part of the pipeline never exercised end to end.
-* Add `PersonDoubleBooking` to the app's manual-edit constraint evaluator. See
-  below.
+The integration this section once listed as unbuilt exists: the board's
+app-side comments (Calendry #22, #24, #119, #122) describe `solverInput.ts`
+assembling a full `SolverInput` snapshot per Generation, a gRPC client driving
+`StartRun` / `GetStatus`, and a materialization step applying the result. What
+this repo still cannot verify from here, and should not assume:
+
+* **Which pin the app is on.** Every tag through `v0.19.0` is published as
+  `@calendry-de/calendry-proto`; whether the app consumes `v0.19.0` is a
+  question for that repo. The fields the board still lists as awaiting the app
+  are `SolverOutput.unplaced_offerings` (#119), `Person.allowed_room_ids`
+  (#124), `Week.exam_group_ids` (#126), `SolveScope.movement_overrides` (#70),
+  `MeetTogether` (#55) and a banked Session sent with `start_slot` unset (#22).
+  ADR-0033 records why the exam-week field must be gated on the pin rather
+  than treated as benign when omitted.
+* **The `.npmrc` / GitHub Packages install path.** The registry requires
+  authentication even to *install* a public package. Whether local dev, the
+  docker-compose build and CI all carry a token was never checked from here.
+* `PersonDoubleBooking` in the app's manual-edit constraint evaluator. See
+  below; not confirmed either way.
 
 ### Cross-repo follow-up: `PersonDoubleBooking` in the app
 
